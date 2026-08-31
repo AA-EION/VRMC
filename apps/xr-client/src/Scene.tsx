@@ -1,8 +1,31 @@
-import { useRef } from 'react';
+import { useEffect, useRef } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
-import type { Group } from 'three';
+import { Vector3 } from 'three';
+import type { Camera, Group, Scene as ThreeScene, WebGLRenderer } from 'three';
 import { InstrumentSurface } from './devices/InstrumentSurface.js';
 import type { Engine } from './Engine.js';
+
+/**
+ * Debug handle, published on `window`.
+ *
+ * Two uses. It is the seam the headless render test reaches through to inspect
+ * the live scene graph, and it is how you introspect a running session from the
+ * headset — Quest Browser supports remote devtools, and being able to read the
+ * engine's state while wearing the device is worth far more than the handful of
+ * bytes it costs.
+ */
+declare global {
+  interface Window {
+    __vrmc?: {
+      engine: Engine;
+      scene: ThreeScene;
+      renderer: WebGLRenderer;
+      camera: Camera;
+      /** Enough of three to project a point, for framing checks. */
+      THREE: { Vector3: typeof Vector3 };
+    };
+  }
+}
 
 export interface SceneProps {
   engine: Engine;
@@ -17,6 +40,15 @@ export interface SceneProps {
  */
 export function Scene({ engine }: SceneProps): React.ReactElement {
   const gl = useThree((state) => state.gl);
+  const scene = useThree((state) => state.scene);
+  const camera = useThree((state) => state.camera);
+
+  useEffect(() => {
+    window.__vrmc = { engine, scene, renderer: gl, camera, THREE: { Vector3 } };
+    return () => {
+      delete window.__vrmc;
+    };
+  }, [engine, scene, gl, camera]);
 
   useFrame((_state, delta, xrFrame) => {
     engine.update(xrFrame as XRFrame | undefined, gl.xr.getReferenceSpace(), delta);

@@ -111,14 +111,20 @@ Turborepo handles the dependency order and caches results, so a second
 
 ## Status
 
-Everything here is built and tested: 94 tests cover the codec, both layouts,
-the poke and knob state machines, the placement maths, the MIDI translation,
-and the two transports over real sockets. Two of them are allocation
-regression tests that simulate an hour of playing and assert the heap does not
-grow — the zero-allocation claim the real-time design rests on is checked, not
-assumed.
+Everything here is built and tested: 94 unit tests cover the codec, both
+layouts, the poke and knob state machines, the placement maths, the MIDI
+translation, and the two transports over real sockets. Two of them are
+allocation regression tests that simulate an hour of playing and assert the heap
+does not grow — the zero-allocation claim the real-time design rests on is
+checked, not assumed.
 
-What has **not** been verified is the parts that need hardware this was not
-built on: the CoreMIDI and teVirtualMIDI backends have no test coverage on
-their respective platforms, and no latency figure in these docs is a
-measurement. See [Architecture](docs/ARCHITECTURE.md#what-is-not-yet-verified).
+On top of that, a headless render test loads the built client in Chromium and
+makes 21 assertions about the live 3D scene, including driving the real poke
+detector with synthetic fingertips and confirming a strike lights the right pad
+and emits the right note.
+
+What has **not** been verified is everything needing hardware this was not built
+on: no XR session has ever run, so passthrough and hand tracking are unproven;
+the CoreMIDI and teVirtualMIDI backends have never run on macOS or Windows; and
+no latency figure in these docs is a measurement. See
+[Architecture](docs/ARCHITECTURE.md#what-is-not-yet-verified).

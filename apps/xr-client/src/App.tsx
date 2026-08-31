@@ -10,6 +10,13 @@ import { detectSupport, isBlending, startSession, type XrSupport } from './xr/se
 /** Remember the bridge address between visits; it rarely changes. */
 const URL_STORAGE_KEY = 'vrmc.bridgeUrl';
 
+/**
+ * Desktop preview viewpoint: roughly where a seated player's eyes are,
+ * looking down at the panels on the desk.
+ */
+const PREVIEW_CAMERA: [number, number, number] = [0, 1.32, 0.42];
+const PREVIEW_TARGET: [number, number, number] = [0, 0.86, -0.45];
+
 function defaultBridgeUrl(): string {
   try {
     const saved = localStorage.getItem(URL_STORAGE_KEY);
@@ -129,12 +136,19 @@ export function App(): React.ReactElement {
         // alpha:true is what lets passthrough show through. With an opaque
         // buffer the compositor has nothing to blend and the room disappears.
         gl={{ alpha: true, antialias: true, powerPreference: 'high-performance' }}
-        camera={{ fov: 60, near: 0.01, far: 20, position: [0, 1.5, 0.6] }}
-        onCreated={({ gl, scene }) => {
+        // Only used outside XR — in a session the headset drives the camera.
+        // It still has to frame the instruments, or the page looks broken
+        // before you put the headset on: aimed straight down -Z from standing
+        // height, the panels sit below the frustum and nothing is visible.
+        camera={{ fov: 60, near: 0.01, far: 20, position: PREVIEW_CAMERA }}
+        onCreated={({ gl, scene, camera }) => {
           rendererRef.current = gl;
           gl.setClearAlpha(0);
-          // Any background at all would sit in front of the cameras.
+          // Any background at all would sit in front of the passthrough
+          // cameras, turning a mixed-reality app back into a VR one.
           scene.background = null;
+          camera.lookAt(...PREVIEW_TARGET);
+          camera.updateProjectionMatrix();
         }}
       >
         <Scene engine={engine} />

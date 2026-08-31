@@ -37,6 +37,9 @@ export const KEY_THEME: SurfaceTheme = {
   plate: '#0b0e17',
 };
 
+/** Seconds a released zone takes to fade back to its resting colour. */
+const FADE_SECONDS = 0.18;
+
 /**
  * A handle for driving zone highlights from the frame loop.
  *
@@ -48,8 +51,13 @@ export class SurfaceHighlighter {
   private mesh: InstancedMesh | null = null;
   private readonly idle: Color[];
   private readonly active: Color;
-  /** Remaining flash time per zone, in seconds. */
-  private readonly decay: Float32Array;
+  /**
+   * Remaining fade time per zone, in seconds. Only meaningful once a zone has
+   * been released — a held zone stays at full brightness and does not fade.
+   */
+  private readonly fade: Float32Array;
+  /** 1 while a finger is on the zone. */
+  private readonly held: Uint8Array;
   private readonly scratch = new Color();
 
   constructor(locator: ZoneLocator, theme: SurfaceTheme) {
@@ -57,7 +65,8 @@ export class SurfaceHighlighter {
     const idleAccidental = new Color(theme.idleAccidental);
     this.idle = locator.zones.map((z) => (z.accidental ? idleAccidental : idleColor));
     this.active = new Color(theme.active);
-    this.decay = new Float32Array(locator.zones.length);
+    this.fade = new Float32Array(locator.zones.length);
+    this.held = new Uint8Array(locator.zones.length);
   }
 
   attach(mesh: InstancedMesh | null): void {
@@ -65,33 +74,47 @@ export class SurfaceHighlighter {
     if (mesh !== null) this.paintAll();
   }
 
-  /** Flash a zone. `velocity` scales how bright the flash starts. */
-  strike(zoneIndex: number, velocity: number): void {
-    if (zoneIndex < 0 || zoneIndex >= this.decay.length) return;
-    this.decay[zoneIndex] = 0.08 + (velocity / 127) * 0.12;
+  /**
+   * Light a zone and keep it lit for as long as the finger is on it.
+   *
+   * A key you are holding down has to look held — that is how you see which
+   * notes are sounding, and it is what the sustained sound is telling you
+   * anyway. Only the release starts the fade.
+   */
+  strike(zoneIndex: number, _velocity: number): void {
+    if (zoneIndex < 0 || zoneIndex >= this.fade.length) return;
+    this.held[zoneIndex] = 1;
+    this.fade[zoneIndex] = FADE_SECONDS;
     this.paint(zoneIndex, 1);
   }
 
-  /** Held zones stay lit; `release` starts the fade. */
+  /** Begin the fade back to the resting colour. */
   release(zoneIndex: number): void {
-    if (zoneIndex < 0 || zoneIndex >= this.decay.length) return;
-    if (this.decay[zoneIndex]! <= 0) this.decay[zoneIndex] = 0.06;
+    if (zoneIndex < 0 || zoneIndex >= this.fade.length) return;
+    this.held[zoneIndex] = 0;
+    this.fade[zoneIndex] = FADE_SECONDS;
   }
 
-  /** Fade active zones. Call once per frame with the frame delta in seconds. */
+  /** Fade released zones. Call once per frame with the frame delta in seconds. */
   update(dt: number): void {
     const mesh = this.mesh;
     if (mesh === null) return;
     let dirty = false;
-    for (let i = 0; i < this.decay.length; i++) {
-      const remaining = this.decay[i]!;
+    for (let i = 0; i < this.fade.length; i++) {
+      if (this.held[i] === 1) continue; // stays lit until released
+      const remaining = this.fade[i]!;
       if (remaining <= 0) continue;
       const next = remaining - dt;
-      this.decay[i] = next > 0 ? next : 0;
-      this.paint(i, next > 0 ? Math.min(1, next / 0.12) : 0);
+      this.fade[i] = next > 0 ? next : 0;
+      this.paint(i, next > 0 ? next / FADE_SECONDS : 0);
       dirty = true;
     }
     if (dirty && mesh.instanceColor !== null) mesh.instanceColor.needsUpdate = true;
+  }
+
+  /** True while a zone is lit because a finger is on it. */
+  isHeld(zoneIndex: number): boolean {
+    return this.held[zoneIndex] === 1;
   }
 
   private paint(zoneIndex: number, mix: number): void {
@@ -148,8 +171,14 @@ export function InstrumentSurface({
   );
 
   const labelTexture = useMemo(
-    () => (showLabels ? buildLabelTexture(locator) : null),
-    [locator, showLabels],
+    () =>
+      showLabels
+        ? buildLabelTexture(locator, {
+            idle: theme.idle,
+            idleAccidental: theme.idleAccidental,
+          })
+        : null,
+    [locator, showLabels, theme.idle, theme.idleAccidental],
   );
 
   const plateMaterial = useMemo(
@@ -207,6 +236,15 @@ export function InstrumentSurface({
   const plateW = locator.width + margin * 2;
   const plateH = locator.height + margin * 2;
 
+  /*
+   * Labels sit just above the tallest zone, not on the backing plate.
+   *
+   * The zones are raised boxes, so a label plane at the plate's depth is behind
+   * their front faces and is simply occluded — which renders as no labels at
+   * all rather than as anything that looks wrong.
+   */
+  const labelZ = locator.zones.reduce((max, z) => Math.max(max, z.raise), 0) + 0.0008;
+
   return (
     <group position={position} quaternion={quaternion}>
       {/* Backing plate, sunk just behind the zones. */}
@@ -215,7 +253,7 @@ export function InstrumentSurface({
       </mesh>
 
       {labelTexture !== null && (
-        <mesh position={[locator.width / 2, locator.height / 2, 0.0005]}>
+        <mesh position={[locator.width / 2, locator.height / 2, labelZ]}>
           <planeGeometry args={[locator.width, locator.height]} />
           <meshBasicMaterial map={labelTexture} transparent depthWrite={false} />
         </mesh>

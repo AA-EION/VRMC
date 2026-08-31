@@ -17,3 +17,4 @@ unity/Logs/
 unity/UserSettings/
 *.csproj
 *.sln
+render-smoke.png

@@ -148,10 +148,34 @@ evidence supports:
   path could not run here either — this build environment has no
   `/dev/snd/seq`, which is why backend construction is guarded and a missing
   MIDI system is non-fatal rather than a crash on startup.
-- **The client has not run in a headset.** It builds, typechecks, and its logic
-  is covered by tests, but no part of the WebXR session path — passthrough blend
-  mode, `fillPoses` availability, hand joint ordering — has been confirmed
-  against a real runtime.
+- **The client has not run in a headset.** The 3D scene itself *is* verified —
+  see below — but nothing inside an XR session is: `immersive-ar` availability,
+  the passthrough blend mode, `fillPoses` support and hand joint ordering have
+  all been written against the specification and never against a real runtime.
 
 The tests cover what can be covered without hardware, which is most of the
 difficult logic and none of the platform integration.
+
+### What the headless render test does cover
+
+`apps/xr-client/test/render-smoke.mjs` loads the built app in Chromium with
+software WebGL and checks 21 properties of the running scene: that the React
+tree mounts with no uncaught exceptions, a WebGL 2 context is created, both
+instrument surfaces build as instanced meshes with all 41 zones, the frame loop
+advances, geometry rasterises, and both surfaces fall inside the preview
+camera's frustum.
+
+It then drives the *real* `PokeDetector` and `NoteRouter` with synthetic
+fingertip positions and asserts a strike on pad 1 produces MIDI note 36 with a
+velocity derived from approach speed, lights that pad in the instance colour
+buffer, and keeps it lit while held. That is the only test covering detection,
+routing, feedback and the GPU together — the pieces are unit-tested in
+`packages/interaction`, but the wiring between them exists only in the client.
+
+Three real bugs came out of writing it, none of which any amount of type
+checking would have caught: the preview camera framed the instruments out of
+shot entirely, the label plane was occluded by the raised zone boxes, and
+`SurfaceHighlighter` faded held zones despite documenting that it did not.
+
+Run it alone with `pnpm --filter @vrmc/xr-client test`. It skips cleanly when no
+Chromium is available; set `CHROMIUM_PATH` to point at one.
