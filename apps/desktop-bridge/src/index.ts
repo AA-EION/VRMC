@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 import { networkInterfaces } from 'node:os';
+import { DeviceId } from '@vrmc/protocol';
 import { ArgError, parseArgs, USAGE, type BridgeConfig } from './config.js';
 import { Router } from './core/Router.js';
-import { listPorts, openBestPort } from './midi/openPort.js';
+import { DEFAULT_PORT_NAME_TEMPLATE, DeviceManager } from './devices/DeviceManager.js';
+import { listPorts } from './midi/openPort.js';
 import { UdpServer } from './net/UdpServer.js';
 import { WsServer } from './net/WsServer.js';
 
@@ -55,23 +57,44 @@ async function main(): Promise<void> {
     return;
   }
 
-  const { sink, notes } = await openBestPort({
-    name: config.portName,
-    noMidi: config.noMidi,
-    loopbackPattern: config.loopbackPattern,
-  });
-  for (const note of notes) log(note);
+  // Declared before the manager so its callbacks can reach the server, and
+  // before the server so the server can read the device count.
+  let ws: WsServer | null = null;
 
-  const router = new Router(sink, {
+  const devices = new DeviceManager(
+    {
+      onLed: (deviceId, ledIndex, r, g, b, blink) => {
+        ws?.queueLed(deviceId, ledIndex, r, g, b, blink);
+      },
+      onRosterChange: () => ws?.sendRoster(devices.roster()),
+      onLog: log,
+    },
+    {
+      noMidi: config.noMidi,
+      loopbackPattern: config.loopbackPattern,
+      portNameTemplate: config.portNameTemplate,
+    },
+  );
+
+  // The original surfaces are one plain MIDI port with no hardware identity,
+  // created up front so they behave exactly as they did before Launchpads
+  // existed. Pads, keys and knobs share it and are told apart by their event
+  // ids. Emulated hardware is spawned on demand from the headset instead.
+  await devices.add(DeviceId.PADS, config.portName);
+  devices.alias(DeviceId.KEYS, DeviceId.PADS);
+  devices.alias(DeviceId.KNOBS, DeviceId.PADS);
+
+  const router = new Router(devices, {
     onPanic: (released) => log(`panic: released ${released} note(s)`),
     onHello: (name) => log(`client identified as "${name}"`),
     onBye: () => log('client said goodbye'),
+    onRosterChange: () => ws?.sendRoster(devices.roster()),
     // Rate-limited by the caller below; a flood of malformed packets should not
     // itself become the thing that stalls the process.
     onMalformed: throttle((reason) => log(`dropped malformed packet: ${reason}`), 1000),
   });
 
-  const ws = config.enableWs
+  ws = config.enableWs
     ? new WsServer(router, {
         port: config.wsPort,
         host: config.host,
@@ -80,6 +103,7 @@ async function main(): Promise<void> {
         onLog: log,
       })
     : null;
+  if (ws !== null) ws.deviceCount = () => devices.count;
 
   const udp = config.enableUdp
     ? new UdpServer(router, { port: config.udpPort, host: config.host, onLog: log })
@@ -98,7 +122,7 @@ async function main(): Promise<void> {
   }
 
   const scheme = ws?.secure === true ? 'wss' : 'ws';
-  log(`MIDI out: "${sink.name}" (${sink.backend}${sink.virtual ? ', virtual' : ''})`);
+  log(`${devices.count} device(s) open; emulated hardware is added from the headset`);
   if (ws !== null) {
     for (const address of reachableAddresses(config.host)) {
       log(`listening  ${scheme}://${address}:${config.wsPort}`);
@@ -126,12 +150,13 @@ async function main(): Promise<void> {
     closing = true;
     log(`${signal} — shutting down`);
     if (statsTimer !== null) clearInterval(statsTimer);
-    // Release before closing the port: once it is gone there is nothing left to
-    // send the Note Offs through, and whatever was sounding stays sounding.
+    // Release before closing the ports: once they are gone there is nothing
+    // left to send the Note Offs through, and whatever was sounding stays
+    // sounding until the DAW is restarted.
     const released = router.releaseAll();
     if (released > 0) log(`released ${released} sounding note(s)`);
     await Promise.all([ws?.close(), udp?.close()]);
-    sink.close();
+    devices.removeAll();
     process.exit(0);
   };
 

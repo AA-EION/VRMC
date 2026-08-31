@@ -2,7 +2,15 @@ import { createServer as createHttpServer, type Server as HttpServer } from 'nod
 import { createServer as createHttpsServer } from 'node:https';
 import { readFileSync } from 'node:fs';
 import { WebSocketServer, type WebSocket } from 'ws';
-import { PacketKind, PacketWriter } from '@vrmc/protocol';
+import {
+  PacketKind,
+  PacketWriter,
+  ledCapacity,
+  writeDeviceState,
+  writeLedEntry,
+  writeLedHeader,
+  type DeviceStateEntry,
+} from '@vrmc/protocol';
 import type { Router } from '../core/Router.js';
 
 export interface WsOptions {
@@ -35,10 +43,26 @@ export class WsServer {
   private readonly options: WsOptions;
   private readonly router: Router;
 
-  /** One reusable writer for pong replies. Only ever used on this thread. */
+  /** One reusable writer for replies. Only ever used on this thread. */
   private readonly replyWriter = new PacketWriter();
 
+  /**
+   * LED changes accumulated since the last flush.
+   *
+   * A DAW redrawing a Launchpad emits its writes one LED at a time, so a single
+   * scene change can be sixty-odd separate callbacks within a millisecond.
+   * Sending a packet each would put sixty frames on the wire for one visual
+   * change; coalescing to one packet per tick collapses them. The delay is
+   * bounded by the flush interval and is well under a display frame.
+   *
+   * Keyed by `deviceId * 256 + ledIndex` so a later write to the same LED
+   * replaces the earlier one rather than both being sent.
+   */
+  private readonly pendingLeds = new Map<number, number>();
+  private ledFlushTimer: NodeJS.Timeout | null = null;
+
   private clients = 0;
+  private readonly sockets = new Set<WebSocket>();
 
   constructor(router: Router, options: WsOptions) {
     this.router = router;
@@ -73,7 +97,7 @@ export class WsServer {
           transport: 'websocket',
           secure: this.secure,
           clients: this.clients,
-          port: this.router.currentSink.name,
+          devices: this.deviceCount(),
         }),
       );
     });
@@ -83,6 +107,7 @@ export class WsServer {
 
     wss.on('connection', (socket, req) => {
       this.clients++;
+      this.sockets.add(socket);
       const peer = req.socket.remoteAddress ?? 'unknown';
 
       // Nagle batches small writes to save packets. Our packets *are* small and
@@ -103,6 +128,7 @@ export class WsServer {
 
       socket.on('close', () => {
         this.clients--;
+        this.sockets.delete(socket);
         // The client is gone and cannot send the Note Offs it owes. Release
         // whatever it left sounding, or the synth holds those voices forever.
         const released = this.router.releaseAll();
@@ -126,6 +152,91 @@ export class WsServer {
     });
   }
 
+  /** How many devices the bridge currently has open. Set by the owner. */
+  deviceCount: () => number = () => 0;
+
+  /**
+   * Queue an LED change for the headset.
+   *
+   * Called from the MIDI input callback, which is the DAW's thread of control —
+   * so it does nothing but record the value and arm a timer.
+   */
+  queueLed(deviceId: number, ledIndex: number, r: number, g: number, b: number, blink: number): void {
+    if (this.clients === 0) return;
+    this.pendingLeds.set(
+      deviceId * 256 + ledIndex,
+      (r & 0x3f) | ((g & 0x3f) << 6) | ((b & 0x3f) << 12) | ((blink & 0x3) << 18),
+    );
+    if (this.ledFlushTimer === null) {
+      // setImmediate rather than a millisecond timer: this fires at the end of
+      // the current event-loop turn, so a burst of writes from one DAW redraw
+      // coalesces into one packet with no added latency.
+      this.ledFlushTimer = setImmediate(() => this.flushLeds()) as unknown as NodeJS.Timeout;
+    }
+  }
+
+  /** Send the accumulated LED changes, splitting across packets if needed. */
+  private flushLeds(): void {
+    this.ledFlushTimer = null;
+    if (this.pendingLeds.size === 0) return;
+
+    // Group by device, since one packet carries one device's LEDs.
+    const byDevice = new Map<number, Array<[number, number]>>();
+    for (const [key, packed] of this.pendingLeds) {
+      const deviceId = Math.floor(key / 256);
+      const ledIndex = key % 256;
+      let list = byDevice.get(deviceId);
+      if (list === undefined) {
+        list = [];
+        byDevice.set(deviceId, list);
+      }
+      list.push([ledIndex, packed]);
+    }
+    this.pendingLeds.clear();
+
+    const capacity = ledCapacity();
+    for (const [deviceId, entries] of byDevice) {
+      for (let start = 0; start < entries.length; start += capacity) {
+        const chunk = entries.slice(start, start + capacity);
+        const w = this.replyWriter;
+        w.begin(PacketKind.LED_UPDATE);
+        writeLedHeader(w, deviceId, chunk.length);
+        for (const [ledIndex, packed] of chunk) {
+          writeLedEntry(
+            w,
+            ledIndex,
+            packed & 0x3f,
+            (packed >> 6) & 0x3f,
+            (packed >> 12) & 0x3f,
+            (packed >> 18) & 0x3,
+          );
+        }
+        this.broadcast(w.finish(performance.now()));
+      }
+    }
+  }
+
+  /** Push the device roster to every connected headset. */
+  sendRoster(entries: readonly DeviceStateEntry[]): void {
+    if (this.clients === 0) return;
+    const w = this.replyWriter;
+    w.begin(PacketKind.DEVICE_STATE);
+    if (!writeDeviceState(w, entries)) return;
+    this.broadcast(w.finish(performance.now()));
+  }
+
+  /**
+   * Send to every client.
+   *
+   * `frame` aliases the writer's buffer, and `ws.send` copies synchronously, so
+   * it stays valid across the loop.
+   */
+  private broadcast(frame: Uint8Array): void {
+    for (const socket of this.sockets) {
+      if (socket.readyState === socket.OPEN) socket.send(frame, { binary: true });
+    }
+  }
+
   private sendPong(socket: WebSocket, clientTime: number, serverTime: number): void {
     const w = this.replyWriter;
     w.begin(PacketKind.PONG);
@@ -136,7 +247,9 @@ export class WsServer {
   }
 
   async close(): Promise<void> {
+    if (this.ledFlushTimer !== null) clearImmediate(this.ledFlushTimer as unknown as NodeJS.Immediate);
     this.wss?.clients.forEach((c) => c.terminate());
+    this.sockets.clear();
     await new Promise<void>((resolve) => {
       if (this.http === null) return resolve();
       this.http.close(() => resolve());

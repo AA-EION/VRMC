@@ -1,16 +1,16 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
 import {
   DecodeError,
-  EventType,
-  MidiStatus,
   PacketKind,
   PacketReader,
   describeDecodeError,
-  split14,
-  statusForEventType,
+  readDeviceAdd,
+  readDeviceRemove,
+  readSysEx,
   type EventVisitor,
 } from '@vrmc/protocol';
-import type { MidiSink } from '../midi/MidiSink.js';
-import { NoteTracker } from '../midi/NoteTracker.js';
+import type { DeviceManager } from '../devices/DeviceManager.js';
 import { LinkStats } from './Stats.js';
 
 /**
@@ -27,25 +27,26 @@ export interface RouterEvents {
   onHello?: (clientName: string) => void;
   onBye?: () => void;
   onMalformed?: (reason: string) => void;
+  /** A device was added or removed; the roster should be pushed back. */
+  onRosterChange?: () => void;
 }
 
 /**
- * Turns received packets into MIDI.
+ * Turns received packets into MIDI, and device requests into real ports.
  *
- * One router per bridge, shared by every transport. It owns the note bookkeeping
- * so that a note started over UDP and released over WebSocket still balances,
- * and so a disconnect on either transport can release cleanly.
+ * One router per bridge, shared by every transport. Routing is by device
+ * instance id, so several emulated devices can be live at once and a note
+ * started on one cannot be released on another.
  *
- * The whole path — decode, translate, send — runs synchronously inside the
- * socket's data callback with no allocation and no queueing. Every queue
- * between the wire and the port is latency the player can feel, and every
- * allocation is a future GC pause in the middle of a take.
+ * The event path stays synchronous and allocation-free inside the socket
+ * callback. Device creation is the exception — opening a port is genuinely
+ * asynchronous — so it is dispatched and awaited off to the side rather than
+ * blocking the packets behind it.
  */
 export class Router {
   readonly stats = new LinkStats();
-  readonly notes = new NoteTracker();
   private readonly reader = new PacketReader();
-  private sink: MidiSink;
+  private readonly devices: DeviceManager;
   private readonly events: RouterEvents;
 
   /**
@@ -56,23 +57,12 @@ export class Router {
    */
   private readonly visitor: EventVisitor;
 
-  constructor(sink: MidiSink, events: RouterEvents = {}) {
-    this.sink = sink;
+  constructor(devices: DeviceManager, events: RouterEvents = {}) {
+    this.devices = devices;
     this.events = events;
-    this.visitor = (type, channel, data1, data2, _value14, _deviceId, _flags, _tOffsetMs) => {
-      this.dispatch(type, channel, data1, data2, _value14);
+    this.visitor = (type, channel, data1, data2, value14, deviceId) => {
+      this.devices.handleEvent(deviceId, type, channel, data1, data2, value14);
     };
-  }
-
-  /** Swap the MIDI destination at runtime (a port appeared, or was lost). */
-  setSink(sink: MidiSink): void {
-    if (sink === this.sink) return;
-    this.notes.panic(this.sink);
-    this.sink = sink;
-  }
-
-  get currentSink(): MidiSink {
-    return this.sink;
   }
 
   /**
@@ -94,75 +84,80 @@ export class Router {
       case PacketKind.EVENTS:
         this.stats.onPacket(h.seq, h.tClient, arrivalMs, h.count);
         break;
+
       case PacketKind.PING:
         pong?.(h.tClient, arrivalMs);
         break;
+
       case PacketKind.PANIC: {
-        const released = this.notes.panic(this.sink);
+        const released = this.devices.panicAll();
         this.events.onPanic?.(released);
         break;
       }
-      case PacketKind.HELLO: {
-        const body = this.reader.bodyView();
-        this.events.onHello?.(new TextDecoder().decode(body).replace(/\0+$/, ''));
+
+      case PacketKind.HELLO:
+        this.events.onHello?.(decodeName(this.reader.bodyView()));
         break;
-      }
+
       case PacketKind.BYE:
-        this.notes.panic(this.sink);
+        this.devices.panicAll();
         this.events.onBye?.();
         break;
+
+      case PacketKind.DEVICE_ADD: {
+        const request = readDeviceAdd(this.reader.bodyView());
+        if (request === null) {
+          this.stats.onMalformed();
+          return;
+        }
+        // Opening a port is genuinely async. Fire it off rather than making
+        // every packet queued behind this one wait for a driver call.
+        void this.devices
+          .add(request.deviceId, request.model)
+          .then(() => this.events.onRosterChange?.());
+        break;
+      }
+
+      case PacketKind.DEVICE_REMOVE: {
+        const id = readDeviceRemove(this.reader.bodyView());
+        if (id < 0) {
+          this.stats.onMalformed();
+          return;
+        }
+        if (this.devices.remove(id)) this.events.onRosterChange?.();
+        break;
+      }
+
+      case PacketKind.SYSEX: {
+        const message = readSysEx(this.reader.bodyView());
+        if (message === null) {
+          this.stats.onMalformed();
+          return;
+        }
+        this.devices.sendSysEx(message.deviceId, message.bytes);
+        break;
+      }
+
       default:
-        // An unknown kind from a newer client. The version check already passed,
-        // so ignore it rather than dropping the connection.
+        // An unknown kind from a newer client. The version check already
+        // passed, so ignore it rather than dropping the connection.
         break;
     }
   }
 
-  /** Release every sounding note. Called on disconnect and shutdown. */
+  /** Notes sounding across every device. */
+  get activeNotes(): number {
+    return this.devices.activeNotes;
+  }
+
+  /** Release every sounding note across all devices. */
   releaseAll(): number {
-    return this.notes.panic(this.sink);
+    return this.devices.panicAll();
   }
+}
 
-  private dispatch(
-    type: number,
-    channel: number,
-    data1: number,
-    data2: number,
-    value14: number,
-  ): void {
-    const ch = channel & 0x0f;
+const decoder = new TextDecoder();
 
-    switch (type) {
-      case EventType.NOTE_ON:
-        this.notes.onNoteOn(ch, data1, data2);
-        this.sink.send(MidiStatus.NOTE_ON | ch, data1, data2);
-        return;
-
-      case EventType.NOTE_OFF:
-        this.notes.onNoteOff(ch, data1);
-        this.sink.send(MidiStatus.NOTE_OFF | ch, data1, data2);
-        return;
-
-      case EventType.PITCH_BEND: {
-        const { lsb, msb } = split14(value14);
-        this.sink.send(MidiStatus.PITCH_BEND | ch, lsb, msb);
-        return;
-      }
-
-      case EventType.CONTROL_CHANGE_14: {
-        // 14-bit CC convention: controller n carries the MSB, n+32 the LSB.
-        // Order matters — receivers latch on the MSB, so it goes first.
-        const { lsb, msb } = split14(value14);
-        this.sink.send(MidiStatus.CONTROL_CHANGE | ch, data1, msb);
-        this.sink.send(MidiStatus.CONTROL_CHANGE | ch, (data1 + 32) & 0x7f, lsb);
-        return;
-      }
-
-      default: {
-        const status = statusForEventType(type);
-        if (status !== 0) this.sink.send(status | ch, data1, data2);
-        return;
-      }
-    }
-  }
+function decodeName(body: Uint8Array): string {
+  return decoder.decode(body).replace(/\0+$/, '');
 }

@@ -1,5 +1,5 @@
 import { dataByteCount } from '@vrmc/protocol';
-import type { MidiSink } from './MidiSink.js';
+import { SimpleVirtualPort, type MidiSink, type MidiSource, type VirtualPort } from './MidiSink.js';
 
 /**
  * Virtual MIDI on Windows.
@@ -58,18 +58,23 @@ interface KoffiLike {
   };
   pointer(name: string, type: unknown): unknown;
   opaque(): unknown;
+  proto(signature: string): unknown;
+  register(fn: unknown, type: unknown): unknown;
+  decode(pointer: unknown, type: string, length: number): Uint8Array;
 }
 
 interface TeVirtualMidiApi {
   createPort: (
     name: string,
-    callback: null,
+    callback: unknown,
     instance: number,
     maxSysex: number,
     flags: number,
   ) => unknown;
   sendData: (port: unknown, data: Buffer, length: number) => boolean;
   closePort: (port: unknown) => void;
+  /** Wrap a JS function as a native callback the driver can invoke. */
+  registerCallback: (fn: (data: Uint8Array) => void) => unknown;
   dllPath: string;
 }
 
@@ -110,10 +115,26 @@ async function bindTeVirtualMidi(): Promise<TeVirtualMidiApi | null> {
       ]);
       const closePort = lib.func('virtualMIDIClosePort', 'void', [PortHandle]);
 
+      // The driver's data callback:
+      //   void CALLBACK cb(LPVM_MIDI_PORT, LPBYTE data, DWORD length, DWORD_PTR)
+      const CallbackProto = koffi.proto(
+        'void TeVmCallback(void *port, uint8_t *data, uint32_t length, uintptr_t instance)',
+      );
+
+      const registerCallback = (fn: (data: Uint8Array) => void): unknown =>
+        koffi.register(
+          (_port: unknown, data: unknown, length: number) => {
+            if (length <= 0) return;
+            fn(koffi.decode(data, 'uint8_t', length));
+          },
+          koffi.pointer('TeVmCallbackPtr', CallbackProto),
+        );
+
       return {
         createPort: createPort as TeVirtualMidiApi['createPort'],
         sendData: sendData as TeVirtualMidiApi['sendData'],
         closePort: closePort as TeVirtualMidiApi['closePort'],
+        registerCallback,
         dllPath: candidate,
       };
     } catch {
@@ -121,6 +142,32 @@ async function bindTeVirtualMidi(): Promise<TeVirtualMidiApi | null> {
     }
   }
   return null;
+}
+
+/**
+ * Input side of a teVirtualMIDI port.
+ *
+ * Unlike CoreMIDI, where the input and output halves are separate endpoints
+ * that happen to share a name, one teVirtualMIDI port is inherently
+ * bidirectional: the driver delivers host traffic through the callback passed
+ * at creation. So the source here is a view onto the same port as the sink.
+ */
+class TeVirtualMidiSource implements MidiSource {
+  readonly name: string;
+  onMessage: ((bytes: Uint8Array) => void) | null = null;
+
+  constructor(name: string) {
+    this.name = name;
+  }
+
+  /** Called by the port's driver callback. */
+  deliver(bytes: Uint8Array): void {
+    this.onMessage?.(bytes);
+  }
+
+  close(): void {
+    this.onMessage = null;
+  }
 }
 
 class TeVirtualMidiSink implements MidiSink {
@@ -153,6 +200,13 @@ class TeVirtualMidiSink implements MidiSink {
     this.api.sendData(this.port, this.buf, len);
   }
 
+  sendRaw(bytes: Uint8Array): void {
+    if (this.closed) return;
+    // The driver takes a length, so any message size works without the
+    // three-byte assumption the channel-voice path makes.
+    this.api.sendData(this.port, Buffer.from(bytes), bytes.length);
+  }
+
   close(): void {
     if (this.closed) return;
     this.closed = true;
@@ -166,24 +220,31 @@ class TeVirtualMidiSink implements MidiSink {
 }
 
 /**
- * Create a Windows virtual MIDI port named `name` via teVirtualMIDI.
+ * Create a bidirectional Windows virtual MIDI port via teVirtualMIDI.
  *
  * Returns null when the driver is absent or the port cannot be created (most
  * often because a port of the same name is already open).
+ *
+ * The driver calls back on its own thread whenever the host sends us something.
+ * koffi marshals that into a JS callback, which is how LED writes and the
+ * identity handshake reach the emulator on Windows.
  */
-export async function openTeVirtualMidiPort(name: string): Promise<MidiSink | null> {
+export async function openTeVirtualMidiPort(name: string): Promise<VirtualPort | null> {
   const api = await bindTeVirtualMidi();
   if (api === null) return null;
+
+  const source = new TeVirtualMidiSource(name);
   try {
+    const callback = api.registerCallback((data: Uint8Array) => source.deliver(data));
     const port = api.createPort(
       name,
-      null,
+      callback,
       0,
       MAX_SYSEX_LENGTH,
       TE_VM_FLAGS_INSTANTIATE_BOTH | TE_VM_FLAGS_PARSE_RX,
     );
     if (port === null || port === undefined) return null;
-    return new TeVirtualMidiSink(api, port, name);
+    return new SimpleVirtualPort(name, new TeVirtualMidiSink(api, port, name), source);
   } catch {
     return null;
   }

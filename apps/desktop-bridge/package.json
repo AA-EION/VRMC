@@ -16,7 +16,8 @@
   },
   "dependencies": {
     "@vrmc/protocol": "workspace:*",
-    "ws": "^8.21.3"
+    "ws": "^8.21.3",
+    "@vrmc/devices": "workspace:*"
   },
   "optionalDependencies": {
     "@julusian/midi": "^3.8.1",

@@ -10,20 +10,49 @@ import {
   PITCH_BEND_CENTER,
 } from '@vrmc/protocol';
 import { Router } from '../src/core/Router.js';
-import { NullSink } from '../src/midi/MidiSink.js';
+import { DeviceManager } from '../src/devices/DeviceManager.js';
+import { NullSink, NullSource, SimpleVirtualPort } from '../src/midi/MidiSink.js';
 import { NoteTracker } from '../src/midi/NoteTracker.js';
+import { DeviceId } from '@vrmc/protocol';
 
 function recording(): NullSink {
   return new NullSink('test', true);
+}
+
+/**
+ * A manager whose ports are recording stubs.
+ *
+ * The port factory is injected rather than reached around, so these tests
+ * exercise the real creation, routing and teardown paths without needing a MIDI
+ * subsystem.
+ */
+async function managerWith(sink: NullSink): Promise<DeviceManager> {
+  const devices = new DeviceManager(
+    { onLed: () => {}, onRosterChange: () => {}, onLog: () => {} },
+    {
+      noMidi: false,
+      loopbackPattern: /never/,
+      portNameTemplate: '{device} {port}',
+      openPort: async ({ name }) => ({
+        port: new SimpleVirtualPort(name, sink, new NullSource(name)),
+        ok: true,
+        notes: [],
+      }),
+    },
+  );
+  await devices.add(DeviceId.PADS, 'test');
+  devices.alias(DeviceId.KEYS, DeviceId.PADS);
+  devices.alias(DeviceId.KNOBS, DeviceId.PADS);
+  return devices;
 }
 
 describe('Router event translation', () => {
   let sink: NullSink;
   let router: Router;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     sink = recording();
-    router = new Router(sink);
+    router = new Router(await managerWith(sink));
   });
 
   const send = (fill: (w: PacketWriter) => void, kind = PacketKind.EVENTS): void => {
@@ -94,7 +123,7 @@ describe('Router event translation', () => {
       w.pushEvent(EventType.NOTE_ON, 0, 60, 100, 0, DeviceId.KEYS, 0, 0);
       w.pushEvent(EventType.NOTE_ON, 1, 64, 100, 0, DeviceId.KEYS, 0, 0);
     });
-    expect(router.notes.activeNotes).toBe(2);
+    expect(router.activeNotes).toBe(2);
 
     const before = sink.log.length;
     send((w) => void w, PacketKind.PANIC);
@@ -102,7 +131,7 @@ describe('Router event translation', () => {
     const after = sink.log.slice(before);
     expect(after).toContainEqual([MidiStatus.NOTE_OFF | 0, 60, 0]);
     expect(after).toContainEqual([MidiStatus.NOTE_OFF | 1, 64, 0]);
-    expect(router.notes.activeNotes).toBe(0);
+    expect(router.activeNotes).toBe(0);
   });
 
   it('ignores an unknown packet kind from a newer client', () => {
@@ -113,8 +142,8 @@ describe('Router event translation', () => {
 });
 
 describe('Router link statistics', () => {
-  it('infers loss from gaps in the sequence number', () => {
-    const router = new Router(recording());
+  it('infers loss from gaps in the sequence number', async () => {
+    const router = new Router(await managerWith(recording()));
     const w = new PacketWriter();
     // Send packets 1..6 but drop 3 and 4 in transit.
     for (let i = 1; i <= 6; i++) {
@@ -129,8 +158,8 @@ describe('Router link statistics', () => {
     expect(router.stats.lossRatio).toBeCloseTo(2 / 6, 5);
   });
 
-  it('reports near-zero jitter for a perfectly paced stream', () => {
-    const router = new Router(recording());
+  it('reports near-zero jitter for a perfectly paced stream', async () => {
+    const router = new Router(await managerWith(recording()));
     const w = new PacketWriter();
     for (let i = 0; i < 30; i++) {
       w.begin();
@@ -141,8 +170,8 @@ describe('Router link statistics', () => {
     expect(router.stats.jitterMs).toBeLessThan(0.001);
   });
 
-  it('registers jitter when arrival spacing wanders', () => {
-    const router = new Router(recording());
+  it('registers jitter when arrival spacing wanders', async () => {
+    const router = new Router(await managerWith(recording()));
     const w = new PacketWriter();
     for (let i = 0; i < 30; i++) {
       w.begin();

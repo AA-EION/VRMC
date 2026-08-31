@@ -9,8 +9,29 @@ import {
   PacketReader,
   PacketWriter,
 } from '@vrmc/protocol';
+import { DeviceId } from '@vrmc/protocol';
 import { Router } from '../src/core/Router.js';
-import { NullSink } from '../src/midi/MidiSink.js';
+import { DeviceManager } from '../src/devices/DeviceManager.js';
+import { NullSink, NullSource, SimpleVirtualPort } from '../src/midi/MidiSink.js';
+
+/** Manager whose ports are recording stubs. See router.test.ts. */
+async function managerWith(sink: NullSink): Promise<DeviceManager> {
+  const devices = new DeviceManager(
+    { onLed: () => {}, onRosterChange: () => {}, onLog: () => {} },
+    {
+      noMidi: false,
+      loopbackPattern: /never/,
+      portNameTemplate: '{device} {port}',
+      openPort: async ({ name }) => ({
+        port: new SimpleVirtualPort(name, sink, new NullSource(name)),
+        ok: true,
+        notes: [],
+      }),
+    },
+  );
+  await devices.add(DeviceId.PADS, 'test');
+  return devices;
+}
 import { UdpServer } from '../src/net/UdpServer.js';
 import { WsServer } from '../src/net/WsServer.js';
 
@@ -52,7 +73,7 @@ function notePacket(note: number, velocity: number): Uint8Array {
 describe('WebSocket transport', () => {
   it('carries note events from a client through to the MIDI sink', async () => {
     const sink = new NullSink('test', true);
-    const router = new Router(sink);
+    const router = new Router(await managerWith(sink));
     const port = takePort();
     const server = new WsServer(router, { port, host: '127.0.0.1', onLog: () => {} });
     await server.listen();
@@ -72,7 +93,7 @@ describe('WebSocket transport', () => {
   });
 
   it('replies to a PING so the client can measure its round trip', async () => {
-    const router = new Router(new NullSink());
+    const router = new Router(await managerWith(new NullSink()));
     const port = takePort();
     const server = new WsServer(router, { port, host: '127.0.0.1', onLog: () => {} });
     await server.listen();
@@ -99,7 +120,7 @@ describe('WebSocket transport', () => {
 
   it('releases held notes when a client disconnects without sending note offs', async () => {
     const sink = new NullSink('test', true);
-    const router = new Router(sink);
+    const router = new Router(await managerWith(sink));
     const port = takePort();
     const server = new WsServer(router, { port, host: '127.0.0.1', onLog: () => {} });
     await server.listen();
@@ -109,17 +130,17 @@ describe('WebSocket transport', () => {
     await new Promise((resolve) => client.once('open', resolve));
 
     client.send(notePacket(60, 100));
-    await waitFor(() => router.notes.activeNotes === 1);
+    await waitFor(() => router.activeNotes === 1);
 
     // Yank the connection mid-note, as a headset going to sleep would.
     client.terminate();
-    await waitFor(() => router.notes.activeNotes === 0);
+    await waitFor(() => router.activeNotes === 0);
 
     expect(sink.log).toContainEqual([MidiStatus.NOTE_OFF, 60, 0]);
   });
 
   it('serves a status document over plain HTTP for reachability checks', async () => {
-    const router = new Router(new NullSink('Port Name'));
+    const router = new Router(await managerWith(new NullSink('Port Name')));
     const port = takePort();
     const server = new WsServer(router, { port, host: '127.0.0.1', onLog: () => {} });
     await server.listen();
@@ -134,7 +155,7 @@ describe('WebSocket transport', () => {
 
   it('ignores text frames rather than trying to parse them', async () => {
     const sink = new NullSink('test', true);
-    const router = new Router(sink);
+    const router = new Router(await managerWith(sink));
     const port = takePort();
     const server = new WsServer(router, { port, host: '127.0.0.1', onLog: () => {} });
     await server.listen();
@@ -156,7 +177,7 @@ describe('WebSocket transport', () => {
 describe('UDP transport', () => {
   it('carries note events from a datagram through to the MIDI sink', async () => {
     const sink = new NullSink('test', true);
-    const router = new Router(sink);
+    const router = new Router(await managerWith(sink));
     const port = takePort();
     const server = new UdpServer(router, { port, host: '127.0.0.1', onLog: () => {} });
     await server.listen();
@@ -174,7 +195,7 @@ describe('UDP transport', () => {
     // Regression guard: dgram delivers Buffers that may be windows into a
     // shared slab, so every read must respect byteOffset.
     const sink = new NullSink('test', true);
-    const router = new Router(sink);
+    const router = new Router(await managerWith(sink));
     const port = takePort();
     const server = new UdpServer(router, { port, host: '127.0.0.1', onLog: () => {} });
     await server.listen();
@@ -191,7 +212,7 @@ describe('UDP transport', () => {
   });
 
   it('answers a PING back to the sending peer', async () => {
-    const router = new Router(new NullSink());
+    const router = new Router(await managerWith(new NullSink()));
     const port = takePort();
     const server = new UdpServer(router, { port, host: '127.0.0.1', onLog: () => {} });
     await server.listen();

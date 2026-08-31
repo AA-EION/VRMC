@@ -15,6 +15,14 @@ export interface BridgeConfig {
   tlsCert?: string;
   tlsKey?: string;
   loopbackPattern: RegExp;
+  /**
+   * How emulated devices name their MIDI ports. `{device}` is the model's
+   * display name, `{port}` the endpoint name, `{model}` the slug.
+   *
+   * A DAW decides what a port is by its name, so this is the knob to reach for
+   * when a host expects a different spelling than the default.
+   */
+  portNameTemplate: string;
 }
 
 export const DEFAULT_CONFIG: BridgeConfig = {
@@ -29,6 +37,7 @@ export const DEFAULT_CONFIG: BridgeConfig = {
   listPorts: false,
   statsInterval: 10,
   loopbackPattern: WINDOWS_LOOPBACK_PATTERN,
+  portNameTemplate: '{device} {port}',
 };
 
 export const USAGE = `
@@ -46,6 +55,8 @@ Usage: vrmc-bridge [options]
   --tls-cert <path>    TLS certificate; enables wss://
   --tls-key <path>     TLS private key
   --loopback <regex>   Windows: pattern for the fallback port
+  --port-template <s>  Naming for emulated device ports
+                       (default: "{device} {port}", e.g. "Launchpad X LPX DAW")
   --stats <seconds>    Stats interval, 0 to disable (default: 10)
   --list-ports         List MIDI outputs and exit
   --help               Show this message
@@ -114,6 +125,14 @@ export function parseArgs(argv: readonly string[]): BridgeConfig | 'help' {
       case '--loopback':
         config.loopbackPattern = new RegExp(requireValue(arg, argv[++i]), 'i');
         break;
+      case '--port-template': {
+        const template = requireValue(arg, argv[++i]);
+        if (!template.includes('{port}')) {
+          throw new ArgError('--port-template must contain {port}, or both ports collide');
+        }
+        config.portNameTemplate = template;
+        break;
+      }
       case '--stats': {
         const n = Number(requireValue(arg, argv[++i]));
         if (!Number.isFinite(n) || n < 0) throw new ArgError('--stats must be 0 or more');

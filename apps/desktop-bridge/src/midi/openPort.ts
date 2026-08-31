@@ -1,5 +1,18 @@
-import { listPorts, openMatchingPort, openVirtualPort } from './coreMidiBackend.js';
-import { NullSink, type MidiSink } from './MidiSink.js';
+// SPDX-License-Identifier: GPL-3.0-only
+
+import {
+  listPorts,
+  openMatchingPort,
+  openVirtualInput,
+  openVirtualPort as openVirtualOutput,
+} from './coreMidiBackend.js';
+import {
+  NullSink,
+  NullSource,
+  SimpleVirtualPort,
+  type MidiSink,
+  type VirtualPort,
+} from './MidiSink.js';
 import { openTeVirtualMidiPort, WINDOWS_LOOPBACK_PATTERN } from './windowsBackend.js';
 
 export interface PortOptions {
@@ -12,43 +25,54 @@ export interface PortOptions {
 }
 
 export interface PortResult {
-  sink: MidiSink;
+  port: VirtualPort;
+  /** True when a real, host-visible port was created. */
+  ok: boolean;
   /** What was tried and what happened, for the startup banner. */
   notes: string[];
 }
 
 /**
- * Open the best available MIDI destination for this platform.
+ * Open one bidirectional virtual port.
  *
- * The fallback chain is ordered by how little the user has to do:
- *   macOS/Linux — a real virtual port, created by us, needing no setup at all.
- *   Windows     — teVirtualMIDI if its driver is present, else an existing
- *                 loopMIDI port, else nothing.
+ * A device is more than an output. A Launchpad is lit by the host, and it is
+ * only recognised at all because it answers an inquiry the host sends — both of
+ * which arrive on the input half. So a port that could only send would produce
+ * a device that appears in the DAW and then behaves like a dead one.
  *
- * Failing to find a port is not fatal. The bridge runs on with a null sink so
- * the network side can still be tested and the banner can explain what to
- * install; exiting here would leave a user staring at a closed terminal.
+ * The platforms get there differently. CoreMIDI and ALSA have no notion of a
+ * bidirectional endpoint, so two are created under one name and the pair reads
+ * as a single device. teVirtualMIDI's ports are inherently bidirectional and
+ * deliver host traffic through a driver callback.
  */
-export async function openBestPort(options: PortOptions): Promise<PortResult> {
+export async function openBidirectionalPort(options: PortOptions): Promise<PortResult> {
   const notes: string[] = [];
 
   if (options.noMidi) {
-    notes.push('MIDI output disabled by --no-midi.');
-    return { sink: new NullSink(), notes };
+    const sink = new NullSink(options.name);
+    return {
+      port: new SimpleVirtualPort(options.name, sink, new NullSource(options.name)),
+      ok: false,
+      notes: ['MIDI output disabled by --no-midi.'],
+    };
   }
 
   if (process.platform === 'win32') {
     const te = await openTeVirtualMidiPort(options.name);
     if (te !== null) {
       notes.push(`Created virtual port "${te.name}" via teVirtualMIDI.`);
-      return { sink: te, notes };
+      return { port: te, ok: true, notes };
     }
     notes.push('teVirtualMIDI driver not found; looking for an existing loopback port.');
 
     const loop = await openMatchingPort(options.loopbackPattern);
     if (loop !== null) {
       notes.push(`Attached to existing port "${loop.name}".`);
-      return { sink: loop, notes };
+      // A loopMIDI port the user made by hand has an input side too, but its
+      // name is whatever they chose, so it cannot be matched reliably. Output
+      // only: the device will play but its LEDs will not light.
+      notes.push('Attached output only — LED feedback needs the teVirtualMIDI driver.');
+      return { port: new SimpleVirtualPort(loop.name, loop, null), ok: true, notes };
     }
 
     const available = await listPorts();
@@ -57,23 +81,43 @@ export async function openBestPort(options: PortOptions): Promise<PortResult> {
         ? `No matching loopback port. Ports seen: ${available.join(', ')}`
         : 'No MIDI output ports found on this system.',
     );
-    notes.push('Install loopMIDI and create a port named "VRMC", then restart the bridge.');
-    return { sink: new NullSink(), notes };
+    notes.push('Install loopMIDI (which ships the teVirtualMIDI driver) and restart the bridge.');
+    return { port: nullPort(options.name), ok: false, notes };
   }
 
-  const virtualPort = await openVirtualPort(options.name);
-  if (virtualPort !== null) {
+  const sink = await openVirtualOutput(options.name);
+  if (sink === null) {
+    notes.push(
+      process.platform === 'darwin'
+        ? `Could not create a CoreMIDI port named "${options.name}". Is one already open?`
+        : 'Could not create an ALSA port. This host may have no MIDI sequencer (/dev/snd/seq).',
+    );
+    return { port: nullPort(options.name), ok: false, notes };
+  }
+
+  // The input half is best-effort: without it the device plays but stays dark,
+  // which is worth reporting and not worth failing over.
+  const source = await openVirtualInput(options.name);
+  if (source === null) {
+    notes.push(`Created "${options.name}" as output only; LED feedback unavailable.`);
+  } else {
     const api = process.platform === 'darwin' ? 'CoreMIDI' : 'ALSA';
-    notes.push(`Created ${api} virtual port "${virtualPort.name}".`);
-    return { sink: virtualPort, notes };
+    notes.push(`Created ${api} port "${options.name}" (in and out).`);
   }
 
-  notes.push(
-    process.platform === 'darwin'
-      ? 'Could not create a CoreMIDI port. Is another copy of the bridge running?'
-      : 'Could not create an ALSA port. This host may have no MIDI sequencer (/dev/snd/seq).',
-  );
-  return { sink: new NullSink(), notes };
+  return { port: new SimpleVirtualPort(options.name, sink, source), ok: true, notes };
+}
+
+function nullPort(name: string): VirtualPort {
+  return new SimpleVirtualPort(name, new NullSink(name), new NullSource(name));
+}
+
+/** Backwards-compatible single-sink helper, for the built-in surfaces. */
+export async function openBestPort(
+  options: PortOptions,
+): Promise<{ sink: MidiSink; notes: string[] }> {
+  const result = await openBidirectionalPort(options);
+  return { sink: result.port.sink, notes: result.notes };
 }
 
 export { listPorts, WINDOWS_LOOPBACK_PATTERN };

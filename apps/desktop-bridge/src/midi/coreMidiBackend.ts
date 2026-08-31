@@ -1,5 +1,5 @@
 import { dataByteCount } from '@vrmc/protocol';
-import type { MidiSink } from './MidiSink.js';
+import type { MidiSink, MidiSource } from './MidiSink.js';
 
 /**
  * Virtual MIDI port via RtMidi (`@julusian/midi`).
@@ -22,8 +22,25 @@ interface RtMidiOutput {
   sendMessage(message: number[]): void;
 }
 
+/** Minimal shape of the RtMidi input we use. */
+interface RtMidiInput {
+  openVirtualPort(name: string): void;
+  openPort(index: number): void;
+  closePort(): void;
+  getPortCount(): number;
+  getPortName(index: number): string;
+  on(event: 'message', listener: (deltaTime: number, message: number[]) => void): void;
+  /**
+   * RtMidi filters SysEx out by default. Every Launchpad feature that matters
+   * here — the identity handshake, RGB LED writes, mode switching — is SysEx,
+   * so this must be called or the device appears mute to the host.
+   */
+  ignoreTypes(sysex: boolean, timing: boolean, activeSensing: boolean): void;
+}
+
 interface RtMidiModule {
   Output: new () => RtMidiOutput;
+  Input: new () => RtMidiInput;
 }
 
 /**
@@ -80,6 +97,20 @@ export class RtMidiSink implements MidiSink {
     }
   }
 
+  /**
+   * Send a complete message of any length.
+   *
+   * Allocates an array per call, unlike `send`. That is acceptable because the
+   * only traffic on this path is SysEx — identity replies and occasional LED
+   * dumps — which is rare and never in the per-note hot path.
+   */
+  sendRaw(bytes: Uint8Array): void {
+    if (this.closed) return;
+    const message = new Array<number>(bytes.length);
+    for (let i = 0; i < bytes.length; i++) message[i] = bytes[i]!;
+    this.output.sendMessage(message);
+  }
+
   close(): void {
     if (this.closed) return;
     this.closed = true;
@@ -89,6 +120,73 @@ export class RtMidiSink implements MidiSink {
       // The port may already be gone if the MIDI system was torn down first.
     }
   }
+}
+
+/**
+ * Virtual MIDI input: a destination the host can send to.
+ *
+ * Reuses one Uint8Array across callbacks. RtMidi hands us a plain number[] per
+ * message, and copying into a stable buffer keeps the downstream path — which
+ * runs per LED write during a DAW redraw — free of per-message allocation.
+ */
+export class RtMidiSource implements MidiSource {
+  readonly name: string;
+  onMessage: ((bytes: Uint8Array) => void) | null = null;
+  private readonly input: RtMidiInput;
+  private closed = false;
+  private scratch = new Uint8Array(64);
+
+  constructor(input: RtMidiInput, name: string) {
+    this.input = input;
+    this.name = name;
+    input.on('message', (_deltaTime, message) => {
+      if (this.closed) return;
+      const handler = this.onMessage;
+      if (handler === null) return;
+      if (message.length > this.scratch.length) {
+        // Grows only for an unusually long SysEx, then stays grown.
+        this.scratch = new Uint8Array(message.length);
+      }
+      for (let i = 0; i < message.length; i++) this.scratch[i] = message[i]!;
+      handler(this.scratch.subarray(0, message.length));
+    });
+  }
+
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    this.onMessage = null;
+    try {
+      this.input.closePort();
+    } catch {
+      /* already gone */
+    }
+  }
+}
+
+/** Create a CoreMIDI/ALSA virtual destination named `name`. */
+export async function openVirtualInput(name: string): Promise<MidiSource | null> {
+  const midi = await loadRtMidi();
+  if (midi === null) return null;
+  let input: RtMidiInput;
+  try {
+    input = new midi.Input();
+  } catch {
+    return null;
+  }
+  try {
+    // (sysex, timing, activeSensing) — false means "do not ignore".
+    input.ignoreTypes(false, true, true);
+    input.openVirtualPort(name);
+  } catch {
+    try {
+      input.closePort();
+    } catch {
+      /* ignore */
+    }
+    return null;
+  }
+  return new RtMidiSource(input, name);
 }
 
 /** Create a CoreMIDI/ALSA virtual source named `name`. */

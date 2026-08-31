@@ -10,8 +10,14 @@
 /** ASCII "VM", little-endian. Cheap sanity check against stray UDP traffic. */
 export const MAGIC = 0x4d56;
 
-/** Bump on any incompatible layout change. Receivers reject mismatches. */
-export const PROTOCOL_VERSION = 1;
+/**
+ * Bump on any incompatible layout change. Receivers reject mismatches.
+ *
+ * v2 added the return path. v1 only ever sent headset -> bridge, which is all a
+ * pad controller needs; a Launchpad is a display as much as an input, and its
+ * LEDs are driven by the DAW, so the link had to become bidirectional.
+ */
+export const PROTOCOL_VERSION = 2;
 
 /** Packet header size in bytes. Events begin at this offset. */
 export const HEADER_BYTES = 16;
@@ -26,8 +32,27 @@ export const EVENT_BYTES = 12;
  */
 export const MAX_EVENTS_PER_PACKET = 64;
 
-/** Largest packet this protocol can produce. Sized for receive buffers. */
-export const MAX_PACKET_BYTES = HEADER_BYTES + MAX_EVENTS_PER_PACKET * EVENT_BYTES;
+/** Largest EVENTS packet. */
+export const MAX_EVENT_PACKET_BYTES = HEADER_BYTES + MAX_EVENTS_PER_PACKET * EVENT_BYTES;
+
+/**
+ * Largest control packet.
+ *
+ * Control traffic is variable length and can be much bigger than an events
+ * packet — a full Launchpad redraw is 64 LEDs, and a SysEx dump is bigger
+ * still. These travel over WebSocket, which frames and reassembles for us, so
+ * the UDP fragmentation limit that caps events does not apply.
+ */
+export const MAX_CONTROL_BYTES = 4096;
+
+/** Largest packet of any kind. Sized for receive buffers. */
+export const MAX_PACKET_BYTES = MAX_CONTROL_BYTES;
+
+/** Bytes per LED in an LED_UPDATE body: index, r, g, b, blink. */
+export const LED_ENTRY_BYTES = 5;
+
+/** Most LEDs one update packet can carry. */
+export const MAX_LEDS_PER_PACKET = 200;
 
 /** Default transport ports. */
 export const DEFAULT_WS_PORT = 7401;
@@ -47,6 +72,29 @@ export const PacketKind = {
   PANIC: 5,
   /** Graceful disconnect. Server releases held notes immediately. */
   BYE: 6,
+
+  // --- v2: device lifecycle and the return path ---
+
+  /**
+   * Headset -> bridge: create a virtual device.
+   *
+   * The bridge answers by creating real MIDI ports named after the emulated
+   * hardware, which is what makes the device appear in the DAW.
+   */
+  DEVICE_ADD: 7,
+  /** Headset -> bridge: destroy a device and close its ports. */
+  DEVICE_REMOVE: 8,
+  /** Bridge -> headset: the current device roster and each one's port status. */
+  DEVICE_STATE: 9,
+  /**
+   * Bridge -> headset: LEDs changed.
+   *
+   * The DAW drives these. Without them a virtual Launchpad is an input device
+   * with a dark grid, which is not what a Launchpad is for.
+   */
+  LED_UPDATE: 10,
+  /** Either direction: a raw SysEx message for one device. */
+  SYSEX: 11,
 } as const;
 export type PacketKind = (typeof PacketKind)[keyof typeof PacketKind];
 
@@ -79,13 +127,27 @@ export const EventFlags = {
   FROM_CONTROLLER: 1 << 1,
 } as const;
 
-/** Logical source device, so the bridge can fan out to separate MIDI ports. */
+/**
+ * Device instance id, carried in every event so the bridge knows which port to
+ * emit on.
+ *
+ * v1 treated this as a fixed enum of the three built-in surfaces. v2 makes it a
+ * runtime instance id, because there can now be several devices at once and a
+ * user may hold two Launchpads. The three values below stay reserved so the
+ * original surfaces keep their identity.
+ */
 export const DeviceId = {
   PADS: 1,
   KEYS: 2,
   KNOBS: 3,
 } as const;
 export type DeviceId = (typeof DeviceId)[keyof typeof DeviceId];
+
+/** First id handed out to a dynamically created device. */
+export const FIRST_DYNAMIC_DEVICE_ID = 16;
+
+/** Highest device instance id. The field is one byte. */
+export const MAX_DEVICE_ID = 255;
 
 /** MIDI status nibbles, for the bridge's encoder. */
 export const MidiStatus = {

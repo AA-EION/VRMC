@@ -191,6 +191,26 @@ export class PacketWriter {
     return true;
   }
 
+  /** Append a single byte to the body. */
+  pushU8(v: number): boolean {
+    if (this.cursor + 1 > MAX_PACKET_BYTES) return false;
+    this.bytes[this.cursor++] = v & 0xff;
+    return true;
+  }
+
+  /** Append a little-endian u16 to the body. */
+  pushU16(v: number): boolean {
+    if (this.cursor + 2 > MAX_PACKET_BYTES) return false;
+    this.view.setUint16(this.cursor, v & 0xffff, true);
+    this.cursor += 2;
+    return true;
+  }
+
+  /** Bytes written to the body so far, excluding the header. */
+  get bodyLength(): number {
+    return this.cursor - HEADER_BYTES;
+  }
+
   /** Append an f64 to the body. Used by PONG's server timestamp. */
   pushFloat64(v: number): boolean {
     if (this.cursor + 8 > MAX_PACKET_BYTES) return false;
