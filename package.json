@@ -2,7 +2,7 @@
   "name": "vrmc",
   "version": "0.1.0",
   "private": true,
-  "description": "VRMC — Mixed Reality MIDI controller for Meta Quest 3 with a native desktop virtual-MIDI bridge.",
+  "description": "VRMC \u2014 Mixed Reality MIDI controller for Meta Quest 3 with a native desktop virtual-MIDI bridge.",
   "packageManager": "pnpm@10.33.0",
   "engines": {
     "node": ">=20.11.0"
@@ -21,5 +21,12 @@
     "turbo": "^2.3.3",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"
+  },
+  "pnpm": {
+    "onlyBuiltDependencies": [
+      "esbuild",
+      "@julusian/midi",
+      "koffi"
+    ]
   }
 }
