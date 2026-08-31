@@ -4,6 +4,12 @@ import {
   PacketReader,
   PacketWriter,
   MAX_EVENTS_PER_PACKET,
+  readDeviceState,
+  readLedUpdate,
+  writeDeviceAdd,
+  writeDeviceRemove,
+  type DeviceStateEntry,
+  type LedVisitor,
 } from '@vrmc/protocol';
 
 export type LinkState = 'idle' | 'connecting' | 'open' | 'reconnecting' | 'failed';
@@ -76,8 +82,29 @@ export class BridgeLink {
   /** Called whenever the status changes enough for the UI to care. */
   onStatus: ((status: LinkStatus) => void) | null = null;
 
+  /**
+   * Called for each LED the bridge reports as changed.
+   *
+   * Set once at startup, not per packet: this fires dozens of times per DAW
+   * redraw, and allocating a closure per update would put garbage on the frame
+   * path it shares with the note loop.
+   */
+  onLed: ((deviceId: number, ledIndex: number, r: number, g: number, b: number, blink: number) => void) | null =
+    null;
+
+  /** Called when the bridge reports its device roster. */
+  onDevices: ((devices: DeviceStateEntry[]) => void) | null = null;
+
+  /** Bound once, so decoding an LED packet allocates nothing. */
+  private readonly ledVisitor: LedVisitor;
+  /** Device id of the LED packet currently being decoded. */
+  private ledDeviceId = 0;
+
   constructor(url: string) {
     this.url = url;
+    this.ledVisitor = (ledIndex, r, g, b, blink) => {
+      this.onLed?.(this.ledDeviceId, ledIndex, r, g, b, blink);
+    };
   }
 
   get isOpen(): boolean {
@@ -153,13 +180,32 @@ export class BridgeLink {
 
   private handleMessage(bytes: Uint8Array): void {
     if (this.reader.read(bytes, null) !== 0) return;
-    if (this.reader.header.kind !== PacketKind.PONG) return;
-    // The bridge echoes our own send time in the header, so the round trip is
-    // just the difference — no table of outstanding pings to keep.
-    const rtt = performance.now() - this.reader.header.tClient;
-    this.rttMs = rtt;
-    if (rtt < this.bestRttMs) this.bestRttMs = rtt;
-    this.notify();
+
+    switch (this.reader.header.kind) {
+      case PacketKind.PONG: {
+        // The bridge echoes our own send time in the header, so the round trip
+        // is just the difference — no table of outstanding pings to keep.
+        const rtt = performance.now() - this.reader.header.tClient;
+        this.rttMs = rtt;
+        if (rtt < this.bestRttMs) this.bestRttMs = rtt;
+        this.notify();
+        return;
+      }
+      case PacketKind.LED_UPDATE: {
+        const body = this.reader.bodyView();
+        if (body.length < 3) return;
+        this.ledDeviceId = body[0]!;
+        readLedUpdate(body, this.ledVisitor);
+        return;
+      }
+      case PacketKind.DEVICE_STATE: {
+        // Roster changes are rare and human-paced, so allocating here is fine.
+        this.onDevices?.(readDeviceState(this.reader.bodyView()));
+        return;
+      }
+      default:
+        return;
+    }
   }
 
   private scheduleReconnect(): void {
@@ -246,6 +292,33 @@ export class BridgeLink {
   /** Ask the bridge to silence everything. Sent on panic and on teardown. */
   sendPanic(): void {
     this.sendControl(PacketKind.PANIC);
+  }
+
+  /**
+   * Ask the bridge to create a device, which makes real MIDI ports appear.
+   *
+   * Sent outside the frame batch: device creation is a user action at human
+   * speed, and mixing it into the note packet would delay it behind a frame.
+   */
+  requestDeviceAdd(deviceId: number, model: string): boolean {
+    const socket = this.socket;
+    if (socket === null || socket.readyState !== WebSocket.OPEN) return false;
+    const w = this.controlWriter;
+    w.begin(PacketKind.DEVICE_ADD);
+    if (!writeDeviceAdd(w, deviceId, model)) return false;
+    socket.send(w.finish(performance.now()));
+    return true;
+  }
+
+  /** Ask the bridge to destroy a device and close its ports. */
+  requestDeviceRemove(deviceId: number): boolean {
+    const socket = this.socket;
+    if (socket === null || socket.readyState !== WebSocket.OPEN) return false;
+    const w = this.controlWriter;
+    w.begin(PacketKind.DEVICE_REMOVE);
+    if (!writeDeviceRemove(w, deviceId)) return false;
+    socket.send(w.finish(performance.now()));
+    return true;
   }
 
   private sendHello(): void {

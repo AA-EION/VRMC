@@ -374,6 +374,123 @@ const stillLit = await page.evaluate(() => {
 check('held pad stays lit across frames', stillLit !== null && stillLit[2] > stillLit[0] + 0.3,
   `rgb=${JSON.stringify(stillLit)}`);
 
+/*
+ * Spawn an emulated Launchpad and drive it.
+ *
+ * The bridge is not running here, so `addDevice` creates the local surface and
+ * its request to open MIDI ports goes nowhere — which is exactly the split
+ * being tested: the headset can render and play a device before, or without,
+ * the desktop agreeing. LED colours are injected the way the bridge would
+ * deliver them.
+ */
+const launchpad = await page.evaluate(async () => {
+  const h = window.__vrmc;
+  if (!h) return { ok: false, reason: 'no handle' };
+  const engine = h.engine;
+
+  const device = engine.addDevice('launchpad-x');
+  if (!device) return { ok: false, reason: 'addDevice returned null' };
+
+  // Light the bottom row red, as a DAW would: palette 5 is red, 6-bit 63,0,0.
+  for (let col = 1; col <= 8; col++) device.applyLed(10 + col, 63, 0, 0, 0);
+  // One pulsing pad and one flashing pad, to exercise the animation path.
+  device.applyLed(21, 0, 63, 0, 2);
+  device.applyLed(22, 63, 63, 0, 1);
+
+  // Poke pad 44 through the real detector, in the device's own frame.
+  const t = device.transform;
+  const [qx, , , qw] = t.quaternion;
+  const th = 2 * Math.atan2(qx, qw);
+  const cos = Math.cos(th);
+  const sin = Math.sin(th);
+  const zoneIndex = device.layout.zoneForIndex(44);
+  const zone = device.layout.zones[zoneIndex];
+  const lx = zone.rect.x + zone.rect.width / 2;
+  const ly = zone.rect.y + zone.rect.height / 2;
+  const toWorld = (x, y, z) => [
+    t.origin[0] + x,
+    t.origin[1] + y * cos - z * sin,
+    t.origin[2] + y * sin + z * cos,
+  ];
+
+  const sent = [];
+  const realPush = engine.link.push.bind(engine.link);
+  engine.link.push = (type, ch, d1, d2, v14, dev, flags, off) => {
+    sent.push({ type, d1, d2, dev });
+    return realPush(type, ch, d1, d2, v14, dev, flags, off);
+  };
+
+  const RADIUS = 0.008;
+  const frame = engine.fingers;
+  let clock = performance.now();
+  for (let i = 0; i <= 6; i++) {
+    const depth = 0.04 - (0.05 * i) / 6;
+    const [wx, wy, wz] = toWorld(lx, ly, zone.raise + RADIUS + depth);
+    clock += 1000 / 90;
+    frame.beginFrame(clock, 1 / 90);
+    frame.setFinger(6, wx, wy, wz, RADIUS);
+    device.detector.update(frame, device);
+  }
+  // Hold, so the touch highlight is still on screen for the screenshot.
+  for (let i = 0; i < 3; i++) {
+    const [wx, wy, wz] = toWorld(lx, ly, zone.raise + RADIUS - 0.004);
+    clock += 1000 / 90;
+    frame.beginFrame(clock, 1 / 90);
+    frame.setFinger(6, wx, wy, wz, RADIUS);
+    device.detector.update(frame, device);
+  }
+  engine.link.push = realPush;
+
+  return {
+    ok: true,
+    deviceCount: engine.launchpads.length,
+    zones: device.layout.zones.length,
+    model: device.spec.model,
+    sent,
+  };
+});
+
+check('emulated Launchpad spawned', launchpad.ok && launchpad.deviceCount === 1,
+  launchpad.ok ? `${launchpad.model}, ${launchpad.zones} controls` : launchpad.reason);
+if (launchpad.ok) {
+  // 64 grid pads + 8 top + 8 scene = 80 pokeable controls; the logo is not one.
+  check('Launchpad X exposes 80 pokeable controls', launchpad.zones === 80,
+    `${launchpad.zones} zones`);
+  const on = launchpad.sent.find((e) => e.type === 1);
+  check('poking a pad sends its XY index, not a MIDI note', on !== undefined && on.d1 === 44,
+    on ? `index ${on.d1} velocity ${on.d2}` : 'nothing sent');
+  check('event is tagged with the device instance id', on !== undefined && on.dev >= 16,
+    on ? `device ${on.dev}` : '');
+}
+
+// Let the blink animation and the touch highlight reach a rendered frame.
+await page.waitForTimeout(200);
+
+const lit = await page.evaluate(() => {
+  const h = window.__vrmc;
+  let lpMesh = null;
+  h.scene.traverse((o) => {
+    if (o.isInstancedMesh && o.count === 80 && o.instanceColor) lpMesh = o;
+  });
+  if (!lpMesh) return { ok: false };
+  const device = h.engine.launchpads[0];
+  const read = (xy) => {
+    const z = device.layout.zoneForIndex(xy);
+    const a = lpMesh.instanceColor.array;
+    return [a[z * 3], a[z * 3 + 1], a[z * 3 + 2]].map((v) => +v.toFixed(3));
+  };
+  return { ok: true, red: read(11), dark: read(88), touched: read(44) };
+});
+check('DAW-driven LED colour reached the instance buffer',
+  lit.ok && lit.red[0] > 0.8 && lit.red[1] < 0.2,
+  lit.ok ? `pad 11 rgb=${JSON.stringify(lit.red)}` : 'no Launchpad mesh');
+check('unlit pads stay visible rather than pure black',
+  lit.ok && lit.dark[0] > 0.01 && lit.dark[0] < 0.2,
+  lit.ok ? `pad 88 rgb=${JSON.stringify(lit.dark)}` : '');
+check('touched pad flashes brighter than its resting colour',
+  lit.ok && lit.touched[0] > 0.5,
+  lit.ok ? `pad 44 rgb=${JSON.stringify(lit.touched)}` : '');
+
 await page.screenshot({ path: process.env.VRMC_SHOT ?? 'render-smoke.png' });
 
 await browser.close();

@@ -13,6 +13,7 @@
   },
   "dependencies": {
     "@react-three/fiber": "^9.7.0",
+    "@vrmc/devices": "workspace:*",
     "@vrmc/interaction": "workspace:*",
     "@vrmc/layout": "workspace:*",
     "@vrmc/protocol": "workspace:*",

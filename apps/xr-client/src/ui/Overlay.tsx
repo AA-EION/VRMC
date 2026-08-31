@@ -1,3 +1,6 @@
+import { DeviceModel } from '@vrmc/devices';
+import { DeviceStatus } from '@vrmc/protocol';
+import type { LaunchpadInstance } from '../devices/LaunchpadInstance.js';
 import type { LinkStatus } from '../net/BridgeLink.js';
 import type { XrSupport } from '../xr/session.js';
 
@@ -12,6 +15,9 @@ export interface OverlayProps {
   onConnect: () => void;
   onEnterXR: () => void;
   onPanic: () => void;
+  devices: readonly LaunchpadInstance[];
+  onAddDevice: (model: string) => void;
+  onRemoveDevice: (deviceId: number) => void;
 }
 
 const STATE_LABEL: Record<LinkStatus['state'], string> = {
@@ -42,6 +48,9 @@ export function Overlay(props: OverlayProps): React.ReactElement {
     onConnect,
     onEnterXR,
     onPanic,
+    devices,
+    onAddDevice,
+    onRemoveDevice,
   } = props;
 
   const connected = status.state === 'open';
@@ -134,6 +143,53 @@ export function Overlay(props: OverlayProps): React.ReactElement {
             {passthrough ? 'Passthrough active.' : 'Running without passthrough.'} Take the headset
             off or press the menu button to end the session.
           </p>
+        )}
+      </section>
+
+      <section className="card">
+        <h2>3 · Devices</h2>
+        <p className="hint">
+          Adding a device makes a MIDI port appear on the computer, named as the real hardware is,
+          so your DAW discovers it the way it would a controller being plugged in. Removing it
+          closes the port again.
+        </p>
+        <div className="row wrap">
+          <button type="button" onClick={() => onAddDevice(DeviceModel.LAUNCHPAD_X)}>
+            + Launchpad X
+          </button>
+          <button type="button" onClick={() => onAddDevice(DeviceModel.LAUNCHPAD_PRO_MK3)}>
+            + Launchpad Pro MK3
+          </button>
+        </div>
+
+        {devices.length === 0 ? (
+          <p className="hint spaced">No emulated devices yet.</p>
+        ) : (
+          <ul className="devices">
+            {devices.map((device) => (
+              <li key={device.deviceId}>
+                <span className="device-name">{device.spec.displayName}</span>
+                <span
+                  className={
+                    device.status === DeviceStatus.READY
+                      ? 'ok'
+                      : device.status === DeviceStatus.FAILED
+                        ? 'bad'
+                        : ''
+                  }
+                >
+                  {device.status === DeviceStatus.READY
+                    ? device.detail
+                    : device.status === DeviceStatus.FAILED
+                      ? device.detail
+                      : 'opening ports…'}
+                </span>
+                <button type="button" onClick={() => onRemoveDevice(device.deviceId)}>
+                  Remove
+                </button>
+              </li>
+            ))}
+          </ul>
         )}
       </section>
 

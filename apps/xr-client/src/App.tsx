@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Canvas } from '@react-three/fiber';
 import type { WebGLRenderer } from 'three';
 import { Engine } from './Engine.js';
+import type { LaunchpadInstance } from './devices/LaunchpadInstance.js';
 import { Scene } from './Scene.js';
 import { Overlay } from './ui/Overlay.js';
 import type { LinkStatus } from './net/BridgeLink.js';
@@ -36,6 +37,9 @@ export function App(): React.ReactElement {
   const rendererRef = useRef<WebGLRenderer | null>(null);
 
   const [support, setSupport] = useState<XrSupport | null>(null);
+  // The engine mutates its device array in place, which React cannot observe,
+  // so it publishes a snapshot whenever the roster changes.
+  const [devices, setDevices] = useState<readonly LaunchpadInstance[]>([]);
   const [status, setStatus] = useState<LinkStatus>(() => engine.link.status());
   const [sessionActive, setSessionActive] = useState(false);
   const [passthrough, setPassthrough] = useState(false);
@@ -44,6 +48,13 @@ export function App(): React.ReactElement {
   useEffect(() => {
     void detectSupport().then(setSupport);
   }, []);
+
+  useEffect(() => {
+    engine.onDevicesChanged = () => setDevices([...engine.launchpads]);
+    return () => {
+      engine.onDevicesChanged = null;
+    };
+  }, [engine]);
 
   // Status pushes are event-driven, but the round-trip figure updates on every
   // pong. Sampling on a timer keeps that off React's critical path and out of
@@ -151,7 +162,7 @@ export function App(): React.ReactElement {
           camera.updateProjectionMatrix();
         }}
       >
-        <Scene engine={engine} />
+        <Scene engine={engine} devices={devices} />
       </Canvas>
 
       <Overlay
@@ -165,6 +176,9 @@ export function App(): React.ReactElement {
         onConnect={handleConnect}
         onEnterXR={() => void handleEnterXR()}
         onPanic={handlePanic}
+        devices={devices}
+        onAddDevice={(model) => engine.addDevice(model)}
+        onRemoveDevice={(id) => engine.removeDevice(id)}
       />
     </>
   );

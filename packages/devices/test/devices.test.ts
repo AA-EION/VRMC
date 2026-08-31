@@ -26,6 +26,7 @@ import {
   to8Bit,
   xy,
   type DeviceSpec,
+  LaunchpadLayout,
   type EmulatorObserver,
 } from '../src/index.js';
 
@@ -437,5 +438,71 @@ describe('LaunchpadEmulator', () => {
   it('requests a mode from the host on demand', () => {
     emu.requestMode(LaunchpadMode.PROGRAMMER);
     expect(midiOut[0]).toEqual([0xf0, 0x00, 0x20, 0x29, 0x02, 0x0c, Command.MODE, 1, 0xf7]);
+  });
+});
+
+describe('LaunchpadLayout', () => {
+  it('sizes the Launchpad X as 9x9 positions, with no left column or bottom row', () => {
+    const layout = new LaunchpadLayout(LAUNCHPAD_X);
+    // Columns 1..9 and rows 1..9.
+    const pitch = LAUNCHPAD_X.padSize + LAUNCHPAD_X.padGap;
+    expect(layout.width).toBeCloseTo(9 * LAUNCHPAD_X.padSize + 8 * LAUNCHPAD_X.padGap, 10);
+    expect(layout.height).toBeCloseTo(layout.width, 10);
+    expect(layout.pitch).toBeCloseTo(pitch, 10);
+  });
+
+  it('sizes the Pro MK3 as 10x10, since it has all four edge strips', () => {
+    const layout = new LaunchpadLayout(LAUNCHPAD_PRO_MK3);
+    const s = LAUNCHPAD_PRO_MK3;
+    expect(layout.width).toBeCloseTo(10 * s.padSize + 9 * s.padGap, 10);
+  });
+
+  it('excludes the logo, which lights but cannot be pressed', () => {
+    const layout = new LaunchpadLayout(LAUNCHPAD_X);
+    expect(layout.zones.some((z) => z.note === 99)).toBe(false);
+    expect(layout.logoPosition()).not.toBeNull();
+  });
+
+  it('carries the device XY index as the zone note', () => {
+    const layout = new LaunchpadLayout(LAUNCHPAD_X);
+    const zone = layout.zones[layout.zoneForIndex(11)]!;
+    expect(zone.note).toBe(11);
+    expect(layout.zoneForIndex(88)).toBeGreaterThanOrEqual(0);
+    expect(layout.zoneForIndex(99)).toBe(-1);
+    expect(layout.zoneForIndex(7)).toBe(-1); // no bottom row on the X
+  });
+
+  it('round-trips every control centre back to its own zone', () => {
+    for (const spec of [LAUNCHPAD_X, LAUNCHPAD_PRO_MK3]) {
+      const layout = new LaunchpadLayout(spec);
+      for (const zone of layout.zones) {
+        const cx = zone.rect.x + zone.rect.width / 2;
+        const cy = zone.rect.y + zone.rect.height / 2;
+        expect(layout.locate(cx, cy)).toBe(zone.index);
+      }
+    }
+  });
+
+  it('treats the gutter between pads as a miss', () => {
+    const layout = new LaunchpadLayout(LAUNCHPAD_X);
+    const gutter = LAUNCHPAD_X.padSize + LAUNCHPAD_X.padGap / 2;
+    expect(layout.locate(gutter, 0.005)).toBe(-1);
+  });
+
+  it('places the grid above and right of the origin on the Pro MK3', () => {
+    // Column 0 and row 0 exist on the Pro MK3, so pad 11 is one pitch in.
+    const layout = new LaunchpadLayout(LAUNCHPAD_PRO_MK3);
+    const zone = layout.zones[layout.zoneForIndex(11)]!;
+    expect(zone.rect.x).toBeCloseTo(layout.pitch, 10);
+    expect(zone.rect.y).toBeCloseTo(layout.pitch, 10);
+  });
+
+  it('marks the surrounding buttons distinctly from grid pads', () => {
+    const layout = new LaunchpadLayout(LAUNCHPAD_X);
+    const grid = layout.zones[layout.zoneForIndex(44)]!;
+    const top = layout.zones[layout.zoneForIndex(91)]!;
+    expect(grid.accidental).toBe(false);
+    expect(top.accidental).toBe(true);
+    expect(top.label).toBe('Up');
   });
 });

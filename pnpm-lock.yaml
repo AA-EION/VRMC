@@ -55,6 +55,9 @@ importers:
       '@react-three/fiber':
         specifier: ^9.7.0
         version: 9.7.0(@types/react@19.2.18)(react-dom@19.2.8(react@19.2.8))(react@19.2.8)(three@0.185.1)
+      '@vrmc/devices':
+        specifier: workspace:*
+        version: link:../../packages/devices
       '@vrmc/interaction':
         specifier: workspace:*
         version: link:../../packages/interaction
@@ -100,6 +103,10 @@ importers:
         version: 8.2.2(@types/node@22.20.1)(esbuild@0.28.2)
 
   packages/devices:
+    dependencies:
+      '@vrmc/layout':
+        specifier: workspace:*
+        version: link:../layout
     devDependencies:
       typescript:
         specifier: ^5.7.2

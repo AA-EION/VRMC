@@ -3,6 +3,8 @@ import { useFrame, useThree } from '@react-three/fiber';
 import { Vector3 } from 'three';
 import type { Camera, Group, Scene as ThreeScene, WebGLRenderer } from 'three';
 import { InstrumentSurface } from './devices/InstrumentSurface.js';
+import { LaunchpadSurface } from './devices/LaunchpadSurface.js';
+import type { LaunchpadInstance } from './devices/LaunchpadInstance.js';
 import type { Engine } from './Engine.js';
 
 /**
@@ -29,6 +31,14 @@ declare global {
 
 export interface SceneProps {
   engine: Engine;
+  /**
+   * The emulated devices to draw.
+   *
+   * Passed in rather than read off the engine so React knows when the list
+   * changed; the engine mutates its own array in place, which a component
+   * cannot observe.
+   */
+  devices: readonly LaunchpadInstance[];
 }
 
 /**
@@ -38,7 +48,7 @@ export interface SceneProps {
  * third argument. That is the only place hand joint poses can be read from —
  * they are valid for that frame and no other.
  */
-export function Scene({ engine }: SceneProps): React.ReactElement {
+export function Scene({ engine, devices }: SceneProps): React.ReactElement {
   const gl = useThree((state) => state.gl);
   const scene = useThree((state) => state.scene);
   const camera = useThree((state) => state.camera);
@@ -74,6 +84,18 @@ export function Scene({ engine }: SceneProps): React.ReactElement {
           position={instrument.transform.origin}
           quaternion={instrument.transform.quaternion}
           showLabels={instrument.id === 'pads'}
+        />
+      ))}
+
+      {/* Emulated hardware. Keyed by device id so React rebuilds a surface only
+          when the device itself changes, not when the roster reorders. */}
+      {devices.map((device) => (
+        <LaunchpadSurface
+          key={device.deviceId}
+          layout={device.layout}
+          leds={device.leds}
+          position={device.transform.origin}
+          quaternion={device.transform.quaternion}
         />
       ))}
 

@@ -11,7 +11,10 @@ import {
 } from '@vrmc/layout';
 import { FingerFrame, KnobControl, PokeDetector, type ControlSink } from '@vrmc/interaction';
 import { DeviceId, EventType, VelocityCurve } from '@vrmc/protocol';
+import { DeviceModel, type DeviceSpec } from '@vrmc/devices';
+import { FIRST_DYNAMIC_DEVICE_ID, MAX_DEVICE_ID, type DeviceStateEntry } from '@vrmc/protocol';
 import { ClickSynth } from './audio/ClickSynth.js';
+import { createLaunchpad, type LaunchpadInstance } from './devices/LaunchpadInstance.js';
 import { BridgeLink } from './net/BridgeLink.js';
 import { NoteRouter, type FeedbackSink } from './net/NoteRouter.js';
 import {
@@ -71,6 +74,15 @@ export class Engine {
   /** Knob index -> CC number. */
   private readonly knobSink: ControlSink;
 
+  /** Emulated hardware, spawned and removed at runtime from the headset. */
+  readonly launchpads: LaunchpadInstance[] = [];
+
+  /** Fires when a device is added or removed, so React can re-render the list. */
+  onDevicesChanged: (() => void) | null = null;
+
+  /** Next id to hand out. Ids are never reused within a session. */
+  private nextDeviceId = FIRST_DYNAMIC_DEVICE_ID;
+
   /** Set from the session; used to release notes on teardown. */
   private running = false;
 
@@ -112,6 +124,75 @@ export class Engine {
     };
 
     this.placeKnobs();
+
+    // LED traffic is decoded straight into the right device's state. Bound once
+    // here rather than per packet: this fires dozens of times per DAW redraw.
+    this.link.onLed = (deviceId, ledIndex, r, g, b, blink) => {
+      const device = this.launchpads.find((d) => d.deviceId === deviceId);
+      device?.applyLed(ledIndex, r, g, b, blink);
+    };
+
+    this.link.onDevices = (roster) => this.applyRoster(roster);
+  }
+
+  /**
+   * Spawn an emulated device.
+   *
+   * The headset is the source of truth: this creates the local surface
+   * immediately so it can be played at once, and asks the bridge to open the
+   * matching MIDI ports. The roster that comes back says whether the DAW can
+   * actually see it.
+   */
+  addDevice(model: string): LaunchpadInstance | null {
+    if (this.nextDeviceId > MAX_DEVICE_ID) return null;
+    const deviceId = this.nextDeviceId++;
+    const instance = createLaunchpad(deviceId, model, this.nextPose(), this.link);
+    if (instance === null) return null;
+    this.launchpads.push(instance);
+    this.link.requestDeviceAdd(deviceId, model);
+    this.onDevicesChanged?.();
+    return instance;
+  }
+
+  /** Remove a device, releasing what it held and closing its ports. */
+  removeDevice(deviceId: number): boolean {
+    const at = this.launchpads.findIndex((d) => d.deviceId === deviceId);
+    if (at < 0) return false;
+    const [instance] = this.launchpads.splice(at, 1);
+    // Release before the ports close, or the notes are stranded in the DAW.
+    instance?.releaseAll();
+    this.link.requestDeviceRemove(deviceId);
+    this.onDevicesChanged?.();
+    return true;
+  }
+
+  private applyRoster(roster: readonly DeviceStateEntry[]): void {
+    let changed = false;
+    for (const entry of roster) {
+      const device = this.launchpads.find((d) => d.deviceId === entry.deviceId);
+      if (device === undefined) continue;
+      if (device.status !== entry.status || device.detail !== entry.detail) {
+        device.status = entry.status;
+        device.detail = entry.detail;
+        changed = true;
+      }
+    }
+    if (changed) this.onDevicesChanged?.();
+  }
+
+  /**
+   * Where the next device goes.
+   *
+   * New devices are placed to the right of the last one, at a comfortable
+   * height, rather than stacked on top of each other. Repositioning by hand is
+   * a later concern; landing somewhere reachable is the immediate one.
+   */
+  private nextPose(): SurfacePose {
+    const n = this.launchpads.length;
+    return {
+      centre: [0.42 + n * 0.34, 0.95, -0.52],
+      tiltDeg: 48,
+    };
   }
 
   /** Instruments, in render order. */
@@ -141,6 +222,11 @@ export class Engine {
       for (const instrument of this.instruments) {
         instrument.detector.update(this.fingers, instrument.router);
       }
+      // Emulated hardware shares the same fingertip frame, so a hand can move
+      // between a Launchpad and the keyboard without either losing track of it.
+      for (const device of this.launchpads) {
+        device.detector.update(this.fingers, device);
+      }
       this.knobs.update(this.fingers, this.knobSink);
     }
 
@@ -169,6 +255,7 @@ export class Engine {
     for (const instrument of this.instruments) {
       instrument.detector.releaseAll(instrument.router);
     }
+    for (const device of this.launchpads) device.releaseAll();
     this.knobs.releaseAll(this.knobSink);
     this.link.endFrame();
     this.link.sendPanic();
