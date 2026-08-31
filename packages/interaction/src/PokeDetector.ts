@@ -111,8 +111,16 @@ export class PokeDetector {
   private readonly prevDepth = new Float32Array(MAX_FINGERS);
   /** Whether prevDepth holds a usable value. */
   private readonly hasPrev = new Uint8Array(MAX_FINGERS);
-  /** Timestamp of this finger's last note-on, for the refractory window. */
-  private readonly lastStrikeMs = new Float32Array(MAX_FINGERS).fill(-1e9);
+  /**
+   * Timestamp of this finger's last note-on, for the refractory window.
+   *
+   * f64, not f32: these are `performance.now()` values, and float32 runs out of
+   * mantissa past ~16.7 million ms. A page left open for five hours would start
+   * quantising the refractory comparison to several milliseconds, which is the
+   * kind of bug that only appears during a long session and looks like the
+   * hardware misbehaving.
+   */
+  private readonly lastStrikeMs = new Float64Array(MAX_FINGERS).fill(-1e9);
   /** Ring of recent approach speeds (m/s) per finger, for peak detection. */
   private readonly speedHistory = new Float32Array(MAX_FINGERS * VELOCITY_HISTORY);
   private readonly speedCursor = new Uint8Array(MAX_FINGERS);

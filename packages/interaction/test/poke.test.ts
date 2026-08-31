@@ -338,3 +338,49 @@ describe('PokeDetector surface pose', () => {
     expect(rig.sink.ons).toHaveLength(0);
   });
 });
+
+describe('PokeDetector across keys of differing height', () => {
+  const kb = new KeyboardLayout(LAUNCHKEY_25);
+
+  /**
+   * Black keys stand 10 mm proud of the white keys, so a fingertip hovering
+   * just above a white key is physically *inside* a black key it slides over.
+   * Triggering there is correct — on real hardware you would have struck the
+   * side of the key — and this pins that down as intended rather than
+   * accidental, since the two zones reference different strike planes.
+   */
+  it('triggers a black key when a hovering finger slides into its raised body', () => {
+    const d = new PokeDetector(kb);
+    d.setPose(0, 0, 0, 0, 0, 0, 1);
+    const rig = new Rig(d);
+
+    const white = kb.zones[0]!; // C2
+    const black = kb.zones[1]!; // C#2, raised
+    const y = kb.height - 0.01; // deep in the black-key band
+
+    // Hover 2 mm above the white key surface, twice so prevDepth is primed.
+    const hoverZ = zForDepth(white.raise, 0.002);
+    rig.step(white.rect.x + 0.002, y, hoverZ);
+    rig.step(white.rect.x + 0.002, y, hoverZ);
+    expect(rig.sink.ons).toHaveLength(0);
+
+    // Slide sideways at the same height, onto the black key.
+    rig.step(black.rect.x + black.rect.width / 2, y, hoverZ);
+    expect(rig.sink.ons.map((e) => e.note)).toEqual([49]);
+  });
+
+  it('lets a finger glide along the front of the keys without hitting accidentals', () => {
+    const d = new PokeDetector(kb);
+    d.setPose(0, 0, 0, 0, 0, 0, 1);
+    const rig = new Rig(d);
+
+    const white = kb.zones[0]!;
+    const hoverZ = zForDepth(white.raise, 0.002);
+    const y = 0.01; // in front of the black-key band
+
+    for (let x = 0.002; x < kb.width - 0.002; x += 0.003) {
+      rig.step(x, y, hoverZ);
+    }
+    expect(rig.sink.ons).toHaveLength(0);
+  });
+});

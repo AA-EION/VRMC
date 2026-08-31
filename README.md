@@ -111,9 +111,12 @@ Turborepo handles the dependency order and caches results, so a second
 
 ## Status
 
-Everything here is built and tested: 90 tests cover the codec, both layouts,
+Everything here is built and tested: 94 tests cover the codec, both layouts,
 the poke and knob state machines, the placement maths, the MIDI translation,
-and the two transports over real sockets.
+and the two transports over real sockets. Two of them are allocation
+regression tests that simulate an hour of playing and assert the heap does not
+grow — the zero-allocation claim the real-time design rests on is checked, not
+assumed.
 
 What has **not** been verified is the parts that need hardware this was not
 built on: the CoreMIDI and teVirtualMIDI backends have no test coverage on
