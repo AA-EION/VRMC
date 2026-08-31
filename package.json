@@ -1,0 +1,25 @@
+{
+  "name": "vrmc",
+  "version": "0.1.0",
+  "private": true,
+  "description": "VRMC — Mixed Reality MIDI controller for Meta Quest 3 with a native desktop virtual-MIDI bridge.",
+  "packageManager": "pnpm@10.33.0",
+  "engines": {
+    "node": ">=20.11.0"
+  },
+  "scripts": {
+    "build": "turbo run build",
+    "dev": "turbo run dev",
+    "test": "turbo run test",
+    "typecheck": "turbo run typecheck",
+    "lint": "turbo run lint",
+    "bridge": "pnpm --filter @vrmc/desktop-bridge start",
+    "xr": "pnpm --filter @vrmc/xr-client dev",
+    "clean": "turbo run clean && rm -rf node_modules"
+  },
+  "devDependencies": {
+    "turbo": "^2.3.3",
+    "typescript": "^5.7.2",
+    "vitest": "^2.1.8"
+  }
+}
