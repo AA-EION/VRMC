@@ -1,6 +1,5 @@
 node_modules/
 dist/
-build/
 .turbo/
 *.tsbuildinfo
 .DS_Store
@@ -18,3 +17,8 @@ unity/UserSettings/
 *.csproj
 *.sln
 render-smoke.png
+
+# Bridge packaging output. The scripts under build/ are source and are tracked,
+# so this is scoped to the two output directories rather than the whole folder.
+apps/desktop-bridge/build/out/
+apps/desktop-bridge/build/dist/

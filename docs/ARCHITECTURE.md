@@ -28,8 +28,9 @@ rather than by anything the app does.
 packages/protocol    Wire format. Zero-allocation writer/reader.
 packages/layout      Geometry: pad grids, piano keyboards, placement maths.
 packages/interaction Poke detection and pinch-grab. No dependencies at all.
+packages/devices     Launchpad emulation: identity, LED SysEx, colour palette.
 apps/xr-client       WebXR + R3F. Reads hands, draws instruments, sends packets.
-apps/desktop-bridge  Receives packets, emits MIDI into a virtual port.
+apps/desktop-bridge  Receives packets, manages virtual devices, emits MIDI.
 ```
 
 The split is not organisational tidiness. The hard parts of this system are the
@@ -37,6 +38,42 @@ fingertip-to-note state machine, the geometry, and the packet format — and all
 three are pure functions of numbers. Keeping them out of the app layers means
 they can be tested exhaustively at a terminal, which is the only practical way
 to iterate on behaviour that otherwise requires a headset on your face.
+
+## Emulating a Launchpad
+
+A Launchpad is not a pad grid with a different label on it. Three things make it
+a different kind of problem:
+
+**It is a display.** Most of what a Launchpad does is show you the state of your
+session — which clips are playing, which are queued, which track is armed. All
+of that is decided by the DAW and pushed to the device. A virtual Launchpad that
+could only send would appear in Ableton and then sit dark, which is not a
+Launchpad. This is why protocol v2 exists.
+
+**It has to be recognised.** A DAW does not ask "are you a Launchpad?" It matches
+the MIDI port name, then confirms with a Universal Device Inquiry and reads a
+two-byte family code out of the reply — `03 01` for the X, `23 01` for the Pro
+MK3. Get either wrong and the control-surface script never binds, silently. So
+the emulation opens ports named as the hardware names them and answers the
+inquiry on both of them, because a host that probes the wrong port and hears
+nothing will give up.
+
+**Its LED protocol has more than one path.** The RGB SysEx is the one people
+document, but Ableton lights most of the grid with plain Note On messages whose
+*velocity* selects one of 128 predefined colours. An emulator that implemented
+only the SysEx would look correct in a protocol test and blank in real use. The
+palette is a table, ported from CoreFW, and the channel number carries the
+animation: channel 1 steady, 2 flashing, 3 pulsing — which is how a queued clip
+looks different from a recording one.
+
+Devices are created and destroyed at runtime. Spawning one in the headset opens
+real ports, which a DAW sees as hardware being plugged in; removing it closes
+them, which reads as an unplug. Notes are released *before* the ports close: a
+port that is already gone cannot carry the Note Offs it owes.
+
+The emulator itself holds no timers. Flashing and pulsing are animated by the
+renderer at frame rate, where frames are. Keeping the emulator clock-free means
+the copy on the desktop and the copy in the headset cannot drift apart.
 
 ## Why the transport is a WebSocket
 
@@ -148,6 +185,14 @@ evidence supports:
   path could not run here either — this build environment has no
   `/dev/snd/seq`, which is why backend construction is guarded and a missing
   MIDI system is non-fatal rather than a crash on startup.
+- **No DAW has ever seen an emulated Launchpad.** The identity constants and
+  the LED protocol are cross-checked against CoreFW and covered by tests, but
+  whether Ableton actually binds its Launchpad script to a virtual port named
+  this way is exactly the thing that cannot be tested without Ableton. Port
+  naming is the most likely thing to need adjustment, which is why
+  `--port-template` exists.
+- **The macOS and Windows binaries have never been run.** See
+  [Packaging](PACKAGING.md).
 - **The client has not run in a headset.** The 3D scene itself *is* verified —
   see below — but nothing inside an XR session is: `immersive-ar` availability,
   the passthrough blend mode, `fillPoses` support and hand joint ordering have
@@ -168,14 +213,18 @@ camera's frustum.
 It then drives the *real* `PokeDetector` and `NoteRouter` with synthetic
 fingertip positions and asserts a strike on pad 1 produces MIDI note 36 with a
 velocity derived from approach speed, lights that pad in the instance colour
-buffer, and keeps it lit while held. That is the only test covering detection,
+buffer, and keeps it lit while held. It also spawns an emulated Launchpad,
+injects LED colours the way the bridge would, and checks they reach the GPU. That is the only test covering detection,
 routing, feedback and the GPU together — the pieces are unit-tested in
 `packages/interaction`, but the wiring between them exists only in the client.
 
-Three real bugs came out of writing it, none of which any amount of type
-checking would have caught: the preview camera framed the instruments out of
-shot entirely, the label plane was occluded by the raised zone boxes, and
-`SurfaceHighlighter` faded held zones despite documenting that it did not.
+Five real bugs came out of writing it, none of which any amount of type checking
+would have caught: the preview camera framed the instruments out of shot
+entirely; the label plane was occluded by the raised zone boxes; labels drew
+dark ink on the dark pad theme; `SurfaceHighlighter` faded held zones despite
+documenting that it did not; and every Launchpad pad rendered washed white,
+because `emissive` is a single uniform shared by all instances while only the
+diffuse is multiplied by `instanceColor`.
 
 Run it alone with `pnpm --filter @vrmc/xr-client test`. It skips cleanly when no
 Chromium is available; set `CHROMIUM_PATH` to point at one.

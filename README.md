@@ -1,11 +1,14 @@
 # VRMC
 
 A mixed-reality MIDI controller for Meta Quest 3, and the desktop bridge that
-makes it look like a normal MIDI device to your DAW.
+makes it look like real hardware to your DAW.
 
-Virtual pads and keys sit on your real desk in full-colour passthrough. You play
-them with your hands — no controllers — and the notes arrive in Ableton, Logic,
-REAPER or Pro Tools as if they came from hardware plugged into USB.
+Virtual pads, keys and Launchpads sit on your real desk in full-colour
+passthrough. You play them with your hands — no controllers — and they arrive in
+Ableton, Logic, REAPER or Pro Tools as if they were plugged into USB. Spawn a
+Launchpad X in the headset and a correctly named MIDI port appears on the
+computer; remove it and the port disappears. The DAW lights its grid, and you
+see that in the headset.
 
 ```
   Quest 3                          Wi-Fi                    Desktop
@@ -60,9 +63,26 @@ reality**.
 | **Pad grid** | 4x4 MPC-style, notes from C1 on channel 10 (the drum channel). Velocity comes from how fast your finger is moving when it crosses the pad. |
 | **Keyboard** | 25-key Launchkey-style layout on channel 1, with correctly proportioned black keys. Slide a pressed finger sideways for a glissando. |
 | **Knobs** | Four pinch-and-drag controls sending 14-bit CC 21–24. |
+| **Launchpad X** | Full emulation: 8x8 velocity pads with polyphonic aftertouch, top row and scene column, and live LEDs driven by the DAW. |
+| **Launchpad Pro MK3** | The same, plus the mode column and track row. |
 
 Layouts are data, not hard-coded — `MPC_4X4`, `LAUNCHPAD_8X8`, `LAUNCHKEY_25`
 and `LAUNCHKEY_49` are all in `@vrmc/layout`, and new ones are a few numbers.
+
+### Emulated hardware
+
+The Launchpads are not lookalikes. They answer the Universal Device Inquiry with
+the family code of the model they emulate, open MIDI ports named as the hardware
+names them, and speak the real LED protocol — the velocity palette Ableton uses
+for most of the grid, the RGB SysEx, and the flashing and pulsing channels that
+distinguish a recording clip from a queued one. Device creation is dynamic: a
+device spawned in the headset opens its ports there and then, which a DAW sees
+as hardware being plugged in.
+
+Protocol details and the 128-entry colour palette derive from
+[CoreFW](https://github.com/anthonyhfm/launchpad-core-firmware), Anthony
+Hofmeister's GPL-3.0 reimplementation of the Launchpad firmware. VRMC is
+GPL-3.0-only for that reason.
 
 ## Repository layout
 
@@ -71,9 +91,10 @@ packages/
   protocol/      Wire format. Allocation-free encoder and decoder.
   layout/        Pad and keyboard geometry, O(1) point-to-zone lookup, placement.
   interaction/   Poke detection, velocity, pinch-grab controls. No dependencies.
+  devices/       Launchpad emulation: identity, LED SysEx, colour palette.
 apps/
   xr-client/     WebXR + React Three Fiber client for the headset.
-  desktop-bridge/ Node receiver and virtual MIDI port.
+  desktop-bridge/ Node receiver, dynamic virtual MIDI ports, device emulation.
 ```
 
 The three packages are shared and framework-free; both apps are thin by
@@ -93,6 +114,8 @@ pnpm xr                 # run the XR client dev server (HTTPS)
 pnpm bridge -- --help          # bridge options
 pnpm bridge -- --list-ports    # show MIDI outputs this machine can see
 pnpm bridge -- --no-midi       # accept packets, send no MIDI (network testing)
+
+pnpm --filter @vrmc/desktop-bridge run package   # build .app / .exe binaries
 ```
 
 Turborepo handles the dependency order and caches results, so a second
@@ -108,6 +131,8 @@ Turborepo handles the dependency order and caches results, so a second
   site, and the HTTPS/`wss` constraint that catches every first attempt.
 - [Wire protocol](docs/PROTOCOL.md) — the packet format, for writing another
   client.
+- [Packaging](docs/PACKAGING.md) — building the `.app` and `.exe`, and why the
+  native addons make it more than one step.
 
 ## Status
 
@@ -125,6 +150,18 @@ and emits the right note.
 
 What has **not** been verified is everything needing hardware this was not built
 on: no XR session has ever run, so passthrough and hand tracking are unproven;
-the CoreMIDI and teVirtualMIDI backends have never run on macOS or Windows; and
-no latency figure in these docs is a measurement. See
+the CoreMIDI and teVirtualMIDI backends have never run on macOS or Windows; no
+DAW has ever seen an emulated Launchpad; and no latency figure in these docs is
+a measurement. See
 [Architecture](docs/ARCHITECTURE.md#what-is-not-yet-verified).
+
+## Licence
+
+GPL-3.0-only. See [LICENSE](LICENSE).
+
+Launchpad protocol details, the USB and SysEx identity constants, and the
+Novation colour palette derive from
+[CoreFW](https://github.com/anthonyhfm/launchpad-core-firmware) by Anthony
+Hofmeister, used under the GPL-3.0. VRMC is not affiliated with, endorsed by, or
+supported by Focusrite or Novation; "Launchpad" and "Launchkey" are their
+trademarks, used here only to describe what the emulation is compatible with.

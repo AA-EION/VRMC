@@ -12,12 +12,14 @@
     "dev": "tsc -p tsconfig.json --watch",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "test": "vitest run",
-    "clean": "rm -rf dist .turbo"
+    "clean": "rm -rf dist .turbo",
+    "bundle": "node build/bundle.mjs",
+    "package": "pnpm bundle && node build/package.mjs"
   },
   "dependencies": {
+    "@vrmc/devices": "workspace:*",
     "@vrmc/protocol": "workspace:*",
-    "ws": "^8.21.3",
-    "@vrmc/devices": "workspace:*"
+    "ws": "^8.21.3"
   },
   "optionalDependencies": {
     "@julusian/midi": "^3.8.1",
@@ -26,6 +28,8 @@
   "devDependencies": {
     "@types/node": "^22.10.2",
     "@types/ws": "^8.5.13",
+    "@yao-pkg/pkg": "^6.22.0",
+    "esbuild": "^0.28.2",
     "typescript": "^5.7.2",
     "vitest": "^2.1.8"
   }

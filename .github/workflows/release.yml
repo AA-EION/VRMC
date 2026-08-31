@@ -1,0 +1,98 @@
+# SPDX-License-Identifier: GPL-3.0-only
+name: Release binaries
+
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+# Each platform builds on its own runner.
+#
+# The packaging script can assemble all three targets from one machine, because
+# the native MIDI addons ship prebuilds for every platform. Building on the
+# native runner anyway costs little and buys two things worth having: the
+# artifact is exercised on the OS it targets before release, and macOS builds
+# are in a position to be signed and notarised, which cannot happen elsewhere.
+jobs:
+  build:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: macos-latest
+            target: macos-arm64
+          - os: macos-13
+            target: macos-x64
+          - os: windows-latest
+            target: windows-x64
+          - os: ubuntu-latest
+            target: linux-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 10
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - run: pnpm --filter @vrmc/protocol --filter @vrmc/layout --filter @vrmc/interaction --filter @vrmc/devices build
+      - run: pnpm --filter @vrmc/desktop-bridge run bundle
+      - run: node build/package.mjs ${{ matrix.target }}
+        working-directory: apps/desktop-bridge
+
+      # Smoke-test the artifact on the OS it targets. --list-ports exits after
+      # enumerating, which proves the executable runs and the native MIDI addon
+      # loaded — the two things most likely to be broken by packaging.
+      - name: Smoke test (macOS)
+        if: runner.os == 'macOS'
+        run: |
+          APP=$(find apps/desktop-bridge/build/dist -name 'vrmc-bridge' -type f | head -1)
+          chmod +x "$APP"
+          "$APP" --list-ports
+      - name: Smoke test (Linux)
+        if: runner.os == 'Linux'
+        run: |
+          BIN=$(find apps/desktop-bridge/build/dist -name 'vrmc-bridge' -type f | head -1)
+          chmod +x "$BIN"
+          "$BIN" --help
+      - name: Smoke test (Windows)
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $exe = Get-ChildItem -Recurse apps/desktop-bridge/build/dist -Filter vrmc-bridge.exe | Select-Object -First 1
+          & $exe.FullName --list-ports
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vrmc-bridge-${{ matrix.target }}
+          path: apps/desktop-bridge/build/dist/*
+          if-no-files-found: error
+
+  release:
+    needs: build
+    if: startsWith(github.ref, 'refs/tags/v')
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+      - name: Zip each target
+        run: |
+          cd artifacts
+          for dir in */; do
+            (cd "$dir" && zip -qr "../${dir%/}.zip" .)
+          done
+      - uses: softprops/action-gh-release@v2
+        with:
+          files: artifacts/*.zip
+          body: |
+            Unsigned builds.
+
+            macOS quarantines an unsigned app on download: right-click the app
+            and choose Open, then confirm. On Windows, SmartScreen shows a
+            warning; choose More info, then Run anyway.

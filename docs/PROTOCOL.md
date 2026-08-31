@@ -1,4 +1,4 @@
-# VRMC wire protocol v1
+# VRMC wire protocol v2
 
 A fixed-width little-endian binary format, carried over WebSocket binary frames
 or UDP datagrams. Both transports are message-oriented and carry their own
@@ -40,9 +40,47 @@ note rather than a clean reject.
 | 4 | `HELLO` | UTF-8 client name |
 | 5 | `PANIC` | Empty. Silence everything. |
 | 6 | `BYE` | Empty. Graceful disconnect; the bridge releases held notes. |
+| 7 | `DEVICE_ADD` | Headset to bridge: `deviceId`, name length, model name. |
+| 8 | `DEVICE_REMOVE` | Headset to bridge: `deviceId`. |
+| 9 | `DEVICE_STATE` | Bridge to headset: the device roster and each one's status. |
+| 10 | `LED_UPDATE` | Bridge to headset: `deviceId`, u16 count, then 5 bytes per LED. |
+| 11 | `SYSEX` | Either direction: `deviceId`, u16 length, raw bytes. |
 
 Unknown kinds are ignored rather than treated as errors, so a newer client can
 add one without breaking an older bridge.
+
+### Why v2 exists
+
+v1 only ever sent headset to bridge, which is all a pad controller needs. A
+Launchpad is a display as much as an input — its LEDs are driven by the DAW — so
+the link had to become bidirectional. The fixed 12-byte event stayed exactly as
+it was, because it is the latency-critical path and had no reason to change;
+the new kinds carry variable-length bodies alongside it.
+
+### LED_UPDATE body
+
+```
+offset  size  field
+     0     1  deviceId
+     1     2  count (u16 little-endian)
+     3    ..  count entries of [ledIndex, r, g, b, blink]
+```
+
+Colour channels are 6-bit (0..63), as the hardware holds them; widening to 8-bit
+is the renderer's job. `blink` is 0 steady, 1 flashing, 2 pulsing — the receiver
+animates those itself.
+
+Writes are coalesced before sending. A DAW lighting a row emits its writes one
+LED at a time, so one scene change can be sixty-odd separate messages within a
+millisecond; sending a packet each would put sixty frames on the wire for a
+single visual change.
+
+### Device instance ids
+
+`deviceId` in the event record is a runtime instance id, not a fixed enum. Ids
+1, 2 and 3 stay reserved for the original pad grid, keyboard and knobs;
+dynamically created devices start at 16. This is what lets two Launchpads be
+live at once without a note started on one being released on the other.
 
 ## Event record — 12 bytes
 
