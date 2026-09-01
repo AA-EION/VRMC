@@ -23,6 +23,7 @@ import {
 import { Router } from '../src/core/Router.js';
 import { DeviceManager } from '../src/devices/DeviceManager.js';
 import { NullSink, NullSource, SimpleVirtualPort } from '../src/midi/MidiSink.js';
+import { Broadcaster } from '../src/net/Broadcaster.js';
 import { WsServer } from '../src/net/WsServer.js';
 
 /**
@@ -319,18 +320,25 @@ describe('end to end over the WebSocket link', () => {
   const cleanups: Array<() => Promise<void> | void> = [];
   let nextPort = 28500;
 
-  async function serve(devices: DeviceManager): Promise<{ ws: WsServer; client: WebSocket }> {
+  async function serve(
+    devices: DeviceManager,
+  ): Promise<{ ws: WsServer; bus: Broadcaster; client: WebSocket }> {
     const router = new Router(devices, {});
     const port = nextPort++;
     const ws = new WsServer(router, { port, host: '127.0.0.1', onLog: () => {} });
+    const bus = new Broadcaster(router.stats);
+    bus.add(ws);
     ws.deviceCount = () => devices.count;
     await ws.listen();
-    cleanups.push(() => ws.close());
+    cleanups.push(async () => {
+      bus.close();
+      await ws.close();
+    });
 
     const client = new WebSocket(`ws://127.0.0.1:${port}`);
     cleanups.push(() => void client.close());
     await new Promise((resolve) => client.once('open', resolve));
-    return { ws, client };
+    return { ws, bus, client };
   }
 
   function send(client: WebSocket, kind: number, fill: (w: PacketWriter) => void): void {
@@ -343,7 +351,7 @@ describe('end to end over the WebSocket link', () => {
   it('spawns a device from the headset and reports it back in the roster', async () => {
     const ports = new FakePorts();
     const devices = makeManager(ports);
-    const { ws, client } = await serve(devices);
+    const { bus, client } = await serve(devices);
 
     const rosters: ReturnType<typeof readDeviceState>[] = [];
     const reader = new PacketReader();
@@ -360,7 +368,7 @@ describe('end to end over the WebSocket link', () => {
     expect(ports.opened).toContain('Launchpad X LPX DAW');
 
     // The roster push tells the headset the ports really opened.
-    ws.sendRoster(devices.roster());
+    bus.sendRoster(devices.roster());
     await vi.waitFor(() => expect(rosters.length).toBeGreaterThan(0), { timeout: 2000 });
     const latest = rosters.at(-1)!;
     expect(latest[0]).toMatchObject({ deviceId: 30, status: DeviceStatus.READY });
@@ -373,12 +381,12 @@ describe('end to end over the WebSocket link', () => {
 
   it('delivers an LED change from the DAW all the way to the headset', async () => {
     const ports = new FakePorts();
-    let ws: WsServer | null = null;
+    let bus: Broadcaster | null = null;
     const devices = makeManager(ports, (id, i, r, g, b, blink) => {
-      ws?.queueLed(id, i, r, g, b, blink);
+      bus?.queueLed(id, i, r, g, b, blink);
     });
     const served = await serve(devices);
-    ws = served.ws;
+    bus = served.bus;
     const client = served.client;
 
     const updates: Array<{ deviceId: number; leds: number[][] }> = [];

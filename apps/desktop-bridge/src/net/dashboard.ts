@@ -49,8 +49,10 @@ export interface DashboardStatus {
   pairingError: string;
   /** Where to open the client in the headset. */
   siteUrl: string;
-  /** wss:// URLs on the LAN wildcard domain, for manual entry. */
-  lanUrls: string[];
+  /** Headsets connected over a WebRTC data channel. */
+  rtcPeers: number;
+  /** Why the bridge is not listening for pairing offers, if it is not. */
+  rtcError: string;
 }
 
 /** Result of one self-test leg. */
@@ -232,16 +234,15 @@ async function refresh() {
   $('pairState').className = s.pairingRegistered ? 'hint ok' : 'hint warn';
 
   const scheme = s.secure ? 'wss' : 'ws';
-  $('addresses').innerHTML = (s.lanUrls && s.lanUrls.length ? s.lanUrls : s.addresses
-  )
-    .map((a) =>
-      '<div class="addr"><code>' +
-      (a.startsWith('wss://') ? a : scheme + '://' + a + ':' + s.wsPort) +
-      '</code></div>')
+  $('addresses').innerHTML = s.addresses
+    .map((a) => '<div class="addr"><code>' + scheme + '://' + a + ':' + s.wsPort + '</code></div>')
     .join('') || '<p class="hint">No LAN address found.</p>';
-  $('tlsNote').textContent = s.secure
-    ? 'These use the LAN wildcard domain so the certificate is valid from the headset.'
-    : 'Plain ws:// — a headset cannot connect at all. TLS was disabled or could not start.';
+  $('tlsNote').textContent = s.rtcError
+    ? 'Pairing is not listening: ' + s.rtcError
+    : s.rtcPeers
+      ? s.rtcPeers + ' headset(s) connected directly over WebRTC.'
+      : 'You should not need these — the pairing code above connects the headset ' +
+        'directly. They are here for a client running on this computer.';
 
   $('devices').innerHTML = s.devices.length
     ? s.devices.map((d) =>

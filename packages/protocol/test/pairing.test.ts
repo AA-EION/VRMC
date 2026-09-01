@@ -3,13 +3,10 @@ import { describe, it, expect } from 'vitest';
 import {
   PAIRING_ALPHABET,
   PAIRING_CODE_LENGTH,
-  addressToLabel,
-  bridgeUrl,
   formatPairingCode,
   generatePairingCode,
   isPairingCode,
   isPrivateAddress,
-  labelToAddress,
   normalisePairingCode,
 } from '../src/index.js';
 
@@ -85,25 +82,7 @@ describe('pairing codes', () => {
   });
 });
 
-describe('LAN hostname addressing', () => {
-  it('encodes an address as a DNS label and back', () => {
-    expect(addressToLabel('192.168.1.42')).toBe('192-168-1-42');
-    expect(labelToAddress('192-168-1-42')).toBe('192.168.1.42');
-  });
-
-  it('round-trips every octet boundary', () => {
-    for (const a of ['10.0.0.1', '172.16.255.254', '192.168.0.0', '100.64.1.1']) {
-      expect(labelToAddress(addressToLabel(a))).toBe(a);
-    }
-  });
-
-  it('rejects labels that are not addresses', () => {
-    expect(labelToAddress('not-a-host')).toBeNull();
-    expect(labelToAddress('192-168-1')).toBeNull();
-    expect(labelToAddress('192-168-1-999')).toBeNull();
-    expect(labelToAddress('192-168-1-42-7')).toBeNull();
-  });
-
+describe('bridge addresses', () => {
   it('recognises the private ranges a bridge can live on', () => {
     expect(isPrivateAddress('192.168.1.42')).toBe(true);
     expect(isPrivateAddress('10.1.2.3')).toBe(true);
@@ -121,11 +100,5 @@ describe('LAN hostname addressing', () => {
     expect(isPrivateAddress('192.169.1.1')).toBe(false);
     expect(isPrivateAddress('not.an.ip.addr')).toBe(false);
     expect(isPrivateAddress('1.2.3')).toBe(false);
-  });
-
-  it('builds a wss URL on the wildcard domain', () => {
-    expect(bridgeUrl('192.168.1.42', 7401, 'lan.vrmc.eionstudios.com')).toBe(
-      'wss://192-168-1-42.lan.vrmc.eionstudios.com:7401',
-    );
   });
 });

@@ -7,10 +7,38 @@ import { Scene } from './Scene.js';
 import { Overlay } from './ui/Overlay.js';
 import type { LinkStatus } from './net/BridgeLink.js';
 import { detectSupport, isBlending, startSession, type XrSupport } from './xr/session.js';
-import { firstReachable, PairingError, resolvePairingCode } from './net/pairing.js';
+import { PairingError, resolvePairingCode } from './net/pairing.js';
+import { rtcTransport, webSocketTransport } from './net/Transport.js';
 
-/** Remember the bridge address between visits; it rarely changes. */
+/**
+ * Remember the pairing code between visits.
+ *
+ * This is what makes the setup a one-time step: the code identifies the
+ * computer, the computer keeps the same code across restarts, and every later
+ * visit reconnects without anyone typing anything.
+ */
+const CODE_STORAGE_KEY = 'vrmc.pairingCode';
+
+/** Remember a manually entered address, for the advanced path. */
 const URL_STORAGE_KEY = 'vrmc.bridgeUrl';
+
+/** Read a remembered value, tolerating storage being unavailable. */
+function recall(key: string): string {
+  try {
+    return localStorage.getItem(key) ?? '';
+  } catch {
+    // Private browsing, or storage disabled.
+    return '';
+  }
+}
+
+function remember(key: string, value: string): void {
+  try {
+    localStorage.setItem(key, value);
+  } catch {
+    // Not fatal; the value just will not survive the visit.
+  }
+}
 
 /**
  * Desktop preview viewpoint: roughly where a seated player's eyes are,
@@ -20,12 +48,8 @@ const PREVIEW_CAMERA: [number, number, number] = [0, 1.32, 0.42];
 const PREVIEW_TARGET: [number, number, number] = [0, 0.86, -0.45];
 
 function defaultBridgeUrl(): string {
-  try {
-    const saved = localStorage.getItem(URL_STORAGE_KEY);
-    if (saved !== null && saved !== '') return saved;
-  } catch {
-    // Private browsing, or storage disabled. Fall through to the default.
-  }
+  const saved = recall(URL_STORAGE_KEY);
+  if (saved !== '') return saved;
   // Same host as the page is the right guess when the client is served by the
   // bridge itself; the scheme has to match, or the browser blocks the socket.
   const scheme = location.protocol === 'https:' ? 'wss' : 'ws';
@@ -34,7 +58,7 @@ function defaultBridgeUrl(): string {
 
 export function App(): React.ReactElement {
   const [bridgeUrl, setBridgeUrl] = useState(defaultBridgeUrl);
-  const engine = useMemo(() => new Engine(bridgeUrl), []);
+  const engine = useMemo(() => new Engine(), []);
   const rendererRef = useRef<WebGLRenderer | null>(null);
 
   const [support, setSupport] = useState<XrSupport | null>(null);
@@ -43,6 +67,8 @@ export function App(): React.ReactElement {
   const [devices, setDevices] = useState<readonly LaunchpadInstance[]>([]);
   const [pairingBusy, setPairingBusy] = useState(false);
   const [pairingNote, setPairingNote] = useState('');
+  /** Name of the paired computer, once one is known. */
+  const [pairedLabel, setPairedLabel] = useState('');
   const [status, setStatus] = useState<LinkStatus>(() => engine.link.status());
   const [sessionActive, setSessionActive] = useState(false);
   const [passthrough, setPassthrough] = useState(false);
@@ -71,20 +97,49 @@ export function App(): React.ReactElement {
     };
   }, [engine]);
 
+  /*
+   * Reconnect on load, without asking.
+   *
+   * A code we already have is the strongest signal: it names a specific
+   * computer that keeps the same code across restarts, so the right thing is
+   * to start the handshake immediately and have the instrument playable by the
+   * time the headset is on. Failing that, a page served over plain HTTP is
+   * almost certainly the bridge's own dashboard or a dev server, where a
+   * WebSocket back to the same host is the obvious guess. On the hosted site
+   * with no saved code there is nothing to guess — the pairing box is the
+   * first thing on the page, and that is the whole first-run flow.
+   */
   useEffect(() => {
-    engine.link.connect(bridgeUrl);
+    const code = recall(CODE_STORAGE_KEY);
+    if (code !== '') {
+      setPairingNote('Reconnecting to your computer…');
+      engine.link.connect(
+        rtcTransport(code, { onProgress: setPairingNote }),
+        `pairing code ${code}`,
+      );
+    } else if (location.protocol !== 'https:') {
+      engine.link.connect(webSocketTransport(bridgeUrl), bridgeUrl);
+    }
     return () => engine.dispose();
-    // Connect once on mount; reconnects go through the Connect button.
+    // Connect once on mount; reconnects go through pairing or the address box.
   }, [engine]);
 
+  // Confirm the connection where the user is looking — the pairing card —
+  // rather than only in the link statistics further down.
+  useEffect(() => {
+    if (status.state !== 'open') return;
+    setPairingNote(pairedLabel === '' ? 'Connected.' : `Connected to ${pairedLabel}.`);
+  }, [status.state, pairedLabel]);
+
   const handleConnect = useCallback(() => {
-    try {
-      localStorage.setItem(URL_STORAGE_KEY, bridgeUrl);
-    } catch {
-      // Not fatal; the address just will not be remembered.
-    }
+    remember(URL_STORAGE_KEY, bridgeUrl);
+    // An address entered by hand replaces the paired computer, or the next
+    // visit would silently go back to the code instead.
+    remember(CODE_STORAGE_KEY, '');
+    setPairedLabel('');
+    setPairingNote('');
     setError('');
-    engine.link.connect(bridgeUrl);
+    engine.link.connect(webSocketTransport(bridgeUrl), bridgeUrl);
   }, [bridgeUrl, engine]);
 
   const handleEnterXR = useCallback(async () => {
@@ -136,35 +191,40 @@ export function App(): React.ReactElement {
   /**
    * Turn a pairing code into a live connection.
    *
-   * The resolved address is remembered, so this is a one-time step: on every
-   * later visit the client reconnects to the address it already knows and the
-   * code is never needed again.
+   * The code is remembered, so this is a one-time step: every later visit
+   * reconnects to the same computer on its own and the code is never needed
+   * again. It is checked against the service first so a mistyped code says so
+   * immediately, rather than after a handshake quietly times out.
    */
   const handlePair = useCallback(
-    async (code: string) => {
+    async (input: string) => {
       setPairingBusy(true);
       setPairingNote('Looking up the code…');
+      let found;
       try {
-        const found = await resolvePairingCode(code);
-        setPairingNote(`Found ${found.label}. Connecting…`);
-        const url = await firstReachable(found.urls);
-        setBridgeUrl(url);
-        try {
-          localStorage.setItem(URL_STORAGE_KEY, url);
-        } catch {
-          // Private browsing; the address just will not be remembered.
-        }
-        engine.link.connect(url);
-        setPairingNote(`Connected to ${found.label}.`);
-        setError('');
+        found = await resolvePairingCode(input);
       } catch (err) {
         const message =
-          err instanceof PairingError ? err.message : err instanceof Error ? err.message : String(err);
+          err instanceof PairingError
+            ? err.message
+            : err instanceof Error
+              ? err.message
+              : String(err);
         setPairingNote('');
         setError(message);
+        return;
       } finally {
         setPairingBusy(false);
       }
+
+      setPairedLabel(found.label);
+      remember(CODE_STORAGE_KEY, found.code);
+      setError('');
+      setPairingNote(`Found ${found.label}. Connecting…`);
+      engine.link.connect(
+        rtcTransport(found.code, { onProgress: setPairingNote }),
+        `${found.label} · ${found.code}`,
+      );
     },
     [engine],
   );

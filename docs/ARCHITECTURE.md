@@ -75,27 +75,39 @@ The emulator itself holds no timers. Flashing and pulsing are animated by the
 renderer at frame rate, where frames are. Keeping the emulator clock-free means
 the copy on the desktop and the copy in the headset cannot drift apart.
 
-## Why the transport is a WebSocket
+## Why the transport is a WebRTC data channel
 
-UDP is the right transport for this traffic and the browser will not give it to
-us. That is the whole story, and it is worth being precise about the trade.
+UDP is the right transport for this traffic and the browser will not hand us a
+socket. For a long time that meant a WebSocket, and it cost twice over: TCP's
+delivery guarantees are actively wrong for MIDI, and a WebSocket from an HTTPS
+page needs a certificate a public authority signed for whatever host it dials —
+which a computer on someone's home network cannot have without its owner running
+a DNS zone and installing a wildcard key.
 
-A MIDI control message has a useful life of a few milliseconds. If one is lost,
-the correct response is to carry on: by the time TCP notices and retransmits,
-the moment the note belonged to has passed. Worse, TCP delivers in order, so one
-lost packet stalls every packet behind it — a single drop becomes an audible gap
-followed by a burst of late notes, which is far more damaging than the missing
-note would have been.
+A WebRTC data channel answers both.
 
-In practice this matters less than it sounds. On a quiet 5 GHz or 6 GHz link
-carrying a few kB/s, there is very little loss to retransmit. What actually
-protects the experience is elsewhere:
+**It is unordered and unreliable, on purpose.** `ordered: false` and
+`maxRetransmits: 0` give datagram semantics over SCTP. A MIDI control message
+has a useful life of a few milliseconds; if one is lost, the correct response is
+to carry on, because by the time TCP would notice and retransmit, the moment the
+note belonged to has passed. Worse, TCP delivers in order, so one lost packet
+stalls every packet behind it — a single drop becomes an audible gap followed by
+a burst of late notes, far more damaging than the missing note would have been.
+That was the compromise the WebSocket forced. It is gone.
 
-- **Nagle is off.** `setNoDelay(true)` on every accepted socket. Otherwise the
-  kernel batches small writes and adds tens of milliseconds.
-- **Compression is off.** `perMessageDeflate: false`. Our packets are 16–784
-  bytes of already-dense binary; compressing them costs CPU and latency to save
-  nothing.
+**It authenticates by DTLS fingerprint.** The peers exchange fingerprints in the
+handshake and verify each other directly, with no certificate authority in the
+picture. No DNS, no certificate, no shipped private key, nothing for the user to
+accept. [PAIRING.md](PAIRING.md) covers how the two are introduced.
+
+**No ICE servers.** Both peers are on the same network, so host candidates are
+enough, and nothing outside the LAN is contacted while connecting — not even to
+discover an address. There is no TURN relay that could quietly become the audio
+path, which would trade a two-millisecond local hop for tens.
+
+The things that actually protect the experience are unchanged and live above the
+transport:
+
 - **Backpressure sheds load rather than queueing.** When `bufferedAmount`
   exceeds 8 KB the client starts dropping aftertouch — never notes. Queueing
   instead would make the instrument feel like it lags further behind the longer
@@ -104,6 +116,16 @@ protects the experience is elsewhere:
   strand a voice, so the bridge tracks every sounding note and releases them on
   disconnect. That is `NoteTracker`, and it is why the transport can afford to
   be lossy.
+- **Events are batched per frame, not per event.** Every event carries its own
+  sub-frame offset, so batching costs no timing accuracy.
+
+The WebSocket is still there for a client on the same machine as the bridge —
+the dashboard, and development — where `ws://` is already a secure context.
+`BridgeLink` drives either through one `Transport` interface, so the batching,
+backpressure and reconnect logic is the same code on both. On that path Nagle is
+off (`setNoDelay(true)`) and compression is off (`perMessageDeflate: false`):
+our packets are 16–784 bytes of already-dense binary, and batching or
+compressing them costs latency to save nothing.
 
 The bridge also listens on UDP with the identical wire format, so a native
 client — Unity, a hardware sender, anything that can open a socket — gets the

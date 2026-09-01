@@ -11,14 +11,13 @@ import {
 } from '@vrmc/protocol';
 import { PairingStore } from './PairingStore.js';
 import { RateLimiter } from './RateLimiter.js';
+import { SignalStore } from './SignalStore.js';
 
 export interface WebServerOptions {
   port: number;
   host: string;
   /** Directory holding the built XR client. */
   staticDir: string;
-  /** Wildcard domain whose subdomains resolve to private addresses. */
-  lanDomain: string;
   onLog?: (message: string) => void;
 }
 
@@ -37,6 +36,15 @@ const MIME: Readonly<Record<string, string>> = {
 const MAX_BODY_BYTES = 4096;
 
 /**
+ * SDP is much larger than a pairing registration — a description with a dozen
+ * ICE candidates runs to a few kilobytes.
+ */
+const MAX_SDP_BYTES = 64 * 1024;
+
+/** How long a long-poll is held open before answering empty. */
+const POLL_TIMEOUT_MS = 20_000;
+
+/**
  * Serves the XR client and brokers pairing, in one process.
  *
  * One process rather than nginx plus a sidecar: the container needs an API now,
@@ -47,6 +55,7 @@ const MAX_BODY_BYTES = 4096;
 export class WebServer {
   private readonly options: WebServerOptions;
   private readonly store: PairingStore;
+  private readonly signals: SignalStore;
   private readonly limiter: RateLimiter;
   private server: ReturnType<typeof createServer> | null = null;
   private readonly root: string;
@@ -55,6 +64,9 @@ export class WebServer {
     this.options = options;
     this.root = resolve(options.staticDir);
     this.store = new PairingStore({ ttlSeconds: PAIRING_TTL_SECONDS, maxEntries: 20000 });
+    // A handshake that has not completed in two minutes has failed; the peers
+    // will start a fresh one rather than resume this.
+    this.signals = new SignalStore({ ttlMs: 120_000, maxPerCode: 4 });
     // Codes are 24^6, so guessing needs millions of attempts; this makes that
     // take years rather than an afternoon, and caps the damage from a bad actor
     // hammering the endpoint.
@@ -81,23 +93,31 @@ export class WebServer {
   }
 
   async close(): Promise<void> {
-    await new Promise<void>((ok) => {
-      if (this.server === null) return ok();
-      this.server.close(() => ok());
-    });
+    const server = this.server;
+    if (server === null) return;
+    // Long polls are held open for twenty seconds. Waiting for them would make
+    // every restart take that long, so in-flight connections are dropped —
+    // a client whose poll dies simply asks again.
+    server.closeAllConnections();
+    await new Promise<void>((ok) => server.close(() => ok()));
   }
 
   private async handle(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? '/', 'http://localhost');
 
     if (url.pathname === '/healthz') {
-      return json(res, 200, { service: 'vrmc-web', pairings: this.store.size });
+      return json(res, 200, {
+        service: 'vrmc-web',
+        pairings: this.store.size,
+        handshakes: this.signals.size,
+      });
     }
 
-    // Lets the client build LAN hostnames without the domain being compiled in,
-    // so one build serves any deployment.
+    // Tells the client this deployment can broker a connection, so a build
+    // served from a bare static host degrades to manual entry rather than
+    // offering a pairing box that could never work.
     if (url.pathname === '/api/config') {
-      return json(res, 200, { lanDomain: this.options.lanDomain });
+      return json(res, 200, { pairing: true });
     }
 
     if (url.pathname === '/api/pair' && req.method === 'POST') {
@@ -111,6 +131,13 @@ export class WebServer {
 
     if (url.pathname === '/api/pair' && req.method === 'DELETE') {
       return this.handleRelease(req, res);
+    }
+
+    const signal = /^\/api\/signal\/([A-Za-z0-9-]{1,16})(?:\/([A-Za-z0-9_-]{1,64}))?$/.exec(
+      url.pathname,
+    );
+    if (signal !== null) {
+      return this.handleSignal(req, res, signal[1]!, signal[2], url);
     }
 
     if (url.pathname.startsWith('/api/')) return json(res, 404, { error: 'not found' });
@@ -162,7 +189,7 @@ export class WebServer {
     // them apart would let someone probe which codes are live.
     if (entry === null) return json(res, 404, { error: 'no bridge with that code' });
 
-    return json(res, 200, { ...entry, lanDomain: this.options.lanDomain });
+    return json(res, 200, entry);
   }
 
   private async handleRelease(req: IncomingMessage, res: ServerResponse): Promise<void> {
@@ -176,6 +203,90 @@ export class WebServer {
       return json(res, 400, { error: 'invalid JSON' });
     }
     return json(res, 200, { ok: true });
+  }
+
+  /**
+   * Broker one step of the WebRTC handshake.
+   *
+   *   POST /api/signal/{code}              headset publishes its offer
+   *   GET  /api/signal/{code}              bridge waits for an offer
+   *   POST /api/signal/{code}/{session}    bridge publishes its answer
+   *   GET  /api/signal/{code}/{session}    headset waits for the answer
+   *
+   * Both GETs are long-polled, so a connection forms as soon as the other side
+   * appears rather than on the next poll tick.
+   */
+  private async handleSignal(
+    req: IncomingMessage,
+    res: ServerResponse,
+    rawCode: string,
+    sessionId: string | undefined,
+    url: URL,
+  ): Promise<void> {
+    if (!this.limiter.allow(clientKey(req))) return json(res, 429, { error: 'slow down' });
+
+    const code = normalisePairingCode(rawCode);
+    if (!isPairingCode(code)) return json(res, 400, { error: 'invalid pairing code' });
+
+    // Only a code some bridge has actually claimed can be signalled on. Without
+    // this the endpoint would be an open message queue keyed by any string.
+    if (this.store.lookup(code) === null) {
+      return json(res, 404, { error: 'no bridge with that code' });
+    }
+
+    if (req.method === 'POST' && sessionId === undefined) {
+      const body = await readBody(req, MAX_SDP_BYTES);
+      if (body === null) return tooLarge(req, res);
+      let offer: string;
+      let id: string;
+      try {
+        const parsed = JSON.parse(body) as { offer?: string; sessionId?: string };
+        offer = String(parsed.offer ?? '');
+        id = String(parsed.sessionId ?? '');
+      } catch {
+        return json(res, 400, { error: 'invalid JSON' });
+      }
+      if (offer.length === 0 || !/^[A-Za-z0-9_-]{1,64}$/.test(id)) {
+        return json(res, 400, { error: 'offer and sessionId are required' });
+      }
+      if (!this.signals.putOffer(code, id, offer)) {
+        return json(res, 429, { error: 'too many handshakes in flight for that code' });
+      }
+      return json(res, 202, { ok: true });
+    }
+
+    if (req.method === 'GET' && sessionId === undefined) {
+      const session = await this.signals.waitForOffer(code, POLL_TIMEOUT_MS);
+      if (session === null) return json(res, 204, {});
+      return json(res, 200, { sessionId: session.sessionId, offer: session.offer });
+    }
+
+    if (req.method === 'POST' && sessionId !== undefined) {
+      const body = await readBody(req, MAX_SDP_BYTES);
+      if (body === null) return tooLarge(req, res);
+      let answer: string;
+      try {
+        answer = String((JSON.parse(body) as { answer?: string }).answer ?? '');
+      } catch {
+        return json(res, 400, { error: 'invalid JSON' });
+      }
+      if (answer.length === 0) return json(res, 400, { error: 'answer is required' });
+      if (!this.signals.putAnswer(code, sessionId, answer)) {
+        return json(res, 404, { error: 'unknown session' });
+      }
+      return json(res, 202, { ok: true });
+    }
+
+    if (req.method === 'GET' && sessionId !== undefined) {
+      const answer = await this.signals.waitForAnswer(code, sessionId, POLL_TIMEOUT_MS);
+      if (answer === null) return json(res, 204, {});
+      // The handshake is done and the peers talk directly from here.
+      this.signals.release(code, sessionId);
+      return json(res, 200, { answer });
+    }
+
+    void url;
+    return json(res, 405, { error: 'method not allowed' });
   }
 
   /**
@@ -230,7 +341,7 @@ function text(res: ServerResponse, status: number, body: string): void {
  * network error instead of the 413 explaining what went wrong — the socket is
  * torn down afterwards, once the response has been sent.
  */
-async function readBody(req: IncomingMessage): Promise<string | null> {
+async function readBody(req: IncomingMessage, limit = MAX_BODY_BYTES): Promise<string | null> {
   return new Promise((resolve) => {
     let size = 0;
     let overflowed = false;
@@ -238,7 +349,7 @@ async function readBody(req: IncomingMessage): Promise<string | null> {
     req.on('data', (chunk: Buffer) => {
       if (overflowed) return;
       size += chunk.length;
-      if (size > MAX_BODY_BYTES) {
+      if (size > limit) {
         overflowed = true;
         req.pause();
         resolve(null);

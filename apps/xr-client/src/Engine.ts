@@ -86,8 +86,8 @@ export class Engine {
   /** Set from the session; used to release notes on teardown. */
   private running = false;
 
-  constructor(url: string) {
-    this.link = new BridgeLink(url);
+  constructor() {
+    this.link = new BridgeLink();
 
     this.instruments = [
       this.buildInstrument(

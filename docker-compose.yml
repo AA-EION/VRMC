@@ -20,11 +20,6 @@ services:
     image: vrmc-web:latest
     container_name: vrmc-web
     restart: unless-stopped
-    environment:
-      # Wildcard domain whose subdomains resolve to private addresses, so a
-      # headset can reach a bridge on the LAN over a genuinely valid
-      # certificate. See docs/PAIRING.md.
-      LAN_DOMAIN: ${LAN_DOMAIN:-lan.vrmc.eionstudios.com}
     ports:
       # Bound to loopback: the only thing that should reach this container is
       # the proxy on the same host. Publishing on 0.0.0.0 would expose a plain

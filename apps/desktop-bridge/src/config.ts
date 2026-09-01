@@ -15,14 +15,20 @@ export interface BridgeConfig {
   tlsCert?: string;
   tlsKey?: string;
   /**
-   * Disable TLS. Almost never right: WebXR only runs in a secure context, so a
-   * client reached over plain ws:// cannot enter an immersive session.
+   * Generate a self-signed certificate so the WebSocket speaks wss://.
+   *
+   * Off by default, and rarely worth turning on. A headset on the hosted client
+   * connects over a WebRTC data channel, which authenticates by DTLS
+   * fingerprint and needs no certificate at all; the WebSocket is left for a
+   * client running on this same machine, where plain ws:// is a secure context
+   * already. A self-signed certificate here would only produce a warning
+   * nobody should be taught to click through.
    */
-  noTls: boolean;
+  selfSignedTls: boolean;
   /** Base URL of the pairing service, or empty to publish nothing. */
   pairingService: string;
-  /** Wildcard domain whose subdomains resolve to private LAN addresses. */
-  lanDomain: string;
+  /** Accept headset connections brokered over WebRTC by the pairing service. */
+  enableRtc: boolean;
   loopbackPattern: RegExp;
   /**
    * How emulated devices name their MIDI ports. `{device}` is the model's
@@ -47,9 +53,9 @@ export const DEFAULT_CONFIG: BridgeConfig = {
   statsInterval: 10,
   loopbackPattern: WINDOWS_LOOPBACK_PATTERN,
   portNameTemplate: '{device} {port}',
-  noTls: false,
+  selfSignedTls: false,
   pairingService: 'https://vrmc.eionstudios.com',
-  lanDomain: 'lan.vrmc.eionstudios.com',
+  enableRtc: true,
 };
 
 export const USAGE = `
@@ -64,11 +70,11 @@ Usage: vrmc-bridge [options]
   --no-udp             Disable the UDP transport
   --no-ws              Disable the WebSocket transport
   --no-midi            Accept packets but send no MIDI (network testing)
-  --tls-cert <path>    TLS certificate (default: generated on first run)
+  --tls-cert <path>    TLS certificate for the WebSocket
   --tls-key <path>     TLS private key
-  --no-tls             Serve plain ws:// — a headset cannot use this
+  --self-signed-tls    Generate a certificate and serve wss:// (rarely needed)
   --pair-service <url> Pairing service base URL ("" to disable)
-  --lan-domain <host>  Wildcard domain resolving to private addresses
+  --no-rtc             Refuse WebRTC connections from the hosted client
   --loopback <regex>   Windows: pattern for the fallback port
   --port-template <s>  Naming for emulated device ports
                        (default: "{device} {port}", e.g. "Launchpad X LPX DAW")
@@ -76,10 +82,10 @@ Usage: vrmc-bridge [options]
   --list-ports         List MIDI outputs and exit
   --help               Show this message
 
-TLS is on by default with a certificate generated on first run, because WebXR
-only runs in a secure context. To be reached from a hosted client without a
-warning, the bridge needs a certificate for the LAN wildcard domain — see
-docs/PAIRING.md.
+A headset running the hosted client connects over a WebRTC data channel: read
+the pairing code off the dashboard, type it in the headset, and the two
+negotiate a direct connection. No certificate, no DNS, no port forwarding —
+see docs/PAIRING.md.
 `.trimStart();
 
 class ArgError extends Error {}
@@ -139,14 +145,14 @@ export function parseArgs(argv: readonly string[]): BridgeConfig | 'help' {
       case '--tls-key':
         config.tlsKey = requireValue(arg, argv[++i]);
         break;
-      case '--no-tls':
-        config.noTls = true;
+      case '--self-signed-tls':
+        config.selfSignedTls = true;
         break;
       case '--pair-service':
         config.pairingService = argv[++i] ?? '';
         break;
-      case '--lan-domain':
-        config.lanDomain = requireValue(arg, argv[++i]);
+      case '--no-rtc':
+        config.enableRtc = false;
         break;
       case '--loopback':
         config.loopbackPattern = new RegExp(requireValue(arg, argv[++i]), 'i');
@@ -170,8 +176,8 @@ export function parseArgs(argv: readonly string[]): BridgeConfig | 'help' {
     }
   }
 
-  if (!config.enableWs && !config.enableUdp) {
-    throw new ArgError('--no-ws and --no-udp together leave no way in');
+  if (!config.enableWs && !config.enableUdp && !config.enableRtc) {
+    throw new ArgError('--no-ws, --no-udp and --no-rtc together leave no way in');
   }
   if (Boolean(config.tlsCert) !== Boolean(config.tlsKey)) {
     throw new ArgError('--tls-cert and --tls-key must be given together');

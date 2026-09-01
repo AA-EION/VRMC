@@ -83,27 +83,6 @@ export function isPairingCode(code: string): boolean {
   return true;
 }
 
-/**
- * Encode an IPv4 address as a DNS label.
- *
- * `192.168.1.42` becomes `192-168-1-42`, which as a subdomain of a wildcard
- * zone resolves back to the same address.
- */
-export function addressToLabel(address: string): string {
-  return address.replace(/\./g, '-');
-}
-
-/** Decode a DNS label back to an IPv4 address, or null if it is not one. */
-export function labelToAddress(label: string): string | null {
-  const parts = label.split('-');
-  if (parts.length !== 4) return null;
-  for (const part of parts) {
-    if (!/^\d{1,3}$/.test(part)) return null;
-    if (Number(part) > 255) return null;
-  }
-  return parts.join('.');
-}
-
 /** True for the private ranges a bridge can legitimately be reached on. */
 export function isPrivateAddress(address: string): boolean {
   const parts = address.split('.').map(Number);
@@ -117,16 +96,6 @@ export function isPrivateAddress(address: string): boolean {
   // Carrier-grade NAT, which some mesh networks use.
   if (a === 100 && b >= 64 && b <= 127) return true;
   return false;
-}
-
-/**
- * Build the wss:// URL for a bridge at `address`.
- *
- * The hostname is public and the certificate genuinely covers it, so the
- * headset connects with no warning — while the packets go straight to the LAN.
- */
-export function bridgeUrl(address: string, port: number, lanDomain: string): string {
-  return `wss://${addressToLabel(address)}.${lanDomain}:${port}`;
 }
 
 // --- Pairing service API ---

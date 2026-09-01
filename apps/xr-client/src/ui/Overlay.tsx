@@ -123,7 +123,7 @@ export function Overlay(props: OverlayProps): React.ReactElement {
         {status.lastError !== '' && !connected && (
           <p className="warn">
             {status.lastError}
-            {location.protocol === 'https:' && bridgeUrl.startsWith('ws://') && (
+            {location.protocol === 'https:' && status.url.startsWith('ws://') && (
               <>
                 {' '}
                 This page is served over HTTPS, which cannot open a plain <code>ws://</code> socket.

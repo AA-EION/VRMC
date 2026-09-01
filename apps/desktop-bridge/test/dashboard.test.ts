@@ -7,6 +7,7 @@ import { Router } from '../src/core/Router.js';
 import { runSelfTest } from '../src/core/selfTest.js';
 import { DeviceManager } from '../src/devices/DeviceManager.js';
 import { NullSink, NullSource, SimpleVirtualPort } from '../src/midi/MidiSink.js';
+import { Broadcaster } from '../src/net/Broadcaster.js';
 import { WsServer } from '../src/net/WsServer.js';
 import type { DashboardStatus } from '../src/net/dashboard.js';
 
@@ -17,9 +18,14 @@ afterEach(async () => {
 
 let nextPort = 28700;
 
-async function serve(): Promise<{ ws: WsServer; devices: DeviceManager; port: number }> {
+async function serve(): Promise<{
+  ws: WsServer;
+  bus: Broadcaster;
+  devices: DeviceManager;
+  port: number;
+}> {
   const devices = new DeviceManager(
-    { onLed: (...a) => ws.queueLed(...a), onRosterChange: () => {}, onLog: () => {} },
+    { onLed: (...a) => bus.queueLed(...a), onRosterChange: () => {}, onLog: () => {} },
     {
       noMidi: false,
       loopbackPattern: /never/,
@@ -31,9 +37,11 @@ async function serve(): Promise<{ ws: WsServer; devices: DeviceManager; port: nu
       }),
     },
   );
-  const router = new Router(devices, { onPong: () => ws.notePong() });
+  const router = new Router(devices, { onPong: () => bus.notePong() });
   const port = nextPort++;
   const ws = new WsServer(router, { port, host: '127.0.0.1', onLog: () => {} });
+  const bus = new Broadcaster(router.stats);
+  bus.add(ws);
   ws.deviceCount = () => devices.count;
   ws.statusProvider = (): DashboardStatus => ({
     version: 'test',
@@ -41,7 +49,7 @@ async function serve(): Promise<{ ws: WsServer; devices: DeviceManager; port: nu
     wsPort: port,
     udpPort: port + 1,
     secure: false,
-    clients: ws.clientCount,
+    clients: bus.clientCount,
     devices: devices.roster(),
     lastPacketAgoMs: router.stats.lastPacketAt === 0 ? null : Date.now() - router.stats.lastPacketAt,
     packetsIn: router.stats.packets,
@@ -57,12 +65,16 @@ async function serve(): Promise<{ ws: WsServer; devices: DeviceManager; port: nu
     pairingRegistered: true,
     pairingError: '',
     siteUrl: 'https://vrmc.eionstudios.com',
-    lanUrls: ['wss://192-168-1-50.lan.example.com:7401'],
+    rtcPeers: 1,
+    rtcError: '',
   });
-  ws.selfTest = (what) => runSelfTest(what, ws, devices);
+  ws.selfTest = (what) => runSelfTest(what, bus, devices);
   await ws.listen();
-  cleanups.push(() => ws.close());
-  return { ws, devices, port };
+  cleanups.push(async () => {
+    bus.close();
+    await ws.close();
+  });
+  return { ws, bus, devices, port };
 }
 
 describe('dashboard', () => {

@@ -61,7 +61,7 @@ jobs:
 
           # The pairing service is what lets a headset on the public site find
           # a bridge on someone's LAN, so its round trip is checked here too.
-          curl -fsS http://127.0.0.1:8080/api/config | grep -q lanDomain
+          curl -fsS http://127.0.0.1:8080/api/config | grep -q '"pairing":true'
           curl -fsS -X POST http://127.0.0.1:8080/api/pair \
             -H 'content-type: application/json' \
             -d '{"code":"K7M2QX","addresses":["192.168.1.42"],"port":7401,"label":"ci","version":"0"}' \
@@ -73,6 +73,26 @@ jobs:
             -H 'content-type: application/json' \
             -d '{"code":"AAAAAA","addresses":["8.8.8.8"],"port":7401,"label":"x","version":"0"}' \
             | grep -q 400
+
+          # The signalling exchange is the whole connection path now, so the
+          # round trip is checked here: a headset posts an offer, a bridge
+          # collects it, answers, and the headset reads the answer back.
+          curl -fsS -X POST http://127.0.0.1:8080/api/signal/K7M2QX \
+            -H 'content-type: application/json' \
+            -d '{"sessionId":"ci1","offer":"v=0 fake-offer"}' \
+            | grep -q '"ok":true'
+          curl -fsS http://127.0.0.1:8080/api/signal/K7M2QX | grep -q 'fake-offer'
+          curl -fsS -X POST http://127.0.0.1:8080/api/signal/K7M2QX/ci1 \
+            -H 'content-type: application/json' \
+            -d '{"answer":"v=0 fake-answer"}' \
+            | grep -q '"ok":true'
+          curl -fsS http://127.0.0.1:8080/api/signal/K7M2QX/ci1 | grep -q 'fake-answer'
+          # Signalling on a code no bridge has claimed must be refused, or the
+          # endpoint is an open message queue keyed by any string.
+          curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8080/api/signal/WXYZ23 \
+            -H 'content-type: application/json' \
+            -d '{"sessionId":"x","offer":"v=0"}' \
+            | grep -q 404
 
           # Unknown paths must fall back to the document, not 404: the client is
           # a single-page app and may be mounted under any route.

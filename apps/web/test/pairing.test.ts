@@ -120,7 +120,6 @@ describe('WebServer', () => {
       port: 0,
       host: '127.0.0.1',
       staticDir: root,
-      lanDomain: 'lan.example.com',
     });
     port = await server.listen();
   });
@@ -165,7 +164,7 @@ describe('WebServer', () => {
 
   it('publishes the LAN domain so one build serves any deployment', async () => {
     const res = await fetch(url('/api/config'));
-    expect(await res.json()).toEqual({ lanDomain: 'lan.example.com' });
+    expect(await res.json()).toEqual({ pairing: true });
   });
 
   it('registers a bridge and resolves its code', async () => {
@@ -183,7 +182,6 @@ describe('WebServer', () => {
       addresses: ['192.168.1.42'],
       port: 7401,
       label: 'Studio Mac',
-      lanDomain: 'lan.example.com',
     });
   });
 
@@ -239,5 +237,143 @@ describe('WebServer', () => {
 
   it('404s an unknown API route rather than serving the document', async () => {
     expect((await fetch(url('/api/nope'))).status).toBe(404);
+  });
+});
+
+describe('WebRTC signalling', () => {
+  let server: WebServer;
+  let port: number;
+  let root: string;
+
+  const REG = {
+    code: 'K7M2QX',
+    addresses: ['192.168.1.42'],
+    port: 7401,
+    label: 'Studio Mac',
+    version: '0.1.0',
+  };
+
+  beforeEach(async () => {
+    root = mkdtempSync(join(tmpdir(), 'vrmc-sig-'));
+    writeFileSync(join(root, 'index.html'), '<div id="root"></div>');
+    server = new WebServer({
+      port: 0,
+      host: '127.0.0.1',
+      staticDir: root,
+    });
+    port = await server.listen();
+    await fetch(`http://127.0.0.1:${port}/api/pair`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify(REG),
+    });
+  });
+
+  afterEach(async () => {
+    await server.close();
+  });
+
+  const url = (p: string): string => `http://127.0.0.1:${port}${p}`;
+
+  it('carries an offer from the headset to a waiting bridge', async () => {
+    // The bridge waits first, as it does in practice.
+    const waiting = fetch(url('/api/signal/K7M2QX'));
+
+    await new Promise((r) => setTimeout(r, 50));
+    const posted = await fetch(url('/api/signal/K7M2QX'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: 'sess-1', offer: 'v=0 fake offer' }),
+    });
+    expect(posted.status).toBe(202);
+
+    const res = await waiting;
+    expect(res.status).toBe(200);
+    expect(await res.json()).toEqual({ sessionId: 'sess-1', offer: 'v=0 fake offer' });
+  });
+
+  it('hands over an offer that arrived before the bridge asked', async () => {
+    await fetch(url('/api/signal/K7M2QX'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: 'sess-2', offer: 'early' }),
+    });
+    const res = await fetch(url('/api/signal/K7M2QX'));
+    expect(((await res.json()) as { offer: string }).offer).toBe('early');
+  });
+
+  it('carries the answer back to the waiting headset', async () => {
+    await fetch(url('/api/signal/K7M2QX'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: 'sess-3', offer: 'o' }),
+    });
+
+    const waiting = fetch(url('/api/signal/K7M2QX/sess-3'));
+    await new Promise((r) => setTimeout(r, 50));
+    const posted = await fetch(url('/api/signal/K7M2QX/sess-3'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ answer: 'v=0 fake answer' }),
+    });
+    expect(posted.status).toBe(202);
+
+    const res = await waiting;
+    expect(((await res.json()) as { answer: string }).answer).toBe('v=0 fake answer');
+  });
+
+  it('refuses to signal on a code no bridge has claimed', async () => {
+    // Otherwise this is an open message queue keyed by any string.
+    const res = await fetch(url('/api/signal/AAAAAA'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: 's', offer: 'o' }),
+    });
+    expect(res.status).toBe(404);
+  });
+
+  it('rejects a malformed session id', async () => {
+    const res = await fetch(url('/api/signal/K7M2QX'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: 'bad id!', offer: 'o' }),
+    });
+    expect(res.status).toBe(400);
+  });
+
+  it('caps concurrent handshakes on one code', async () => {
+    const post = (id: string): Promise<Response> =>
+      fetch(url('/api/signal/K7M2QX'), {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ sessionId: id, offer: 'o' }),
+      });
+    const codes = [];
+    for (const id of ['a', 'b', 'c', 'd', 'e', 'f']) codes.push((await post(id)).status);
+    expect(codes).toContain(429);
+  });
+
+  it('holds a long poll open rather than answering immediately', async () => {
+    // The real timeout is 20s; this only checks it does not return at once.
+    // Aborted rather than abandoned, or shutdown would wait for it.
+    const control = new AbortController();
+    const poll = fetch(url('/api/signal/K7M2QX'), { signal: control.signal });
+    const outcome = await Promise.race([
+      poll.then(() => 'answered' as const).catch(() => 'aborted' as const),
+      new Promise<'held'>((r) => setTimeout(() => r('held'), 300)),
+    ]);
+    control.abort();
+    await poll.catch(() => undefined);
+    expect(outcome).toBe('held');
+  });
+
+  it('reports handshakes in flight on the health probe', async () => {
+    await fetch(url('/api/signal/K7M2QX'), {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ sessionId: 'sess-h', offer: 'o' }),
+    });
+    const health = (await (await fetch(url('/healthz'))).json()) as { handshakes: number };
+    expect(health.handshakes).toBeGreaterThan(0);
   });
 });

@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 import { networkInterfaces } from 'node:os';
-import { DeviceId, DeviceStatus, bridgeUrl, isPrivateAddress } from '@vrmc/protocol';
+import { DeviceId, DeviceStatus, isPrivateAddress } from '@vrmc/protocol';
 import { ArgError, parseArgs, USAGE, type BridgeConfig } from './config.js';
 import { Router } from './core/Router.js';
 import { BRIDGE_VERSION, runSelfTest } from './core/selfTest.js';
@@ -8,6 +8,9 @@ import { ensureCertificate } from './setup/certificate.js';
 import { PairingPublisher } from './setup/pairing.js';
 import { DEFAULT_PORT_NAME_TEMPLATE, DeviceManager } from './devices/DeviceManager.js';
 import { listPorts } from './midi/openPort.js';
+import { Broadcaster } from './net/Broadcaster.js';
+import { RtcTransport } from './net/RtcTransport.js';
+import { SignalClient } from './net/SignalClient.js';
 import { UdpServer } from './net/UdpServer.js';
 import { WsServer } from './net/WsServer.js';
 
@@ -60,16 +63,16 @@ async function main(): Promise<void> {
     return;
   }
 
-  // Declared before the manager so its callbacks can reach the server, and
-  // before the server so the server can read the device count.
-  let ws: WsServer | null = null;
+  // Declared before the manager so its callbacks can reach it, and before the
+  // router because it is built from the router's stats.
+  let broadcast: Broadcaster | null = null;
 
   const devices = new DeviceManager(
     {
       onLed: (deviceId, ledIndex, r, g, b, blink) => {
-        ws?.queueLed(deviceId, ledIndex, r, g, b, blink);
+        broadcast?.queueLed(deviceId, ledIndex, r, g, b, blink);
       },
-      onRosterChange: () => ws?.sendRoster(devices.roster()),
+      onRosterChange: () => broadcast?.sendRoster(devices.roster()),
       onLog: log,
     },
     {
@@ -91,19 +94,21 @@ async function main(): Promise<void> {
     onPanic: (released) => log(`panic: released ${released} note(s)`),
     onHello: (name) => log(`client identified as "${name}"`),
     onBye: () => log('client said goodbye'),
-    onRosterChange: () => ws?.sendRoster(devices.roster()),
-    onPong: () => ws?.notePong(),
+    onRosterChange: () => broadcast?.sendRoster(devices.roster()),
+    onPong: () => broadcast?.notePong(),
     // Rate-limited by the caller below; a flood of malformed packets should not
     // itself become the thing that stalls the process.
     onMalformed: throttle((reason) => log(`dropped malformed packet: ${reason}`), 1000),
   });
 
-  // TLS is on unless explicitly refused. A headset cannot use a plain ws://
-  // bridge at all — WebXR requires a secure context — so making the user
-  // supply certificates was making the wrong thing their problem.
+  // TLS on the WebSocket is opt-in, and almost nobody needs it. The headset
+  // reaches this bridge over a WebRTC data channel — authenticated by DTLS
+  // fingerprint, so there is no certificate to obtain, install or trust — and
+  // what is left on the WebSocket is a client running on this same machine,
+  // where plain ws:// is already a secure context.
   let tlsCert = config.tlsCert;
   let tlsKey = config.tlsKey;
-  if (!config.noTls && (tlsCert === undefined || tlsKey === undefined)) {
+  if (config.selfSignedTls && (tlsCert === undefined || tlsKey === undefined)) {
     try {
       const generated = await ensureCertificate(reachableAddresses(config.host));
       tlsCert = generated.certPath;
@@ -113,11 +118,11 @@ async function main(): Promise<void> {
       }
     } catch (err) {
       log(`could not prepare TLS: ${err instanceof Error ? err.message : String(err)}`);
-      log('falling back to plain ws:// — a headset will not be able to connect');
+      log('continuing on plain ws://');
     }
   }
 
-  ws = config.enableWs
+  const ws = config.enableWs
     ? new WsServer(router, {
         port: config.wsPort,
         host: config.host,
@@ -126,6 +131,22 @@ async function main(): Promise<void> {
         onLog: log,
       })
     : null;
+  // Every headset-bound packet fans out through here, so a client on the
+  // WebSocket and one on a data channel see exactly the same stream.
+  const bus = new Broadcaster(router.stats);
+  broadcast = bus;
+  if (ws !== null) bus.add(ws);
+
+  const rtc = config.enableRtc
+    ? new RtcTransport(router, {
+        onLog: log,
+        // A headset that has just arrived has no idea what devices exist, and
+        // it is the roster that tells it what to draw.
+        onPeerChange: () => bus.sendRoster(devices.roster()),
+      })
+    : null;
+  if (rtc !== null) bus.add(rtc);
+
   if (ws !== null) {
     ws.deviceCount = () => devices.count;
 
@@ -135,7 +156,7 @@ async function main(): Promise<void> {
       wsPort: config.wsPort,
       udpPort: config.udpPort,
       secure: ws?.secure ?? false,
-      clients: ws?.clientCount ?? 0,
+      clients: bus.clientCount,
       devices: devices.roster(),
       lastPacketAgoMs:
         router.stats.lastPacketAt === 0 ? null : Date.now() - router.stats.lastPacketAt,
@@ -152,10 +173,13 @@ async function main(): Promise<void> {
       pairingRegistered: pairing?.isRegistered ?? false,
       pairingError: pairing?.error ?? '',
       siteUrl: config.pairingService,
-      lanUrls: lanAddresses().map((a) => bridgeUrl(a, config.wsPort, config.lanDomain)),
+      rtcPeers: rtc?.peerCount ?? 0,
+      rtcError: signalling?.error ?? '',
     });
 
-    ws.selfTest = (what) => runSelfTest(what, ws, devices);
+    // Audits the whole outbound path, so it covers whichever transport the
+    // headset actually arrived on.
+    ws.selfTest = (what) => runSelfTest(what, bus, devices);
   }
 
   const udp = config.enableUdp
@@ -182,15 +206,14 @@ async function main(): Promise<void> {
     }
   }
   if (udp !== null) log(`listening  udp://${config.host}:${config.udpPort}`);
-  if (ws !== null && !ws.secure) {
-    log('note: plain ws:// — an HTTPS-hosted client will refuse this. See --tls-cert.');
-  }
 
-  // Publishing the pairing code is what lets a headset on the hosted client
-  // find this machine without anyone typing an IP address.
+  /** Addresses a headset could plausibly reach this machine on. */
   const lanAddresses = (): string[] =>
     reachableAddresses(config.host).filter(isPrivateAddress);
 
+  // Publishing the pairing code is what lets a headset on the hosted client
+  // find this machine without anyone typing an address. The code is also what
+  // the WebRTC handshake is keyed on, so the two go up together.
   const pairing =
     config.pairingService === ''
       ? null
@@ -203,11 +226,34 @@ async function main(): Promise<void> {
         });
   pairing?.start();
 
+  /*
+   * Wait at the pairing service for a headset that wants in.
+   *
+   * This is the whole connection story for someone using the hosted client:
+   * they read six characters off the dashboard and type them in the headset.
+   * No certificate to install, no hostname to configure, no port to forward —
+   * the offer arrives here, the answer goes back, and the data channel that
+   * forms carries MIDI directly between the two machines.
+   */
+  let signalling: SignalClient | null = null;
+  if (rtc !== null && pairing !== null) {
+    if (await rtc.load()) {
+      signalling = new SignalClient({
+        serviceUrl: config.pairingService,
+        code: pairing.code,
+        answer: (sessionId, offer) => rtc.answer(sessionId, offer),
+        onLog: log,
+      });
+      signalling.start();
+      log('waiting for a headset to pair');
+    } else {
+      log('WebRTC is unavailable, so the hosted client cannot reach this bridge');
+    }
+  }
+
   if (pairing !== null) {
     log(`pairing code: ${pairing.displayCode}`);
-    for (const address of lanAddresses()) {
-      log(`headset URL  ${bridgeUrl(address, config.wsPort, config.lanDomain)}`);
-    }
+    log(`open ${config.pairingService} in the headset and enter it`);
   }
 
   let statsTimer: NodeJS.Timeout | null = null;
@@ -232,6 +278,9 @@ async function main(): Promise<void> {
     // sounding until the DAW is restarted.
     const released = router.releaseAll();
     if (released > 0) log(`released ${released} sounding note(s)`);
+    signalling?.stop();
+    rtc?.close();
+    bus.close();
     await Promise.all([ws?.close(), udp?.close(), pairing?.stop()]);
     devices.removeAll();
     process.exit(0);

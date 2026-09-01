@@ -7,16 +7,9 @@ import {
 import { createServer as createHttpsServer } from 'node:https';
 import { readFileSync } from 'node:fs';
 import { WebSocketServer, type WebSocket } from 'ws';
-import {
-  PacketKind,
-  PacketWriter,
-  ledCapacity,
-  writeDeviceState,
-  writeLedEntry,
-  writeLedHeader,
-  type DeviceStateEntry,
-} from '@vrmc/protocol';
+import { PacketKind, PacketWriter } from '@vrmc/protocol';
 import type { Router } from '../core/Router.js';
+import type { PacketSink } from './Broadcaster.js';
 import { dashboardHtml, type DashboardStatus, type SelfTestResult } from './dashboard.js';
 
 export interface WsOptions {
@@ -29,21 +22,22 @@ export interface WsOptions {
 }
 
 /**
- * WebSocket transport — the path a WebXR client uses.
+ * WebSocket transport, and the host of the local dashboard.
  *
- * A browser cannot open a UDP socket, so for the WebXR build this is the only
- * option. That is less of a compromise than it sounds on a quiet 5 GHz link:
- * TCP's cost is retransmission delay under loss, and on a clean local network
- * carrying a few kB/s there is very little loss to retransmit. The settings
- * that actually matter are below.
+ * This is no longer how a headset arrives. A page served over HTTPS cannot open
+ * a plain `ws://` connection — browsers block it as mixed content — and a
+ * computer on a home network cannot have a certificate a public authority
+ * would sign, so the hosted client reaches the bridge over a WebRTC data
+ * channel instead (see RtcTransport). What is left here is the case where the
+ * client and the bridge are on the same machine, where `ws://` is already a
+ * secure context: the dashboard, and development.
  *
- * TLS matters here for a reason that catches people out: a page served over
- * HTTPS cannot open a plain `ws://` connection — browsers block it as mixed
- * content — and WebXR itself only runs in a secure context. So a client hosted
- * on a public HTTPS site can only reach a bridge that speaks `wss://`. Pass
- * --tls-cert/--tls-key to enable it. See docs/WEB-DEPLOYMENT.md.
+ * TCP is a poor fit for MIDI — one lost packet stalls every packet behind it —
+ * which is another reason the data channel is the primary path. On a loopback
+ * connection there is nothing to lose, so it does not matter here. The settings
+ * that do matter are below.
  */
-export class WsServer {
+export class WsServer implements PacketSink {
   private wss: WebSocketServer | null = null;
   private http: HttpServer | null = null;
   private readonly options: WsOptions;
@@ -51,21 +45,6 @@ export class WsServer {
 
   /** One reusable writer for replies. Only ever used on this thread. */
   private readonly replyWriter = new PacketWriter();
-
-  /**
-   * LED changes accumulated since the last flush.
-   *
-   * A DAW redrawing a Launchpad emits its writes one LED at a time, so a single
-   * scene change can be sixty-odd separate callbacks within a millisecond.
-   * Sending a packet each would put sixty frames on the wire for one visual
-   * change; coalescing to one packet per tick collapses them. The delay is
-   * bounded by the flush interval and is well under a display frame.
-   *
-   * Keyed by `deviceId * 256 + ledIndex` so a later write to the same LED
-   * replaces the earlier one rather than both being sent.
-   */
-  private readonly pendingLeds = new Map<number, number>();
-  private ledFlushTimer: NodeJS.Timeout | null = null;
 
   private clients = 0;
   private readonly sockets = new Set<WebSocket>();
@@ -155,9 +134,6 @@ export class WsServer {
   /** Runs one audit leg. Set by the owner. */
   selfTest: ((what: string) => Promise<SelfTestResult>) | null = null;
 
-  /** Resolvers waiting for a client's PONG, for the audit's round-trip test. */
-  private readonly pongWaiters = new Set<() => void>();
-
   /**
    * Serve the dashboard, the status JSON and the self-tests.
    *
@@ -221,120 +197,12 @@ export class WsServer {
   }
 
   /**
-   * Send a PING to every client and resolve when one answers.
+   * Send to every client. This is the `PacketSink` half of the transport.
    *
-   * This is the audit's proof that the link works in both directions: the
-   * packet leaves the bridge, the headset receives it, and its reply comes
-   * back. A test that only counted inbound packets would pass while the return
-   * path — the one LEDs depend on — was broken.
-   */
-  pingClients(timeoutMs = 2000): Promise<number> {
-    return new Promise((resolve, reject) => {
-      if (this.clients === 0) {
-        reject(new Error('no headset connected'));
-        return;
-      }
-      const started = performance.now();
-      const onPong = (): void => {
-        clearTimeout(timer);
-        this.pongWaiters.delete(onPong);
-        resolve(performance.now() - started);
-      };
-      const timer = setTimeout(() => {
-        this.pongWaiters.delete(onPong);
-        reject(new Error(`no reply within ${timeoutMs} ms`));
-      }, timeoutMs);
-      this.pongWaiters.add(onPong);
-
-      const w = this.replyWriter;
-      w.begin(PacketKind.PING);
-      this.broadcast(w.finish(performance.now()));
-    });
-  }
-
-  /** Called when a client answers a PING the bridge sent. */
-  notePong(): void {
-    for (const waiter of [...this.pongWaiters]) waiter();
-  }
-
-  /**
-   * Queue an LED change for the headset.
-   *
-   * Called from the MIDI input callback, which is the DAW's thread of control —
-   * so it does nothing but record the value and arm a timer.
-   */
-  queueLed(deviceId: number, ledIndex: number, r: number, g: number, b: number, blink: number): void {
-    if (this.clients === 0) return;
-    this.pendingLeds.set(
-      deviceId * 256 + ledIndex,
-      (r & 0x3f) | ((g & 0x3f) << 6) | ((b & 0x3f) << 12) | ((blink & 0x3) << 18),
-    );
-    if (this.ledFlushTimer === null) {
-      // setImmediate rather than a millisecond timer: this fires at the end of
-      // the current event-loop turn, so a burst of writes from one DAW redraw
-      // coalesces into one packet with no added latency.
-      this.ledFlushTimer = setImmediate(() => this.flushLeds()) as unknown as NodeJS.Timeout;
-    }
-  }
-
-  /** Send the accumulated LED changes, splitting across packets if needed. */
-  private flushLeds(): void {
-    this.ledFlushTimer = null;
-    if (this.pendingLeds.size === 0) return;
-
-    // Group by device, since one packet carries one device's LEDs.
-    const byDevice = new Map<number, Array<[number, number]>>();
-    for (const [key, packed] of this.pendingLeds) {
-      const deviceId = Math.floor(key / 256);
-      const ledIndex = key % 256;
-      let list = byDevice.get(deviceId);
-      if (list === undefined) {
-        list = [];
-        byDevice.set(deviceId, list);
-      }
-      list.push([ledIndex, packed]);
-    }
-    this.pendingLeds.clear();
-
-    const capacity = ledCapacity();
-    for (const [deviceId, entries] of byDevice) {
-      for (let start = 0; start < entries.length; start += capacity) {
-        const chunk = entries.slice(start, start + capacity);
-        const w = this.replyWriter;
-        w.begin(PacketKind.LED_UPDATE);
-        writeLedHeader(w, deviceId, chunk.length);
-        for (const [ledIndex, packed] of chunk) {
-          writeLedEntry(
-            w,
-            ledIndex,
-            packed & 0x3f,
-            (packed >> 6) & 0x3f,
-            (packed >> 12) & 0x3f,
-            (packed >> 18) & 0x3,
-          );
-        }
-        this.broadcast(w.finish(performance.now()));
-        this.router.stats.onOutbound(chunk.length);
-      }
-    }
-  }
-
-  /** Push the device roster to every connected headset. */
-  sendRoster(entries: readonly DeviceStateEntry[]): void {
-    if (this.clients === 0) return;
-    const w = this.replyWriter;
-    w.begin(PacketKind.DEVICE_STATE);
-    if (!writeDeviceState(w, entries)) return;
-    this.broadcast(w.finish(performance.now()));
-  }
-
-  /**
-   * Send to every client.
-   *
-   * `frame` aliases the writer's buffer, and `ws.send` copies synchronously, so
+   * `frame` aliases the caller's buffer, and `ws.send` copies synchronously, so
    * it stays valid across the loop.
    */
-  private broadcast(frame: Uint8Array): void {
+  send(frame: Uint8Array): void {
     for (const socket of this.sockets) {
       if (socket.readyState === socket.OPEN) socket.send(frame, { binary: true });
     }
@@ -350,7 +218,6 @@ export class WsServer {
   }
 
   async close(): Promise<void> {
-    if (this.ledFlushTimer !== null) clearImmediate(this.ledFlushTimer as unknown as NodeJS.Immediate);
     this.wss?.clients.forEach((c) => c.terminate());
     this.sockets.clear();
     await new Promise<void>((resolve) => {

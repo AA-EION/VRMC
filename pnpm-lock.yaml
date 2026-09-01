@@ -29,6 +29,9 @@ importers:
       multicast-dns:
         specifier: ^7.2.5
         version: 7.2.5
+      node-datachannel:
+        specifier: ^0.33.2
+        version: 0.33.2
       selfsigned:
         specifier: ^5.5.0
         version: 5.5.0
@@ -42,6 +45,9 @@ importers:
       '@types/ws':
         specifier: ^8.5.13
         version: 8.18.1
+      '@vrmc/web':
+        specifier: workspace:*
+        version: link:../web
       '@yao-pkg/pkg':
         specifier: ^6.22.0
         version: 6.22.0
@@ -633,6 +639,55 @@ packages:
   '@noble/hashes@1.4.0':
     resolution: {integrity: sha512-V1JJ1WTRUqHHrOSh597hURcMqVKVGL/ea3kv0gSnEdsEZ0/+VyPghM1lMNGc00z7CIQorSvbKpuJkxvuHbvdbg==}
     engines: {node: '>= 16'}
+
+  '@node-datachannel/android-arm64@0.33.2':
+    resolution: {integrity: sha512-I71a0jICUNYgh4ZI5AcINEMuRtQSVyrpp4FV3kJZMcx31xS0vKKtf06tpsUAtW5uS+uRXbZR+vlMEqS1h710wQ==}
+    cpu: [arm64]
+    os: [android]
+
+  '@node-datachannel/darwin-arm64@0.33.2':
+    resolution: {integrity: sha512-EwBGiaMh3MX6zjYoZHuK02Q6hmQQIvR39335Kb/ZnP3fXZU0/VWx6ksHLM6K0XFFYRfP+yJeVgU79g++xoeQpw==}
+    cpu: [arm64]
+    os: [darwin]
+
+  '@node-datachannel/darwin-x64@0.33.2':
+    resolution: {integrity: sha512-a1nvL6MiskSjV3TWTNXdVpI/2kHNIOP2AbuBZjR5eC7VSrH/6hCFfHIBW4SFKXGFm8LOGliY9Df10UnJUutjwA==}
+    cpu: [x64]
+    os: [darwin]
+
+  '@node-datachannel/linux-arm64-gnu@0.33.2':
+    resolution: {integrity: sha512-YWAu3EiMl2HRi/fwWlfFTW30wFTkRVYJWRHQcI1uDSeZYG/tfyBqBy6CRy9Sgrb0xjOYZ6XhLDj8cdX0foPlpg==}
+    cpu: [arm64]
+    os: [linux]
+    libc: [glibc]
+
+  '@node-datachannel/linux-arm64-musl@0.33.2':
+    resolution: {integrity: sha512-16o3Ny5hbxTTjDmhsZog/t7p2tRP6s/Oa/V9kKzZfiGlCqvxxCE4ACOWw/MWHOhN0xI9/63IIRfrrnQnPxjK8g==}
+    cpu: [arm64]
+    os: [linux]
+    libc: [musl]
+
+  '@node-datachannel/linux-x64-gnu@0.33.2':
+    resolution: {integrity: sha512-grLRAbZgSIX8nmObciblyCmnevDCst0snhV+z1fvDmUlzXIVXeDmv6lEzAaWs3KRleagqwSsFg5d1td1bwMT9w==}
+    cpu: [x64]
+    os: [linux]
+    libc: [glibc]
+
+  '@node-datachannel/linux-x64-musl@0.33.2':
+    resolution: {integrity: sha512-PlpgvYjo+gmBhIkRFaZWIhCF335FMTJmCpl+FVa4XliEgyOqD+cvjQPWcbnlrA2Jd+QnLiZt+NxT7nv4QXpoiQ==}
+    cpu: [x64]
+    os: [linux]
+    libc: [musl]
+
+  '@node-datachannel/win32-arm64-msvc@0.33.2':
+    resolution: {integrity: sha512-8NpHkm7R8EY0jHGHOXdK7K0wjWY34PJ+PJY++2VDHTAtXGazNm28zcnVE/4IU0N26YGdCDSSWat3OO3W6nwoRw==}
+    cpu: [arm64]
+    os: [win32]
+
+  '@node-datachannel/win32-x64-msvc@0.33.2':
+    resolution: {integrity: sha512-aLk0O/M1JNVpzxx4RVBXMJTMlpswE04Cz5baayKwuEN+qk9hO6DSJgYMR6Wq9a5zGYAmvLFlOg+LsePyXkWliA==}
+    cpu: [x64]
+    os: [win32]
 
   '@oxc-project/types@0.147.0':
     resolution: {integrity: sha512-IJ3s6ltHLp45S0bh7phkX+gJO7A1Wuz2EaqpAhb8WjqDwbzMiWKHhyyT42tskaWjEYXtHtVCPpnBJVT9+dcRLg==}
@@ -1484,6 +1539,10 @@ packages:
   node-addon-api@6.1.0:
     resolution: {integrity: sha512-+eawOlIgy680F0kBzPUNFhMZGtJ1YmqM6l4+Crf4IkImjYrO/mqPwRMh352g23uIaQKFItcQ64I7KMaJxHgAVA==}
 
+  node-datachannel@0.33.2:
+    resolution: {integrity: sha512-WRL+uqYG2eSvpnKuCOKueaMiyKlDjkJFd6pFH/f2SbD/EiXLMXwmYNU5z+TDQPrAv+BMgkuC40UESeRRL+4zBw==}
+    engines: {node: '>=18.20.0'}
+
   node-int64@0.4.0:
     resolution: {integrity: sha512-O5lz91xSOeoXP6DulyHfllpq+Eg00MWitZIbtPfoSEvqIHdl5gfcY6hYzDWnj0qD5tz52PI08u9qUvSVeUBeHw==}
 
@@ -2216,6 +2275,33 @@ snapshots:
     optional: true
 
   '@noble/hashes@1.4.0': {}
+
+  '@node-datachannel/android-arm64@0.33.2':
+    optional: true
+
+  '@node-datachannel/darwin-arm64@0.33.2':
+    optional: true
+
+  '@node-datachannel/darwin-x64@0.33.2':
+    optional: true
+
+  '@node-datachannel/linux-arm64-gnu@0.33.2':
+    optional: true
+
+  '@node-datachannel/linux-arm64-musl@0.33.2':
+    optional: true
+
+  '@node-datachannel/linux-x64-gnu@0.33.2':
+    optional: true
+
+  '@node-datachannel/linux-x64-musl@0.33.2':
+    optional: true
+
+  '@node-datachannel/win32-arm64-msvc@0.33.2':
+    optional: true
+
+  '@node-datachannel/win32-x64-msvc@0.33.2':
+    optional: true
 
   '@oxc-project/types@0.147.0': {}
 
@@ -2982,6 +3068,20 @@ snapshots:
 
   node-addon-api@6.1.0:
     optional: true
+
+  node-datachannel@0.33.2:
+    dependencies:
+      detect-libc: 2.1.2
+    optionalDependencies:
+      '@node-datachannel/android-arm64': 0.33.2
+      '@node-datachannel/darwin-arm64': 0.33.2
+      '@node-datachannel/darwin-x64': 0.33.2
+      '@node-datachannel/linux-arm64-gnu': 0.33.2
+      '@node-datachannel/linux-arm64-musl': 0.33.2
+      '@node-datachannel/linux-x64-gnu': 0.33.2
+      '@node-datachannel/linux-x64-musl': 0.33.2
+      '@node-datachannel/win32-arm64-msvc': 0.33.2
+      '@node-datachannel/win32-x64-msvc': 0.33.2
 
   node-int64@0.4.0: {}
 

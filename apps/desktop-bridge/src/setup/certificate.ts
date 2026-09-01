@@ -17,17 +17,18 @@ export interface Certificate {
 }
 
 /**
- * TLS, without the user ever seeing a flag.
+ * A self-signed certificate for the WebSocket, on request.
  *
- * The bridge has to speak HTTPS whether anyone asks for it or not: WebXR only
- * runs in a secure context, so a client served over plain HTTP loads and then
- * refuses to start a session. Requiring `--tls-cert` made that the user's
- * problem, which for a musician is the wrong problem.
+ * This used to be on by default, back when a headset could only reach the
+ * bridge over `wss://` and a self-signed certificate plus a "not private"
+ * warning was the least-bad way there. It is opt-in now (`--self-signed-tls`),
+ * because the headset connects over a WebRTC data channel — authenticated by
+ * DTLS fingerprint, with no certificate anywhere — and the WebSocket serves
+ * only clients on this same machine, where plain `ws://` is already a secure
+ * context.
  *
- * So a certificate is generated on first run and kept in the app data
- * directory. It is self-signed, which costs one "not private" warning the first
- * time a headset visits — irreducible without a certificate authority, and a
- * one-time three-tap cost rather than an ongoing one.
+ * Kept because it is occasionally useful and costs nothing to leave in: a
+ * certificate is generated on first run and stored in the app data directory.
  */
 const CERT_FILE = 'bridge-cert.pem';
 const KEY_FILE = 'bridge-key.pem';

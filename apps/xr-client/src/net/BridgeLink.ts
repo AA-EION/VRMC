@@ -11,6 +11,7 @@ import {
   type DeviceStateEntry,
   type LedVisitor,
 } from '@vrmc/protocol';
+import type { Transport, TransportFactory } from './Transport.js';
 
 export type LinkState = 'idle' | 'connecting' | 'open' | 'reconnecting' | 'failed';
 
@@ -23,16 +24,17 @@ export interface LinkStatus {
   /** Packets sent this session. */
   packetsSent: number;
   eventsSent: number;
-  /** Events discarded because the socket could not keep up. */
+  /** Events discarded because the link could not keep up. */
   eventsDropped: number;
+  /** Where the link points, for display. */
   url: string;
   lastError: string;
 }
 
 /**
- * How much unsent data may sit in the socket before we start shedding load.
+ * How much unsent data may sit in the transport before we start shedding load.
  *
- * A backed-up socket means the link cannot carry what we are producing. The
+ * A backed-up link cannot carry what we are producing. The
  * wrong response is to keep queueing: every queued packet delays the ones
  * behind it, so a moment of congestion turns into seconds of steadily worse
  * latency and the instrument feels like it is lagging further behind the
@@ -48,7 +50,12 @@ const PING_INTERVAL_MS = 1000;
 const BACKOFF_MS = [250, 500, 1000, 2000, 4000] as const;
 
 /**
- * WebSocket link from the headset to the desktop bridge.
+ * The link from the headset to the desktop bridge.
+ *
+ * Transport-agnostic on purpose: it drives a WebSocket when the client runs on
+ * the same machine as the bridge, and a WebRTC data channel when it is served
+ * from the website, and neither the batching nor the reconnect logic below
+ * knows or cares which.
  *
  * Events are batched into one packet per rendered frame rather than sent
  * individually. At 90 Hz a frame is 11 ms, and every event in it carries its
@@ -57,8 +64,11 @@ const BACKOFF_MS = [250, 500, 1000, 2000, 4000] as const;
  * lots of framing overhead for data that all belongs to the same instant.
  */
 export class BridgeLink {
-  private socket: WebSocket | null = null;
-  private url: string;
+  private transport: Transport | null = null;
+  private factory: TransportFactory | null = null;
+  /** Bumped per connect, so a slow handshake cannot revive a stale attempt. */
+  private generation = 0;
+  private label = '';
   private readonly writer = new PacketWriter();
   private readonly reader = new PacketReader();
   private readonly controlWriter = new PacketWriter();
@@ -100,15 +110,14 @@ export class BridgeLink {
   /** Device id of the LED packet currently being decoded. */
   private ledDeviceId = 0;
 
-  constructor(url: string) {
-    this.url = url;
+  constructor() {
     this.ledVisitor = (ledIndex, r, g, b, blink) => {
       this.onLed?.(this.ledDeviceId, ledIndex, r, g, b, blink);
     };
   }
 
   get isOpen(): boolean {
-    return this.socket !== null && this.socket.readyState === WebSocket.OPEN;
+    return this.transport?.isOpen === true;
   }
 
   status(): LinkStatus {
@@ -119,63 +128,67 @@ export class BridgeLink {
       packetsSent: this.packetsSent,
       eventsSent: this.eventsSent,
       eventsDropped: this.eventsDropped,
-      url: this.url,
+      url: this.label,
       lastError: this.lastError,
     };
   }
 
-  connect(url?: string): void {
-    if (url !== undefined) this.url = url;
+  /**
+   * Point the link at a bridge and keep it there.
+   *
+   * `label` is what the status panel shows. The factory is kept, not the
+   * transport it produced: reconnecting re-runs it, which for a data channel
+   * means a fresh handshake — the only way to rebuild one.
+   */
+  connect(factory: TransportFactory, label: string): void {
+    this.factory = factory;
+    this.label = label;
     this.closedByUs = false;
     this.attempt = 0;
     this.open();
   }
 
   private open(): void {
-    this.cleanupSocket();
+    const factory = this.factory;
+    if (factory === null) return;
+    this.teardownTransport();
     this.setState(this.attempt === 0 ? 'connecting' : 'reconnecting');
 
-    let socket: WebSocket;
-    try {
-      socket = new WebSocket(this.url);
-    } catch (err) {
-      // Thrown synchronously for a malformed URL, or for ws:// from an HTTPS
-      // page — the mixed-content block that catches out every first deployment.
-      this.lastError = err instanceof Error ? err.message : String(err);
-      this.setState('failed');
-      return;
-    }
-
-    socket.binaryType = 'arraybuffer';
-    this.socket = socket;
-
-    socket.onopen = () => {
-      this.attempt = 0;
-      this.setState('open');
-      this.sendHello();
-      this.startPinging();
-    };
-
-    socket.onmessage = (event: MessageEvent<ArrayBuffer>) => {
-      if (!(event.data instanceof ArrayBuffer)) return;
-      this.handleMessage(new Uint8Array(event.data));
-    };
-
-    socket.onerror = () => {
-      // The event carries no detail by design (it would leak cross-origin
-      // information), so there is nothing more useful to record here.
-      this.lastError = 'connection error';
-    };
-
-    socket.onclose = (event: CloseEvent) => {
-      this.stopPinging();
-      if (this.closedByUs) {
-        this.setState('idle');
-        return;
-      }
-      if (event.reason) this.lastError = event.reason;
-      this.scheduleReconnect();
-    };
+    const generation = ++this.generation;
+    factory().then(
+      (transport) => {
+        // A connect() while this was in flight already started a newer attempt;
+        // this one's transport would otherwise sit open and unreferenced.
+        if (generation !== this.generation || this.closedByUs) {
+          transport.close();
+          return;
+        }
+        this.transport = transport;
+        this.label = transport.label;
+        transport.onMessage = (bytes) => this.handleMessage(bytes);
+        transport.onClose = (reason) => {
+          if (generation !== this.generation) return;
+          this.transport = null;
+          this.stopPinging();
+          if (this.closedByUs) {
+            this.setState('idle');
+            return;
+          }
+          this.lastError = reason;
+          this.scheduleReconnect();
+        };
+        this.attempt = 0;
+        this.lastError = '';
+        this.setState('open');
+        this.sendHello();
+        this.startPinging();
+      },
+      (err: unknown) => {
+        if (generation !== this.generation || this.closedByUs) return;
+        this.lastError = err instanceof Error ? err.message : String(err);
+        this.scheduleReconnect();
+      },
+    );
   }
 
   private handleMessage(bytes: Uint8Array): void {
@@ -275,18 +288,18 @@ export class BridgeLink {
     this.batching = false;
     const count = this.writer.eventCount;
     if (count === 0) return;
-    const socket = this.socket;
-    if (socket === null || socket.readyState !== WebSocket.OPEN) return;
+    const transport = this.transport;
+    if (transport === null || !transport.isOpen) return;
 
-    socket.send(this.writer.finish(performance.now()));
+    transport.send(this.writer.finish(performance.now()));
     this.packetsSent++;
     this.eventsSent += count;
   }
 
-  /** True while the socket has more queued than it should. */
+  /** True while the transport has more queued than it should. */
   private isCongested(): boolean {
-    const socket = this.socket;
-    return socket !== null && socket.bufferedAmount > BACKPRESSURE_BYTES;
+    const transport = this.transport;
+    return transport !== null && transport.bufferedAmount > BACKPRESSURE_BYTES;
   }
 
   /** Ask the bridge to silence everything. Sent on panic and on teardown. */
@@ -301,41 +314,41 @@ export class BridgeLink {
    * speed, and mixing it into the note packet would delay it behind a frame.
    */
   requestDeviceAdd(deviceId: number, model: string): boolean {
-    const socket = this.socket;
-    if (socket === null || socket.readyState !== WebSocket.OPEN) return false;
+    const transport = this.transport;
+    if (transport === null || !transport.isOpen) return false;
     const w = this.controlWriter;
     w.begin(PacketKind.DEVICE_ADD);
     if (!writeDeviceAdd(w, deviceId, model)) return false;
-    socket.send(w.finish(performance.now()));
+    transport.send(w.finish(performance.now()));
     return true;
   }
 
   /** Ask the bridge to destroy a device and close its ports. */
   requestDeviceRemove(deviceId: number): boolean {
-    const socket = this.socket;
-    if (socket === null || socket.readyState !== WebSocket.OPEN) return false;
+    const transport = this.transport;
+    if (transport === null || !transport.isOpen) return false;
     const w = this.controlWriter;
     w.begin(PacketKind.DEVICE_REMOVE);
     if (!writeDeviceRemove(w, deviceId)) return false;
-    socket.send(w.finish(performance.now()));
+    transport.send(w.finish(performance.now()));
     return true;
   }
 
   private sendHello(): void {
-    const socket = this.socket;
-    if (socket === null || socket.readyState !== WebSocket.OPEN) return;
+    const transport = this.transport;
+    if (transport === null || !transport.isOpen) return;
     const w = this.controlWriter;
     w.begin(PacketKind.HELLO);
     w.pushRaw(new TextEncoder().encode(navigator.userAgent.slice(0, 96)));
-    socket.send(w.finish(performance.now()));
+    transport.send(w.finish(performance.now()));
   }
 
   private sendControl(kind: number): void {
-    const socket = this.socket;
-    if (socket === null || socket.readyState !== WebSocket.OPEN) return;
+    const transport = this.transport;
+    if (transport === null || !transport.isOpen) return;
     const w = this.controlWriter;
     w.begin(kind);
-    socket.send(w.finish(performance.now()));
+    transport.send(w.finish(performance.now()));
   }
 
   private startPinging(): void {
@@ -354,27 +367,26 @@ export class BridgeLink {
   /** Close the link, releasing any sounding notes first. */
   disconnect(): void {
     this.closedByUs = true;
+    // Retires any handshake still in flight, so its transport is closed on
+    // arrival rather than quietly connecting after we said goodbye.
+    this.generation++;
     if (this.reconnectTimer !== null) {
       clearTimeout(this.reconnectTimer);
       this.reconnectTimer = null;
     }
     this.stopPinging();
     if (this.isOpen) this.sendControl(PacketKind.BYE);
-    this.cleanupSocket();
+    this.teardownTransport();
     this.setState('idle');
   }
 
-  private cleanupSocket(): void {
-    const socket = this.socket;
-    if (socket === null) return;
-    socket.onopen = null;
-    socket.onmessage = null;
-    socket.onerror = null;
-    socket.onclose = null;
-    if (socket.readyState === WebSocket.OPEN || socket.readyState === WebSocket.CONNECTING) {
-      socket.close();
-    }
-    this.socket = null;
+  private teardownTransport(): void {
+    const transport = this.transport;
+    if (transport === null) return;
+    transport.onMessage = null;
+    transport.onClose = null;
+    transport.close();
+    this.transport = null;
   }
 
   private setState(state: LinkState): void {

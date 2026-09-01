@@ -27,7 +27,10 @@ await build({
   format: 'cjs',
   // Keep names: the MIDI backends probe for functions by name through FFI.
   keepNames: true,
-  external: ['@julusian/midi', 'koffi'],
+  // node-datachannel is external for the same reason, and additionally because
+  // its loader picks a platform package by inspecting the running system —
+  // logic a bundler would have to resolve at build time and cannot.
+  external: ['@julusian/midi', 'koffi', 'node-datachannel'],
   banner: {
     js: '/* VRMC bridge — GPL-3.0-only. https://github.com/AA-EION/VRMC */',
   },

@@ -57,7 +57,8 @@ ws.statusProvider = () => ({
   pairingRegistered: true,
   pairingError: '',
   siteUrl: 'https://vrmc.eionstudios.com',
-  lanUrls: ['wss://192-168-1-42.lan.vrmc.eionstudios.com:7401'],
+  rtcPeers: 1,
+  rtcError: '',
 });
 await ws.listen();
 

@@ -16,8 +16,8 @@ see that in the headset.
   Quest 3                          Wi-Fi                    Desktop
 ┌──────────────────────┐                          ┌──────────────────────────┐
 │  WebXR client        │                          │  Bridge (Node)           │
-│  ├ hand tracking     │   binary packets over    │  ├ WebSocket + UDP       │
-│  ├ poke detection    │ ───  ws / wss / udp  ──▶ │  ├ note bookkeeping      │
+│  ├ hand tracking     │   binary packets over    │  ├ WebRTC / ws / UDP     │
+│  ├ poke detection    │ ── WebRTC data channel ▶ │  ├ note bookkeeping      │
 │  └ velocity + notes  │                          │  └ virtual MIDI port     │
 └──────────────────────┘                          └───────────┬──────────────┘
                                                               │ CoreMIDI / ALSA
@@ -51,11 +51,13 @@ enable it as an input. On Windows there is a setup step first; see
 **On the headset:**
 
 Open the VRMC site in Meta Quest Browser and type the six-character code the
-desktop app is showing. That is the whole setup — the address is remembered, so
-the code is never needed again on that headset.
+desktop app is showing. That is the whole setup. There is no address to enter,
+no certificate to accept and nothing to configure — the headset and the computer
+negotiate a direct connection between themselves, and the code is remembered so
+it is never needed again on that headset.
 
 For local development instead, `pnpm xr` serves the client over HTTPS on your
-machine; see [Pairing](docs/PAIRING.md) for what a hosted deployment needs.
+machine; see [Pairing](docs/PAIRING.md) for how the hosted path works.
 
 ## What you get
 
@@ -144,9 +146,9 @@ it and is downloaded separately. See
 - [Virtual MIDI setup](docs/VIRTUAL-MIDI.md) — per-platform, including why
   Windows needs a driver and macOS does not.
 - [Web deployment](docs/WEB-DEPLOYMENT.md) — hosting the client on a public
-  site, and the HTTPS/`wss` constraint that catches every first attempt.
+  site, behind a reverse proxy you already run.
 - [Pairing](docs/PAIRING.md) — how a headset on the hosted site reaches a bridge
-  on someone's LAN, and the DNS and certificate setup that makes it possible.
+  on someone's LAN with no DNS records and no certificates.
 - [Wire protocol](docs/PROTOCOL.md) — the packet format, for writing another
   client.
 - [Packaging](docs/PACKAGING.md) — building the `.app` and `.exe`, and why the

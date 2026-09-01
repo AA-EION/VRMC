@@ -74,8 +74,7 @@ COPY --from=build --chown=node:node /out /srv
 ENV NODE_ENV=production \
     PORT=8080 \
     HOST=0.0.0.0 \
-    STATIC_DIR=/srv/client \
-    LAN_DOMAIN=lan.vrmc.eionstudios.com
+    STATIC_DIR=/srv/client
 
 EXPOSE 8080
 

@@ -2,98 +2,95 @@
 
 The XR client is served from `https://vrmc.eionstudios.com`. The bridge runs on
 a musician's own computer, on a private network. This is how they find each
-other.
+other, and what the user has to do about it: read six characters off the desktop
+app and type them in the headset. That is the whole procedure. No DNS, no
+certificates, no port forwarding, no addresses.
 
-## Why it needs setting up at all
+## Why this was hard
 
-A page served over HTTPS may only open `wss://`, and only to a certificate the
-browser already trusts. The browser never *navigates* to the bridge, so there is
-no moment at which the user could accept a self-signed certificate — the
-WebSocket handshake simply fails, with no prompt and a useless error.
+A page served over HTTPS may only open `wss://`, and only to a host whose
+certificate the browser already trusts. The browser never *navigates* to the
+bridge, so there is no moment at which the user could accept a self-signed
+certificate — the WebSocket handshake just fails, with no prompt and a useless
+error.
 
-So the bridge needs a genuinely valid certificate, for a hostname that resolves
-to a private address. That is possible, and it is what Plex does:
+The usual answer is to own a wildcard domain whose subdomains decode to private
+addresses (`192-168-1-42.lan.example.com` → `192.168.1.42`), get a real
+certificate for it, and ship the private key to every user. It works — it is
+what Plex does — but it means running a DNS zone, renewing a wildcard
+certificate, and shipping a private key that is public in practice.
+
+**None of that is necessary, because the constraint is a WebSocket constraint.**
+
+## What we do instead
+
+A WebRTC data channel. Two peers exchange DTLS fingerprints during the
+handshake and verify each other against them directly. There is no certificate
+authority in the picture, so there is nothing to obtain, install, trust or
+renew, and no name that has to resolve anywhere.
+
+It is also the better transport for this. The channel is configured unordered
+and unreliable (`ordered: false, maxRetransmits: 0`), which is what MIDI wants:
+a note that arrives late is worse than one that never arrives, and TCP's
+in-order delivery means a single lost packet stalls every packet behind it — a
+gap in the music followed by a burst of notes that are all wrong. The WebSocket
+forced that compromise. It is gone.
+
+## How it works
 
 ```
-192-168-1-42.lan.vrmc.eionstudios.com   →   A record   →   192.168.1.42
+headset (browser)          vrmc.eionstudios.com          bridge (your computer)
+      │                            │                             │
+      │                            │◀──── POST /api/pair ────────│  code + name
+      │                            │◀──── GET /api/signal/CODE ──│  (long poll)
+      │─── GET /api/pair/CODE ────▶│                             │
+      │─── POST /api/signal/CODE ─▶│──────── offer ─────────────▶│
+      │                            │◀─────── answer ─────────────│
+      │◀── GET /api/signal/CODE/… ─│                             │
+      │                            │                             │
+      │═════════════ DTLS + SCTP data channel, direct ═══════════│
+                        MIDI, on the LAN, at LAN latency
 ```
-
-The name is public and resolvable by anyone. The address it resolves to is on
-the user's LAN. A real wildcard certificate for `*.lan.vrmc.eionstudios.com`
-covers it, so the headset connects with no warning — and the packets never leave
-the local network.
-
-## What you have to set up, once
-
-### 1. DNS
-
-Publish records under `lan.vrmc.eionstudios.com` that decode a dashed IPv4 label
-back to the address. Two ways:
-
-- **A small resolver.** Answer any `a-b-c-d.lan.vrmc.eionstudios.com` with
-  `a.b.c.d`, refusing anything outside RFC 1918. About thirty lines with any DNS
-  library, and it is what Plex runs.
-- **Pre-generated records.** Feasible if you only support one range: a `/24`
-  needs 254 records. A full `10/8` does not fit this approach.
-
-Refuse to answer with public addresses. A resolver that happily returns
-`8.8.8.8` for `8-8-8-8.lan…` hands anyone a valid-certificate name pointing at a
-third party.
-
-### 2. Certificate
-
-A wildcard for `*.lan.vrmc.eionstudios.com`, via Let's Encrypt with a DNS-01
-challenge. Renew it the usual way and ship the new one with bridge updates.
-
-**The trade-off, stated plainly:** the private key ships inside the bridge, to
-every user. It is public in practice. Treat that subdomain as compromised by
-design — scope the certificate to it alone, never reuse it, and never let it
-near anything else. Plex accepts exactly this; it is the price of a trusted
-certificate on someone else's LAN.
-
-### 3. Point the pieces at it
-
-```bash
-# Web container
-LAN_DOMAIN=lan.vrmc.eionstudios.com
-
-# Bridge
-vrmc-bridge --lan-domain lan.vrmc.eionstudios.com \
-            --tls-cert wildcard.pem --tls-key wildcard.key
-```
-
-Without the shipped certificate the bridge falls back to one it generates
-itself, which works for a client served from the bridge but not from your site.
-
-## How pairing works
-
-The remaining problem is *which* address, since a browser cannot enumerate the
-local network.
 
 1. The bridge generates a six-character code on first run and keeps it, so a
-   restart does not invalidate one the user wrote down.
-2. Every 40 seconds it posts that code plus its private addresses to
-   `POST /api/pair`. Registrations expire after two minutes, so a bridge that
+   restart does not invalidate one the user wrote down. Every 40 seconds it
+   registers that code; registrations expire after two minutes, so a bridge that
    stops running stops being findable with nothing to clean up.
-3. The user types the code in the headset. The client calls
-   `GET /api/pair/<code>`, gets the addresses back, and builds
-   `wss://192-168-1-42.lan.vrmc.eionstudios.com:7401`.
-4. It races every candidate and keeps the first that opens — a computer on both
-   Wi-Fi and Ethernet publishes several, and only one shares a network with the
-   headset. Asking the user which interface their computer is on is not a
-   question a musician should have to answer.
-5. The address is remembered. The code is never needed again on that headset.
+2. The bridge long-polls `GET /api/signal/<code>`, waiting for a headset. It has
+   no public address, so it cannot be dialled — it has to reach out and wait.
+3. The user types the code in the headset. The client checks it with
+   `GET /api/pair/<code>` first, so a mistyped code fails immediately with
+   something readable rather than after a handshake times out.
+4. The client creates an offer, gathers its candidates, and posts it. The
+   bridge's poll returns instantly, it answers, and the client's poll returns
+   that answer.
+5. The data channel forms directly between the two machines and everything
+   musical goes over it.
+6. The code is remembered in the headset. Every later visit reconnects on its
+   own, and the code is never needed again.
 
-**No MIDI passes through the service.** It makes an introduction and gets out of
-the way. Everything after step 3 is direct, on the LAN, at LAN latency.
+**No MIDI passes through the service.** Two SDP blobs cross it per connection,
+and they describe how to reach a private address that is useless to anyone
+outside the network it names.
 
 ### What the service holds
 
-A code, a handful of private IPs, a machine name and a version — in memory, for
-two minutes, gone on restart. There is no database because there is nothing
-worth persisting.
+A code, a handful of private IPs, a machine name, a version, and — for at most
+two minutes — one offer and one answer. All in memory, gone on restart. There is
+no database because there is nothing worth persisting.
+
+### No ICE servers
+
+Both peers are on the same network, so their host candidates are all that is
+needed. `iceServers: []` on both sides means nothing outside the LAN is
+contacted while connecting, not even to discover an address. There is no STUN
+server to run and no TURN relay that could end up carrying the audio path.
 
 ## Choices that are load-bearing
+
+**Signalling is refused for a code no bridge has claimed.** Without that check
+the endpoint would be an open message queue keyed by any string a caller cared
+to invent.
 
 **Registrations naming a public address are refused.** Accepting one would let a
 registration point every headset that types that code at a machine on the open
@@ -117,17 +114,40 @@ this turns guessing from an afternoon's work into years. The forwarded address
 is used where present and is spoofable, which is acceptable: this is a brake on
 guessing, not an authentication boundary.
 
-## If you would rather not run any of this
+**Both polls are long-held rather than repeated.** A bridge polling every second
+would add up to a second to every connection for no benefit, and one polling
+faster is just busier. Held requests mean the connection starts the moment the
+other side appears.
 
-Set `--pair-service ""` on the bridge and the code is never published. The
-dashboard still shows the LAN addresses, and the client's "Enter an address
-instead" field takes them directly. Everything works; the user types an address
-rather than a code.
+## The WebSocket is still there
 
-## Not yet verified
+It serves the case where the client and the bridge are on the same machine — the
+desktop dashboard, or `pnpm xr` during development — where plain `ws://` is
+already a secure context and none of the above applies. The client's "Enter an
+address instead" field targets it.
 
-None of this has run against real DNS or a real certificate. The service, the
-code handling and the address filtering are covered by tests; the DNS zone, the
-wildcard certificate and a Quest browser resolving these names are not, because
-they need infrastructure that does not exist yet. The first end-to-end pairing
-is the real test.
+It is plain `ws://` by default now. `--self-signed-tls` still generates a
+certificate if you want one, but it buys nothing: a browser will not trust it,
+and the path that needed trust no longer exists.
+
+## Running without the service
+
+Set `--pair-service ""` on the bridge and nothing is published — no code, and no
+signalling. The dashboard still shows the LAN addresses and the client's address
+field takes them directly, which works when the page is served over plain HTTP.
+
+## What is and is not verified
+
+Covered by tests, including a full handshake between two real peers over the
+real signalling service — offer, answer, DTLS, data channel, a note into a
+virtual MIDI port and an LED write back (`apps/desktop-bridge/test/webrtc.test.ts`):
+
+- the signalling endpoints, their limits and their refusals
+- the bridge's polling client and its backoff
+- code generation, normalisation, expiry and address filtering
+- MIDI in both directions across a live data channel
+
+Not yet verified: a Quest browser as the offering peer, and a real home network
+between the two. The peer here is libdatachannel rather than Chromium, and both
+ends are on loopback. What the browser does differently — its candidate
+gathering and its own DTLS stack — is standard interop, but it has not been run.
