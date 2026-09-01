@@ -45,7 +45,6 @@ interface RtcPeerConnection {
 
 interface RtcModule {
   PeerConnection: new (name: string, config: { iceServers: string[] }) => RtcPeerConnection;
-  cleanup?: () => void;
 }
 
 export interface RtcOptions {
@@ -59,7 +58,23 @@ interface Peer {
   id: string;
   pc: RtcPeerConnection;
   channel: RtcDataChannel | null;
+  /** Fires if the channel never opens, so a stalled peer is not kept. */
+  openTimer: NodeJS.Timeout | null;
 }
+
+/**
+ * How long a headset has to finish connecting after being answered.
+ *
+ * An answered peer that never opens its channel is holding an ICE agent, a
+ * socket and a thread for a connection that is not coming. The client retries
+ * on its own — a rejected answer or a failed handshake schedules a fresh one —
+ * so without this every retry would leave another dead peer behind, and a
+ * headset that could not connect would slowly starve the bridge of the
+ * resources it needs to answer the attempt that finally works.
+ *
+ * Generous relative to a LAN handshake, which is well under a second.
+ */
+const OPEN_TIMEOUT_MS = 15_000;
 
 export class RtcTransport implements PacketSink {
   private readonly router: Router;
@@ -122,8 +137,16 @@ export class RtcTransport implements PacketSink {
     // are all that is needed. It also means no third party is contacted while
     // connecting — nothing about this leaves the LAN.
     const pc = new this.rtc.PeerConnection(`vrmc-${sessionId}`, { iceServers: [] });
-    const peer: Peer = { id: sessionId, pc, channel: null };
+    const peer: Peer = { id: sessionId, pc, channel: null, openTimer: null };
+    // Replacing an earlier attempt from the same session drops the old peer
+    // rather than orphaning it in the library.
+    if (this.peers.has(sessionId)) this.dropPeer(sessionId, 'superseded by a new offer');
     this.peers.set(sessionId, peer);
+
+    peer.openTimer = setTimeout(() => {
+      if (peer.channel?.isOpen() !== true) this.dropPeer(sessionId, 'never finished connecting');
+    }, OPEN_TIMEOUT_MS);
+    peer.openTimer.unref?.();
 
     pc.onDataChannel((channel) => this.attach(peer, channel));
 
@@ -135,43 +158,67 @@ export class RtcTransport implements PacketSink {
 
     return new Promise<string>((resolve, reject) => {
       let settled = false;
-      const timer = setTimeout(() => {
-        if (settled) return;
-        settled = true;
-        this.dropPeer(sessionId, 'timed out gathering candidates');
-        reject(new Error('timed out preparing an answer'));
-      }, timeoutMs);
 
-      /** Hand back the answer, once, whichever way we noticed it was ready. */
-      const deliver = (): void => {
+      const fail = (message: string, reason: string): void => {
         if (settled) return;
-        const local = pc.localDescription();
-        if (local === null) return;
         settled = true;
-        clearTimeout(timer);
-        resolve(local.sdp);
+        clearInterval(poll);
+        this.dropPeer(sessionId, reason);
+        reject(new Error(message));
       };
 
-      pc.onGatheringStateChange((state) => {
-        if (state === 'complete') deliver();
-      });
+      /**
+       * Hand back the answer once it is genuinely finished.
+       *
+       * Both conditions matter. Gathering being complete is not enough on its
+       * own: immediately after the offer is applied, before libdatachannel has
+       * built the answer on its own thread, the gatherer can already report
+       * complete while `localDescription` still holds nothing useful. Reading
+       * it then yields a description the offering peer rejects — it arrives
+       * without the transport its candidates belong to, and the connection
+       * fails with an error that names neither side.
+       *
+       * Checking the type is what makes that unambiguous: only an answer will
+       * do, and only after gathering has finished producing its candidates.
+       */
+      const ready = (): boolean => {
+        if (settled) return true;
+        if (pc.gatheringState() !== 'complete') return false;
+        const local = pc.localDescription();
+        if (local === null || local.type !== 'answer') return false;
+        settled = true;
+        clearInterval(poll);
+        resolve(local.sdp);
+        return true;
+      };
+
+      /*
+       * Polled rather than driven by the gathering callback.
+       *
+       * The callback fires on the library's own thread and can run before it
+       * is installed — on a machine with only host candidates there is nothing
+       * to gather, so the transition happens almost immediately — and a
+       * connection that waits for an event already past hangs until the
+       * timeout. Twenty milliseconds is far below anything a person notices
+       * and immune to both orderings.
+       */
+      const started = Date.now();
+      const poll = setInterval(() => {
+        if (ready()) return;
+        if (Date.now() - started > timeoutMs) {
+          fail('timed out preparing an answer', 'timed out gathering candidates');
+        }
+      }, 20);
+      poll.unref?.();
 
       try {
         pc.setRemoteDescription(offer, 'offer');
       } catch (err) {
-        settled = true;
-        clearTimeout(timer);
-        this.dropPeer(sessionId, 'bad offer');
-        reject(err instanceof Error ? err : new Error(String(err)));
+        fail(err instanceof Error ? err.message : String(err), 'bad offer');
         return;
       }
 
-      // On a machine with only local addresses there is nothing to gather, so
-      // this can already be finished — and the callback above fires on the
-      // library's own thread, which may have raced past it. Checking directly
-      // costs nothing and is the difference between connecting instantly and
-      // hanging until the timeout.
-      if (pc.gatheringState() === 'complete') deliver();
+      ready();
     });
   }
 
@@ -179,6 +226,10 @@ export class RtcTransport implements PacketSink {
     peer.channel = channel;
 
     channel.onOpen(() => {
+      if (peer.openTimer !== null) {
+        clearTimeout(peer.openTimer);
+        peer.openTimer = null;
+      }
       this.options.onLog(`headset connected over WebRTC (${peer.id})`);
       this.options.onPeerChange(this.peerCount);
     });
@@ -218,6 +269,10 @@ export class RtcTransport implements PacketSink {
     const peer = this.peers.get(sessionId);
     if (peer === undefined) return;
     this.peers.delete(sessionId);
+    if (peer.openTimer !== null) {
+      clearTimeout(peer.openTimer);
+      peer.openTimer = null;
+    }
     try {
       peer.channel?.close();
       peer.pc.close();
@@ -234,8 +289,21 @@ export class RtcTransport implements PacketSink {
     this.options.onPeerChange(this.peerCount);
   }
 
+  /**
+   * Close every peer this transport owns.
+   *
+   * Deliberately *not* the library's own `cleanup()`. That is a global
+   * teardown — it destroys every peer connection in the process and stops the
+   * internal threads — so calling it from an instance method means closing one
+   * transport quietly breaks any other. The bridge only has one today, which
+   * is why this was harmless in production and showed up as a flaky test: two
+   * transports in one process, and the second was created while the library
+   * was still tearing itself down from the first.
+   *
+   * The process exits immediately after this on shutdown, which is when the
+   * library's threads go away anyway.
+   */
   close(): void {
     for (const id of [...this.peers.keys()]) this.dropPeer(id, 'shutting down');
-    this.rtc?.cleanup?.();
   }
 }

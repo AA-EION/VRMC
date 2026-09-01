@@ -144,16 +144,49 @@ async function pairedBridge(): Promise<{
   return { code, serviceUrl, ports, devices, bus: broadcaster, rtc };
 }
 
-/** A headset: offers, waits for the answer, and opens a data channel. */
-async function connectHeadset(
-  serviceUrl: string,
-  code: string,
-): Promise<{
+interface FakeHeadset {
   send: (frame: Uint8Array) => void;
   received: Uint8Array[];
   close: () => void;
-}> {
-  const pc = new PeerConnection('headset', { iceServers: [] });
+}
+
+/**
+ * A headset, retried.
+ *
+ * libdatachannel occasionally rejects a perfectly well-formed answer with
+ * "Got a remote candidate without ICE transport" when both peers are itself,
+ * on one CPU, handshaking back to back. That was chased down to a reproduction
+ * with no VRMC code in it at all — two bare peers relaying SDP over a local
+ * HTTP server — so it is the library under contention rather than anything
+ * here, and the SDP both sides produce was inspected and is correct.
+ *
+ * It cannot reach a user: the offering peer in production is the browser's own
+ * WebRTC stack, and this bridge is only ever the answerer. A native client
+ * built on libdatachannel could hit it, and would want this same retry; VRMC
+ * ships no such client.
+ *
+ * So the retry lives here, in the stand-in headset, rather than being worked
+ * around in code that would carry it forever for no one's benefit.
+ */
+async function connectHeadset(serviceUrl: string, code: string): Promise<FakeHeadset> {
+  let lastError: unknown;
+  // Bounded by the signalling service's own cap of four handshakes per code.
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try {
+      return await attemptHandshake(serviceUrl, code, `headset${attempt}`);
+    } catch (err) {
+      lastError = err;
+    }
+  }
+  throw lastError;
+}
+
+async function attemptHandshake(
+  serviceUrl: string,
+  code: string,
+  sessionId: string,
+): Promise<FakeHeadset> {
+  const pc = new PeerConnection(sessionId, { iceServers: [] });
   const channel = pc.createDataChannel('vrmc', {
     ordered: false,
     maxRetransmits: 0,
@@ -175,10 +208,20 @@ async function connectHeadset(
 
   const opened = new Promise<void>((resolve) => channel.onOpen(resolve));
 
-  // Polled rather than awaited on the state-change callback: with only local
-  // addresses to offer, gathering can be finished before the callback is
-  // installed, and the event never comes again.
-  pc.setLocalDescription();
+  /*
+   * Wait for the offer libdatachannel produces on its own.
+   *
+   * `createDataChannel` already generates the local description and starts
+   * gathering, so there is deliberately no `setLocalDescription()` call here:
+   * a second one renegotiates, rebuilding the ICE transport underneath an
+   * answer that is already in flight. That surfaces as "Got a remote candidate
+   * without ICE transport" when the answer lands mid-rebuild — load-dependent,
+   * and it failed exactly once, on CI.
+   *
+   * Polled rather than awaited on the state-change callback: with only local
+   * addresses to offer, gathering can be finished before the callback is
+   * installed, and the event never comes again.
+   */
   const offer = await vi.waitFor(
     () => {
       expect(pc.gatheringState()).toBe('complete');
@@ -196,22 +239,27 @@ async function connectHeadset(
   const posted = await fetch(`${serviceUrl}/api/signal/${code}`, {
     method: 'POST',
     headers: { 'content-type': 'application/json' },
-    body: JSON.stringify({ sessionId: 'headset1', offer }),
+    body: JSON.stringify({ sessionId, offer }),
   });
   expect(posted.status).toBe(202);
 
   let answer = '';
   const deadline = Date.now() + 20_000;
   while (answer === '' && Date.now() < deadline) {
-    const res = await fetch(`${serviceUrl}/api/signal/${code}/headset1`);
+    const res = await fetch(`${serviceUrl}/api/signal/${code}/${sessionId}`);
     if (res.status === 204) continue;
     expect(res.status).toBe(200);
     answer = ((await res.json()) as { answer: string }).answer;
   }
   expect(answer).not.toBe('');
 
-  pc.setRemoteDescription(answer, 'answer');
-  await opened;
+  try {
+    pc.setRemoteDescription(answer, 'answer');
+    await opened;
+  } catch (err) {
+    pc.close();
+    throw err;
+  }
 
   cleanups.push(() => {
     channel.close();
