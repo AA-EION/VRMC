@@ -14,6 +14,15 @@ export interface BridgeConfig {
   statsInterval: number;
   tlsCert?: string;
   tlsKey?: string;
+  /**
+   * Disable TLS. Almost never right: WebXR only runs in a secure context, so a
+   * client reached over plain ws:// cannot enter an immersive session.
+   */
+  noTls: boolean;
+  /** Base URL of the pairing service, or empty to publish nothing. */
+  pairingService: string;
+  /** Wildcard domain whose subdomains resolve to private LAN addresses. */
+  lanDomain: string;
   loopbackPattern: RegExp;
   /**
    * How emulated devices name their MIDI ports. `{device}` is the model's
@@ -38,6 +47,9 @@ export const DEFAULT_CONFIG: BridgeConfig = {
   statsInterval: 10,
   loopbackPattern: WINDOWS_LOOPBACK_PATTERN,
   portNameTemplate: '{device} {port}',
+  noTls: false,
+  pairingService: 'https://vrmc.eionstudios.com',
+  lanDomain: 'lan.vrmc.eionstudios.com',
 };
 
 export const USAGE = `
@@ -52,8 +64,11 @@ Usage: vrmc-bridge [options]
   --no-udp             Disable the UDP transport
   --no-ws              Disable the WebSocket transport
   --no-midi            Accept packets but send no MIDI (network testing)
-  --tls-cert <path>    TLS certificate; enables wss://
+  --tls-cert <path>    TLS certificate (default: generated on first run)
   --tls-key <path>     TLS private key
+  --no-tls             Serve plain ws:// — a headset cannot use this
+  --pair-service <url> Pairing service base URL ("" to disable)
+  --lan-domain <host>  Wildcard domain resolving to private addresses
   --loopback <regex>   Windows: pattern for the fallback port
   --port-template <s>  Naming for emulated device ports
                        (default: "{device} {port}", e.g. "Launchpad X LPX DAW")
@@ -61,8 +76,10 @@ Usage: vrmc-bridge [options]
   --list-ports         List MIDI outputs and exit
   --help               Show this message
 
-A page served over HTTPS cannot open a plain ws:// socket, so a hosted XR
-client needs --tls-cert/--tls-key. See docs/WEB-DEPLOYMENT.md.
+TLS is on by default with a certificate generated on first run, because WebXR
+only runs in a secure context. To be reached from a hosted client without a
+warning, the bridge needs a certificate for the LAN wildcard domain — see
+docs/PAIRING.md.
 `.trimStart();
 
 class ArgError extends Error {}
@@ -121,6 +138,15 @@ export function parseArgs(argv: readonly string[]): BridgeConfig | 'help' {
         break;
       case '--tls-key':
         config.tlsKey = requireValue(arg, argv[++i]);
+        break;
+      case '--no-tls':
+        config.noTls = true;
+        break;
+      case '--pair-service':
+        config.pairingService = argv[++i] ?? '';
+        break;
+      case '--lan-domain':
+        config.lanDomain = requireValue(arg, argv[++i]);
         break;
       case '--loopback':
         config.loopbackPattern = new RegExp(requireValue(arg, argv[++i]), 'i');

@@ -1,9 +1,11 @@
 #!/usr/bin/env node
 import { networkInterfaces } from 'node:os';
-import { DeviceId, DeviceStatus } from '@vrmc/protocol';
+import { DeviceId, DeviceStatus, bridgeUrl, isPrivateAddress } from '@vrmc/protocol';
 import { ArgError, parseArgs, USAGE, type BridgeConfig } from './config.js';
 import { Router } from './core/Router.js';
 import { BRIDGE_VERSION, runSelfTest } from './core/selfTest.js';
+import { ensureCertificate } from './setup/certificate.js';
+import { PairingPublisher } from './setup/pairing.js';
 import { DEFAULT_PORT_NAME_TEMPLATE, DeviceManager } from './devices/DeviceManager.js';
 import { listPorts } from './midi/openPort.js';
 import { UdpServer } from './net/UdpServer.js';
@@ -96,12 +98,31 @@ async function main(): Promise<void> {
     onMalformed: throttle((reason) => log(`dropped malformed packet: ${reason}`), 1000),
   });
 
+  // TLS is on unless explicitly refused. A headset cannot use a plain ws://
+  // bridge at all — WebXR requires a secure context — so making the user
+  // supply certificates was making the wrong thing their problem.
+  let tlsCert = config.tlsCert;
+  let tlsKey = config.tlsKey;
+  if (!config.noTls && (tlsCert === undefined || tlsKey === undefined)) {
+    try {
+      const generated = await ensureCertificate(reachableAddresses(config.host));
+      tlsCert = generated.certPath;
+      tlsKey = generated.keyPath;
+      if (generated.created) {
+        log(`generated a TLS certificate for ${generated.names.join(', ')}`);
+      }
+    } catch (err) {
+      log(`could not prepare TLS: ${err instanceof Error ? err.message : String(err)}`);
+      log('falling back to plain ws:// — a headset will not be able to connect');
+    }
+  }
+
   ws = config.enableWs
     ? new WsServer(router, {
         port: config.wsPort,
         host: config.host,
-        tlsCert: config.tlsCert,
-        tlsKey: config.tlsKey,
+        tlsCert,
+        tlsKey,
         onLog: log,
       })
     : null;
@@ -127,6 +148,11 @@ async function main(): Promise<void> {
       lossRatio: router.stats.lossRatio,
       malformed: router.stats.malformed,
       midiAvailable: devices.roster().some((d) => d.status === DeviceStatus.READY),
+      pairingCode: pairing?.displayCode ?? '',
+      pairingRegistered: pairing?.isRegistered ?? false,
+      pairingError: pairing?.error ?? '',
+      siteUrl: config.pairingService,
+      lanUrls: lanAddresses().map((a) => bridgeUrl(a, config.wsPort, config.lanDomain)),
     });
 
     ws.selfTest = (what) => runSelfTest(what, ws, devices);
@@ -160,6 +186,30 @@ async function main(): Promise<void> {
     log('note: plain ws:// — an HTTPS-hosted client will refuse this. See --tls-cert.');
   }
 
+  // Publishing the pairing code is what lets a headset on the hosted client
+  // find this machine without anyone typing an IP address.
+  const lanAddresses = (): string[] =>
+    reachableAddresses(config.host).filter(isPrivateAddress);
+
+  const pairing =
+    config.pairingService === ''
+      ? null
+      : new PairingPublisher({
+          serviceUrl: config.pairingService,
+          port: config.wsPort,
+          version: BRIDGE_VERSION,
+          addresses: lanAddresses,
+          onLog: log,
+        });
+  pairing?.start();
+
+  if (pairing !== null) {
+    log(`pairing code: ${pairing.displayCode}`);
+    for (const address of lanAddresses()) {
+      log(`headset URL  ${bridgeUrl(address, config.wsPort, config.lanDomain)}`);
+    }
+  }
+
   let statsTimer: NodeJS.Timeout | null = null;
   if (config.statsInterval > 0) {
     statsTimer = setInterval(() => {
@@ -182,7 +232,7 @@ async function main(): Promise<void> {
     // sounding until the DAW is restarted.
     const released = router.releaseAll();
     if (released > 0) log(`released ${released} sounding note(s)`);
-    await Promise.all([ws?.close(), udp?.close()]);
+    await Promise.all([ws?.close(), udp?.close(), pairing?.stop()]);
     devices.removeAll();
     process.exit(0);
   };

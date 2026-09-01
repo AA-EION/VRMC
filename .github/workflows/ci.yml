@@ -46,7 +46,7 @@ jobs:
       - name: Serve and check
         run: |
           set -euo pipefail
-          docker run -d --name vrmc-web-ci -p 127.0.0.1:8080:80 vrmc-web:ci
+          docker run -d --name vrmc-web-ci -p 127.0.0.1:8080:8080 vrmc-web:ci
 
           # Wait for the container's own healthcheck rather than sleeping.
           for i in $(seq 1 30); do
@@ -56,8 +56,23 @@ jobs:
             sleep 2
           done
 
-          curl -fsS http://127.0.0.1:8080/healthz | grep -q ok
+          curl -fsS http://127.0.0.1:8080/healthz | grep -q vrmc-web
           curl -fsS http://127.0.0.1:8080/ | grep -q '<div id="root">'
+
+          # The pairing service is what lets a headset on the public site find
+          # a bridge on someone's LAN, so its round trip is checked here too.
+          curl -fsS http://127.0.0.1:8080/api/config | grep -q lanDomain
+          curl -fsS -X POST http://127.0.0.1:8080/api/pair \
+            -H 'content-type: application/json' \
+            -d '{"code":"K7M2QX","addresses":["192.168.1.42"],"port":7401,"label":"ci","version":"0"}' \
+            | grep -q '"ok":true'
+          curl -fsS http://127.0.0.1:8080/api/pair/K7M2QX | grep -q '192.168.1.42'
+          # A registration naming a public address must be refused: accepting
+          # one would point other users' headsets at a stranger's machine.
+          curl -s -o /dev/null -w '%{http_code}' -X POST http://127.0.0.1:8080/api/pair \
+            -H 'content-type: application/json' \
+            -d '{"code":"AAAAAA","addresses":["8.8.8.8"],"port":7401,"label":"x","version":"0"}' \
+            | grep -q 400
 
           # Unknown paths must fall back to the document, not 404: the client is
           # a single-page app and may be mounted under any route.

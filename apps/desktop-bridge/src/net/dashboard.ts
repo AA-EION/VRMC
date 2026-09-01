@@ -42,6 +42,15 @@ export interface DashboardStatus {
   lossRatio: number;
   malformed: number;
   midiAvailable: boolean;
+  /** Pairing code as displayed, or empty when publishing is off. */
+  pairingCode: string;
+  /** Whether the pairing service has the current registration. */
+  pairingRegistered: boolean;
+  pairingError: string;
+  /** Where to open the client in the headset. */
+  siteUrl: string;
+  /** wss:// URLs on the LAN wildcard domain, for manual entry. */
+  lanUrls: string[];
 }
 
 /** Result of one self-test leg. */
@@ -111,6 +120,15 @@ export function dashboardHtml(): string {
   .results { margin: .8rem 0 0; display: grid; gap: .4rem; font-size: .85rem; }
   .results div { display: flex; gap: .5rem; }
   .hint { color: var(--muted); font-size: .85rem; margin: 0 0 .8rem; }
+  /* The one thing on this page a user has to read across a room and retype. */
+  .code {
+    font-family: ui-monospace, Menlo, monospace; font-size: 2.6rem; font-weight: 700;
+    letter-spacing: .18em; color: var(--accent); text-align: center;
+    padding: .7rem 0 .5rem; user-select: all;
+  }
+  details { margin-top: .6rem; }
+  summary { cursor: pointer; color: var(--muted); font-size: .82rem; }
+  details[open] summary { margin-bottom: .7rem; }
 </style>
 </head>
 <body>
@@ -121,11 +139,18 @@ export function dashboardHtml(): string {
     <span class="muted" id="version"></span>
   </header>
 
-  <section class="card">
+  <section class="card" id="pairCard">
     <h2>Connect the headset</h2>
-    <p class="hint">Enter one of these in the XR client, or let it discover the bridge automatically.</p>
-    <div id="addresses"></div>
-    <p class="hint" id="tlsNote"></p>
+    <p class="hint">
+      Open <strong id="siteUrl">the VRMC site</strong> in the headset and enter this code.
+    </p>
+    <div class="code" id="pairCode">------</div>
+    <p class="hint" id="pairState"></p>
+    <details>
+      <summary>Enter an address instead</summary>
+      <div id="addresses"></div>
+      <p class="hint" id="tlsNote"></p>
+    </details>
   </section>
 
   <section class="card">
@@ -196,13 +221,27 @@ async function refresh() {
   $('pin').textContent = s.packetsIn + ' pkt / ' + s.eventsIn + ' ev';
   $('pout').textContent = s.packetsOut + ' pkt / ' + s.ledsOut + ' led';
 
+  const site = (s.siteUrl || '').replace(/^https?:\/\//, '');
+  $('siteUrl').textContent = site || 'the VRMC site';
+  $('pairCode').textContent = s.pairingCode || 'off';
+  $('pairState').textContent = !s.pairingCode
+    ? 'Pairing is disabled; use an address below.'
+    : s.pairingRegistered
+      ? 'Ready — the code is live.'
+      : 'Not reachable: ' + (s.pairingError || 'contacting the pairing service…');
+  $('pairState').className = s.pairingRegistered ? 'hint ok' : 'hint warn';
+
   const scheme = s.secure ? 'wss' : 'ws';
-  $('addresses').innerHTML = s.addresses
-    .map((a) => '<div class="addr"><code>' + scheme + '://' + a + ':' + s.wsPort + '</code></div>')
+  $('addresses').innerHTML = (s.lanUrls && s.lanUrls.length ? s.lanUrls : s.addresses
+  )
+    .map((a) =>
+      '<div class="addr"><code>' +
+      (a.startsWith('wss://') ? a : scheme + '://' + a + ':' + s.wsPort) +
+      '</code></div>')
     .join('') || '<p class="hint">No LAN address found.</p>';
   $('tlsNote').textContent = s.secure
-    ? ''
-    : 'Plain ws:// — a client served over HTTPS will refuse this. Start the bridge with --tls-cert to fix it.';
+    ? 'These use the LAN wildcard domain so the certificate is valid from the headset.'
+    : 'Plain ws:// — a headset cannot connect at all. TLS was disabled or could not start.';
 
   $('devices').innerHTML = s.devices.length
     ? s.devices.map((d) =>

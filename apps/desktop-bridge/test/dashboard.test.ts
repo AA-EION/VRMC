@@ -53,6 +53,11 @@ async function serve(): Promise<{ ws: WsServer; devices: DeviceManager; port: nu
     lossRatio: router.stats.lossRatio,
     malformed: router.stats.malformed,
     midiAvailable: true,
+    pairingCode: 'K7M-2QX',
+    pairingRegistered: true,
+    pairingError: '',
+    siteUrl: 'https://vrmc.eionstudios.com',
+    lanUrls: ['wss://192-168-1-50.lan.example.com:7401'],
   });
   ws.selfTest = (what) => runSelfTest(what, ws, devices);
   await ws.listen();

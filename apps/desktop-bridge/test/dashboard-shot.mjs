@@ -53,6 +53,11 @@ ws.statusProvider = () => ({
   lossRatio: router.stats.lossRatio,
   malformed: router.stats.malformed,
   midiAvailable: true,
+  pairingCode: 'K7M-2QX',
+  pairingRegistered: true,
+  pairingError: '',
+  siteUrl: 'https://vrmc.eionstudios.com',
+  lanUrls: ['wss://192-168-1-42.lan.vrmc.eionstudios.com:7401'],
 });
 await ws.listen();
 
