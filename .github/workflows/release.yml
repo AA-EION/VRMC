@@ -45,8 +45,24 @@ jobs:
       # shell on Windows — so unlike the prebuilt addons it cannot be selected
       # and copied from another machine. This is why the matrix exists.
       - name: Build the tray helper
+        if: runner.os != 'Windows'
         run: node native/build.mjs
         working-directory: apps/desktop-bridge
+
+      # Windows needs the compiler on PATH first: cl.exe and rc.exe only exist
+      # inside a Developer Command Prompt. vswhere is shipped by the Visual
+      # Studio installer and is already on the runner, so the environment is
+      # located with Microsoft's own tooling rather than by adding a
+      # third-party action to the supply chain for one `call`.
+      - name: Build the tray helper (Windows)
+        if: runner.os == 'Windows'
+        shell: cmd
+        working-directory: apps/desktop-bridge
+        run: |
+          for /f "usebackq tokens=*" %%i in (`"%ProgramFiles(x86)%\Microsoft Visual Studio\Installer\vswhere.exe" -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath`) do set VSPATH=%%i
+          if not defined VSPATH exit /b 1
+          call "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
+          node native/build.mjs || exit /b 1
 
       - run: node build/package.mjs ${{ matrix.target }}
         working-directory: apps/desktop-bridge

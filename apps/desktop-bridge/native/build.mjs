@@ -17,7 +17,7 @@ import { execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
 import { mkdir, rm } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const execFile = promisify(execFileCb);
@@ -67,12 +67,17 @@ async function buildMacOS() {
 
 async function buildWindows() {
   // rc.exe and cl.exe are only on PATH inside a Developer Command Prompt. The
-  // CI job sets that up with microsoft/setup-msbuild plus vcvarsall; locally,
-  // running this outside one is the usual reason it does nothing.
-  const rc = await run('rc.exe', ['/?']);
-  if (rc === null) {
-    console.warn('  ! rc.exe not found; run this from a Developer Command Prompt');
-    return false;
+  // release workflow enters one with vcvars64.bat; locally, running this
+  // outside one is the usual reason it does nothing.
+  //
+  // Probed with `where` rather than by running them: rc.exe answers `/?` with
+  // a non-zero status, so using its exit code would report a perfectly good
+  // toolchain as missing.
+  for (const tool of ['rc.exe', 'cl.exe']) {
+    if ((await run('where.exe', [tool])) === null) {
+      console.warn(`  ! ${tool} not found; run this from a Developer Command Prompt`);
+      return false;
+    }
   }
   const res = join(outDir, 'tray.res');
   const compiled = await run('rc.exe', ['/nologo', `/fo${res}`, join(here, 'windows/tray.rc')]);
@@ -86,7 +91,9 @@ async function buildWindows() {
     join(here, 'windows/tray.c'),
     res,
     `/Fe:${out}`,
-    `/Fo:${join(outDir, '')}`,
+    // No colon after /Fo: unlike /Fe, that spelling is undocumented. The
+    // trailing separator is what makes it a directory rather than a filename.
+    `/Fo${outDir}${sep}`,
     '/link',
     // GUI subsystem, so launching it never flashes a console window. stdin and
     // stdout still work: the parent hands us pipes regardless of subsystem.
