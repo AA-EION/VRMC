@@ -122,6 +122,26 @@ check('no unexpected console errors', unexpected.length === 0, unexpected.join('
 
 check('React overlay mounted', (await page.locator('.overlay h1').count()) === 1);
 
+// The panel must be on screen without scrolling. React Three Fiber renders its
+// own full-height container, and leaving it in normal flow pushed the entire UI
+// below the fold — a first-time user saw a blank page. That went unnoticed for
+// a long time because these tests hide the overlay before measuring anything.
+const overlayTop = await page.evaluate(() => {
+  const el = document.querySelector('.overlay');
+  return el === null ? null : el.getBoundingClientRect().top;
+});
+check('overlay starts inside the viewport', overlayTop !== null && overlayTop < 200,
+  overlayTop === null ? 'no overlay' : `top at ${Math.round(overlayTop)}px`);
+
+// The pairing field is the first thing a user touches; it must not be squashed
+// by the button beside it.
+const codeBox = await page.evaluate(() => {
+  const el = document.querySelector('.code-input');
+  return el === null ? null : el.getBoundingClientRect().width;
+});
+check('pairing code field is usably wide', codeBox !== null && codeBox > 120,
+  codeBox === null ? 'missing' : `${Math.round(codeBox)}px wide`);
+
 const webgl = await page.evaluate(() => {
   const canvas = document.querySelector('canvas');
   if (!canvas) return { ok: false, reason: 'no canvas element' };

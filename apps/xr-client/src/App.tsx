@@ -7,6 +7,7 @@ import { Scene } from './Scene.js';
 import { Overlay } from './ui/Overlay.js';
 import type { LinkStatus } from './net/BridgeLink.js';
 import { detectSupport, isBlending, startSession, type XrSupport } from './xr/session.js';
+import { firstReachable, PairingError, resolvePairingCode } from './net/pairing.js';
 
 /** Remember the bridge address between visits; it rarely changes. */
 const URL_STORAGE_KEY = 'vrmc.bridgeUrl';
@@ -40,6 +41,8 @@ export function App(): React.ReactElement {
   // The engine mutates its device array in place, which React cannot observe,
   // so it publishes a snapshot whenever the roster changes.
   const [devices, setDevices] = useState<readonly LaunchpadInstance[]>([]);
+  const [pairingBusy, setPairingBusy] = useState(false);
+  const [pairingNote, setPairingNote] = useState('');
   const [status, setStatus] = useState<LinkStatus>(() => engine.link.status());
   const [sessionActive, setSessionActive] = useState(false);
   const [passthrough, setPassthrough] = useState(false);
@@ -130,6 +133,42 @@ export function App(): React.ReactElement {
 
   const handlePanic = useCallback(() => engine.allNotesOff(), [engine]);
 
+  /**
+   * Turn a pairing code into a live connection.
+   *
+   * The resolved address is remembered, so this is a one-time step: on every
+   * later visit the client reconnects to the address it already knows and the
+   * code is never needed again.
+   */
+  const handlePair = useCallback(
+    async (code: string) => {
+      setPairingBusy(true);
+      setPairingNote('Looking up the code…');
+      try {
+        const found = await resolvePairingCode(code);
+        setPairingNote(`Found ${found.label}. Connecting…`);
+        const url = await firstReachable(found.urls);
+        setBridgeUrl(url);
+        try {
+          localStorage.setItem(URL_STORAGE_KEY, url);
+        } catch {
+          // Private browsing; the address just will not be remembered.
+        }
+        engine.link.connect(url);
+        setPairingNote(`Connected to ${found.label}.`);
+        setError('');
+      } catch (err) {
+        const message =
+          err instanceof PairingError ? err.message : err instanceof Error ? err.message : String(err);
+        setPairingNote('');
+        setError(message);
+      } finally {
+        setPairingBusy(false);
+      }
+    },
+    [engine],
+  );
+
   // A headset going to sleep, or the user switching apps, leaves notes ringing
   // on the desktop. Release on the way out.
   useEffect(() => {
@@ -143,6 +182,13 @@ export function App(): React.ReactElement {
 
   return (
     <>
+      {/*
+        The canvas is wrapped so it can be taken out of flow. React Three
+        Fiber renders its own full-height container div, which would otherwise
+        occupy a screen's worth of layout and push the whole panel below the
+        fold — leaving a first-time user looking at an empty page.
+      */}
+      <div className="scene">
       <Canvas
         // alpha:true is what lets passthrough show through. With an opaque
         // buffer the compositor has nothing to blend and the room disappears.
@@ -164,6 +210,7 @@ export function App(): React.ReactElement {
       >
         <Scene engine={engine} devices={devices} />
       </Canvas>
+      </div>
 
       <Overlay
         support={support}
@@ -179,6 +226,9 @@ export function App(): React.ReactElement {
         devices={devices}
         onAddDevice={(model) => engine.addDevice(model)}
         onRemoveDevice={(id) => engine.removeDevice(id)}
+        onPair={(code) => void handlePair(code)}
+        pairingBusy={pairingBusy}
+        pairingNote={pairingNote}
       />
     </>
   );

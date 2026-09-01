@@ -1,4 +1,6 @@
+import { useState } from 'react';
 import { DeviceModel } from '@vrmc/devices';
+import { PAIRING_CODE_LENGTH, isPairingCode, normalisePairingCode } from '@vrmc/protocol';
 import { DeviceStatus } from '@vrmc/protocol';
 import type { LaunchpadInstance } from '../devices/LaunchpadInstance.js';
 import type { LinkStatus } from '../net/BridgeLink.js';
@@ -18,6 +20,9 @@ export interface OverlayProps {
   devices: readonly LaunchpadInstance[];
   onAddDevice: (model: string) => void;
   onRemoveDevice: (deviceId: number) => void;
+  onPair: (code: string) => void;
+  pairingBusy: boolean;
+  pairingNote: string;
 }
 
 const STATE_LABEL: Record<LinkStatus['state'], string> = {
@@ -51,6 +56,9 @@ export function Overlay(props: OverlayProps): React.ReactElement {
     devices,
     onAddDevice,
     onRemoveDevice,
+    onPair,
+    pairingBusy,
+    pairingNote,
   } = props;
 
   const connected = status.state === 'open';
@@ -64,11 +72,15 @@ export function Overlay(props: OverlayProps): React.ReactElement {
       </header>
 
       <section className="card">
-        <h2>1 · Desktop bridge</h2>
+        <h2>1 · Connect</h2>
         <p className="hint">
-          Run <code>pnpm bridge</code> on the computer with your DAW, then enter the address it
-          prints.
+          Open the VRMC app on the computer with your DAW and type the code it shows.
         </p>
+        <PairingEntry onPair={onPair} busy={pairingBusy} />
+        {pairingNote !== '' && <p className="hint spaced">{pairingNote}</p>}
+
+        <details className="advanced">
+          <summary>Enter an address instead</summary>
         <div className="row">
           <input
             type="text"
@@ -83,6 +95,8 @@ export function Overlay(props: OverlayProps): React.ReactElement {
             {connected ? 'Reconnect' : 'Connect'}
           </button>
         </div>
+        </details>
+
         <dl className="stats">
           <div>
             <dt>Link</dt>
@@ -208,5 +222,53 @@ export function Overlay(props: OverlayProps): React.ReactElement {
 
       {error !== '' && <p className="warn banner">{error}</p>}
     </div>
+  );
+}
+
+
+/**
+ * Pairing code entry.
+ *
+ * Deliberately one field with generous type sizing: this is typed on a floating
+ * keyboard by someone in a headset, where per-character boxes mean a lot of
+ * precise pokes and no way to fix a mistake in the middle. Case and dashes are
+ * normalised as the user types, so the code can be entered however it reads.
+ */
+function PairingEntry({
+  onPair,
+  busy,
+}: {
+  onPair: (code: string) => void;
+  busy: boolean;
+}): React.ReactElement {
+  const [code, setCode] = useState('');
+  const normalised = normalisePairingCode(code);
+  const ready = isPairingCode(normalised);
+
+  return (
+    <form
+      className="row"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (ready && !busy) onPair(normalised);
+      }}
+    >
+      <input
+        type="text"
+        className="code-input"
+        value={code}
+        placeholder="K7M-2QX"
+        maxLength={PAIRING_CODE_LENGTH + 2}
+        spellCheck={false}
+        autoCapitalize="characters"
+        autoCorrect="off"
+        aria-label="Pairing code"
+        onChange={(e) => setCode(e.target.value.toUpperCase())}
+        disabled={busy}
+      />
+      <button type="submit" className="primary" disabled={!ready || busy}>
+        {busy ? 'Connecting…' : 'Connect'}
+      </button>
+    </form>
   );
 }
