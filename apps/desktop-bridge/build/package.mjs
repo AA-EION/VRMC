@@ -36,12 +36,24 @@ const outRoot = join(root, 'build/dist');
 const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
 const VERSION = pkg.version ?? '0.0.0';
 
-/** Targets to build. `pkg` names the Node build; `slug` names the output. */
+/**
+ * Targets to build. `pkg` names the Node build; `slug` names the output.
+ *
+ * Node 22 rather than 20, because pkg-fetch publishes no `node20-win-x64` base
+ * binary — the download 404s, pkg silently falls back to compiling Node from
+ * source, and that fails on a runner with no C++ toolchain configured for it.
+ * Every node22 base exists for every platform here, and 22 is the LTS the
+ * project builds and tests on anyway.
+ *
+ * If a target ever 404s again the symptom is the same: a long build that ends
+ * in a compiler error rather than a download error. `assertBaseAvailable` below
+ * turns that back into the truth.
+ */
 const TARGETS = [
-  { slug: 'macos-arm64', pkg: 'node20-macos-arm64', platform: 'darwin', arch: 'arm64' },
-  { slug: 'macos-x64', pkg: 'node20-macos-x64', platform: 'darwin', arch: 'x64' },
-  { slug: 'windows-x64', pkg: 'node20-win-x64', platform: 'win32', arch: 'x64' },
-  { slug: 'linux-x64', pkg: 'node20-linux-x64', platform: 'linux', arch: 'x64' },
+  { slug: 'macos-arm64', pkg: 'node22-macos-arm64', platform: 'darwin', arch: 'arm64' },
+  { slug: 'macos-x64', pkg: 'node22-macos-x64', platform: 'darwin', arch: 'x64' },
+  { slug: 'windows-x64', pkg: 'node22-win-x64', platform: 'win32', arch: 'x64' },
+  { slug: 'linux-x64', pkg: 'node22-linux-x64', platform: 'linux', arch: 'x64' },
 ];
 
 const only = process.argv.slice(2).filter((a) => !a.startsWith('-'));
@@ -285,7 +297,79 @@ async function pkgBinary() {
   return join(dir, entry);
 }
 
+/**
+ * Confirm the packager can actually get a base binary for this target.
+ *
+ * pkg's own failure mode here is genuinely misleading: a 404 on the base binary
+ * is not fatal to it, so it falls back to compiling Node from source, and the
+ * error that eventually surfaces is a compiler complaint about Visual Studio.
+ * Two release builds were spent reading that before anyone read the 404 three
+ * hundred lines above it.
+ *
+ * The asset is checked against the release rather than against pkg-fetch's own
+ * manifest, because the manifest is not the truth: it lists
+ * `node-v20.20.2-win-x64`, which is exactly the binary that 404s. Only the
+ * release knows what was published.
+ */
+async function assertBaseAvailable(target) {
+  // Resolved from pkg's own manifest, not the bridge's: pkg-fetch is pkg's
+  // dependency, and under pnpm's layout it is invisible from anywhere else.
+  // Getting that wrong makes this check silently pass on everything.
+  const pkgDir = await resolvePackageDir('@yao-pkg/pkg');
+  const dir =
+    pkgDir === null
+      ? null
+      : await resolvePackageDir('@yao-pkg/pkg-fetch', join(pkgDir, 'package.json'));
+  if (dir === null) return;
+
+  let shas;
+  let version;
+  try {
+    shas = JSON.parse(await readFile(join(dir, 'lib-es5/expected-shas.json'), 'utf8'));
+    version = JSON.parse(await readFile(join(dir, 'package.json'), 'utf8')).version;
+  } catch {
+    return; // Not something to fail a build over; pkg will say its piece.
+  }
+
+  // `node22-win-x64` -> the `node-v22.x.y-win-x64` asset that carries it.
+  const parsed = /^node(\d+)-(.+)$/.exec(target.pkg);
+  if (parsed === null) return;
+  const [, major, platform] = parsed;
+  const name = Object.keys(shas).find(
+    (k) => k.startsWith(`node-v${major}.`) && k.endsWith(`-${platform}`),
+  );
+  if (name === undefined) {
+    throw new Error(`pkg-fetch knows no base binary named for ${target.pkg}`);
+  }
+
+  // The release tag is the first two fields of pkg-fetch's own version.
+  const [tagMajor, tagMinor] = String(version).split('.');
+  const url = `https://github.com/yao-pkg/pkg-fetch/releases/download/v${tagMajor}.${tagMinor}/${name}`;
+
+  let status;
+  try {
+    const res = await fetch(url, {
+      method: 'HEAD',
+      redirect: 'follow',
+      signal: AbortSignal.timeout(20_000),
+    });
+    status = res.status;
+  } catch {
+    // Offline, or a proxy in the way. Say nothing and let pkg try: a network
+    // problem here is not evidence about what was published.
+    return;
+  }
+
+  if (status === 404) {
+    throw new Error(
+      `pkg-fetch has no ${name} in v${tagMajor}.${tagMinor}, so ${target.pkg} cannot be built ` +
+        'without compiling Node from source. Pick a Node major that is published for this platform.',
+    );
+  }
+}
+
 async function buildTarget(target) {
+  await assertBaseAvailable(target);
   const stage = join(outRoot, `vrmc-bridge-${VERSION}-${target.slug}`);
   await rm(stage, { recursive: true, force: true });
   await mkdir(stage, { recursive: true });
@@ -311,11 +395,6 @@ async function buildTarget(target) {
       JSON.stringify(join(root, 'build/out/bridge.cjs')),
       `--targets ${target.pkg}`,
       `--output ${JSON.stringify(join(exeDir, exeName))}`,
-      // Fail rather than fall back to building Node from source. That fallback
-      // needs a full C++ toolchain, takes tens of minutes, and on a runner
-      // without one fails anyway — long after the real problem, which is a
-      // base binary that could not be downloaded.
-      '--no-native-build',
       '--public',
     ].join(' '),
     { cwd: root, maxBuffer: 32 * 1024 * 1024 },
