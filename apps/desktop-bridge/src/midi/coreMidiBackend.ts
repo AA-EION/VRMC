@@ -1,4 +1,5 @@
 import { dataByteCount } from '@vrmc/protocol';
+import { requireNative, unwrapDefault } from '../native.js';
 import type { MidiSink, MidiSource } from './MidiSink.js';
 
 /**
@@ -43,18 +44,31 @@ interface RtMidiModule {
   Input: new () => RtMidiInput;
 }
 
+/** Why RtMidi could not be loaded, if it could not. Read for reporting. */
+let rtMidiError = '';
+
+export function rtMidiLoadError(): string {
+  return rtMidiError;
+}
+
 /**
  * Load RtMidi. It is an optional dependency, and constructing an `Output`
  * throws outright when the host has no MIDI system at all (a headless CI box
- * with no ALSA sequencer), so both the import and the construction are guarded.
+ * with no ALSA sequencer), so both the load and the construction are guarded.
+ *
+ * The reason for a failure is kept rather than discarded. Swallowing it once
+ * turned "the addon is not there" into "this host may have no MIDI sequencer",
+ * which sent the diagnosis in entirely the wrong direction.
  */
 export async function loadRtMidi(): Promise<RtMidiModule | null> {
   try {
-    const mod = (await import('@julusian/midi')) as unknown as
-      | RtMidiModule
-      | { default: RtMidiModule };
-    return 'Output' in mod ? mod : mod.default;
-  } catch {
+    const mod = unwrapDefault(
+      requireNative<RtMidiModule | { default: RtMidiModule }>('@julusian/midi'),
+    );
+    rtMidiError = '';
+    return mod;
+  } catch (err) {
+    rtMidiError = err instanceof Error ? err.message : String(err);
     return null;
   }
 }

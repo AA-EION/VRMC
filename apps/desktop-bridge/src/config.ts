@@ -10,6 +10,8 @@ export interface BridgeConfig {
   enableWs: boolean;
   noMidi: boolean;
   listPorts: boolean;
+  /** Verify the native addons load, print the result, and exit. */
+  check: boolean;
   /** Seconds between stats lines. 0 disables them. */
   statsInterval: number;
   tlsCert?: string;
@@ -58,6 +60,7 @@ export const DEFAULT_CONFIG: BridgeConfig = {
   enableWs: true,
   noMidi: false,
   listPorts: false,
+  check: false,
   statsInterval: 10,
   loopbackPattern: WINDOWS_LOOPBACK_PATTERN,
   portNameTemplate: '{device} {port}',
@@ -90,6 +93,7 @@ Usage: vrmc-bridge [options]
                        (default: "{device} {port}", e.g. "Launchpad X LPX DAW")
   --stats <seconds>    Stats interval, 0 to disable (default: 10)
   --list-ports         List MIDI outputs and exit
+  --check              Verify the native libraries load, then exit
   --help               Show this message
 
 A headset running the hosted client connects over a WebRTC data channel: read
@@ -148,6 +152,9 @@ export function parseArgs(argv: readonly string[]): BridgeConfig | 'help' {
         break;
       case '--list-ports':
         config.listPorts = true;
+        break;
+      case '--check':
+        config.check = true;
         break;
       case '--tls-cert':
         config.tlsCert = requireValue(arg, argv[++i]);

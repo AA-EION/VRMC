@@ -31,8 +31,22 @@ await build({
   // its loader picks a platform package by inspecting the running system —
   // logic a bundler would have to resolve at build time and cannot.
   external: ['@julusian/midi', 'koffi', 'node-datachannel'],
+  /*
+   * Give `import.meta.url` a real value in the CommonJS output.
+   *
+   * esbuild otherwise replaces `import.meta` with `{}` when the format is cjs,
+   * which turns `createRequire(import.meta.url)` into `createRequire(undefined)`
+   * — and with it every native addon load. The bundle's own path is what the
+   * addon resolution should be relative to, so that is what it gets.
+   */
+  define: {
+    'import.meta.url': '__vrmcBundleUrl',
+  },
   banner: {
-    js: '/* VRMC bridge — GPL-3.0-only. https://github.com/AA-EION/VRMC */',
+    js: [
+      '/* VRMC bridge — GPL-3.0-only. https://github.com/AA-EION/VRMC */',
+      "const __vrmcBundleUrl = require('node:url').pathToFileURL(__filename).href;",
+    ].join('\n'),
   },
   logLevel: 'info',
 });

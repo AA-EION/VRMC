@@ -81,16 +81,21 @@ jobs:
           test -n "$found" || { echo "no $name in the staged build"; exit 1; }
           echo "packaged $found"
 
-      # Smoke-test on the OS the artifact targets. `--list-ports` enumerates and
-      # exits, which proves both that the executable runs and that the native
-      # MIDI addon loaded — the two things packaging most often breaks, and
-      # neither shows up in a typecheck.
+      # Smoke-test on the OS the artifact targets.
+      #
+      # `--check` loads every native library and exits non-zero if one is
+      # missing. That specific check exists because the previous one did not
+      # catch the failure it was meant to: `--list-ports` prints "no ports" just
+      # as happily when the MIDI addon failed to load as when the machine has no
+      # MIDI, and a packaged build shipped with *both* addons dead — no MIDI and
+      # no way for a headset to connect — while every smoke test passed.
       - name: Smoke test (macOS)
         if: runner.os == 'macOS'
         run: |
           set -euo pipefail
           APP=$(find apps/desktop-bridge/build/dist -type f -name 'vrmc-bridge' | sed -n 1p)
           chmod +x "$APP"
+          "$APP" --check
           "$APP" --list-ports
       - name: Smoke test (Linux)
         if: runner.os == 'Linux'
@@ -98,6 +103,7 @@ jobs:
           set -euo pipefail
           BIN=$(find apps/desktop-bridge/build/dist -type f -name 'vrmc-bridge' | sed -n 1p)
           chmod +x "$BIN"
+          "$BIN" --check
           "$BIN" --help
       - name: Smoke test (Windows)
         if: runner.os == 'Windows'
@@ -106,6 +112,8 @@ jobs:
           $exe = Get-ChildItem -Recurse apps/desktop-bridge/build/dist -Filter vrmc-bridge.exe |
             Select-Object -First 1
           if (-not $exe) { throw 'vrmc-bridge.exe was not produced' }
+          & $exe.FullName --check
+          if ($LASTEXITCODE -ne 0) { throw 'the packaged build is missing a native library' }
           & $exe.FullName --list-ports
 
       # A .dmg is what a macOS user expects to download: it mounts as a disk

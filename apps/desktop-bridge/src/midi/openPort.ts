@@ -5,6 +5,7 @@ import {
   openMatchingPort,
   openVirtualInput,
   openVirtualPort as openVirtualOutput,
+  rtMidiLoadError,
 } from './coreMidiBackend.js';
 import {
   NullSink,
@@ -87,10 +88,17 @@ export async function openBidirectionalPort(options: PortOptions): Promise<PortR
 
   const sink = await openVirtualOutput(options.name);
   if (sink === null) {
+    // The addon failing to load and the host having no MIDI system produce the
+    // same missing port, and pointing at the wrong one costs a long detour:
+    // a packaged build whose addon could not be found once reported itself as
+    // a machine with no ALSA sequencer.
+    const loadError = rtMidiLoadError();
     notes.push(
-      process.platform === 'darwin'
-        ? `Could not create a CoreMIDI port named "${options.name}". Is one already open?`
-        : 'Could not create an ALSA port. This host may have no MIDI sequencer (/dev/snd/seq).',
+      loadError !== ''
+        ? `The MIDI library did not load: ${loadError}`
+        : process.platform === 'darwin'
+          ? `Could not create a CoreMIDI port named "${options.name}". Is one already open?`
+          : 'Could not create an ALSA port. This host may have no MIDI sequencer (/dev/snd/seq).',
     );
     return { port: nullPort(options.name), ok: false, notes };
   }

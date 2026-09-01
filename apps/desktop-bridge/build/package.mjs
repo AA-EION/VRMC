@@ -25,7 +25,7 @@ import { exec as execCb } from 'node:child_process';
 import { promisify } from 'node:util';
 import { cp, mkdir, readFile, rm, writeFile, chmod, readdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { dirname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 const exec = promisify(execCb);
@@ -103,17 +103,81 @@ async function copyMidiPrebuild(target, destDir) {
     return false;
   }
 
-  const to = join(destDir, 'prebuilds', match);
-  await mkdir(dirname(to), { recursive: true });
-  await cp(join(prebuilds, match), to, { recursive: true });
-  // The loader reads these alongside the prebuild directory.
-  for (const file of ['package.json', 'binding-options.js', 'index.js', 'dist']) {
-    const from = join(dir, file);
-    if (existsSync(from)) {
-      await cp(from, join(destDir, 'node_modules/@julusian/midi', file), { recursive: true });
-    }
+  const pkgDest = join(destDir, 'node_modules/@julusian/midi');
+  await mkdir(dirname(pkgDest), { recursive: true });
+
+  /*
+   * The whole package, minus the prebuilds for other platforms.
+   *
+   * Copied wholesale rather than file by file. A hand-written list of the
+   * package's internals is a list that rots: one written against an earlier
+   * version omitted `load-native.js`, and the result was a build that staged
+   * the addon, looked complete, and failed at the first require — reporting
+   * itself as a machine with no MIDI system.
+   *
+   * The exclusion is worth keeping, though: the other platforms' binaries are
+   * the bulk of the package and none of them can run here.
+   */
+  const prebuildRoot = join(dir, 'prebuilds');
+  await cp(dir, pkgDest, {
+    recursive: true,
+    filter: (src) => src !== prebuildRoot && !src.startsWith(prebuildRoot + sep),
+  });
+
+  // The one prebuild this target needs, in both places its loader may look:
+  // inside the package, and beside the executable.
+  for (const root of [join(pkgDest, 'prebuilds'), join(destDir, 'prebuilds')]) {
+    await mkdir(root, { recursive: true });
+    await cp(join(prebuilds, match), join(root, match), { recursive: true });
+  }
+
+  // Its own dependencies, which it requires the moment it is loaded.
+  const manifest = JSON.parse(await readFile(join(dir, 'package.json'), 'utf8'));
+  const seen = new Set(['@julusian/midi']);
+  for (const dependency of Object.keys(manifest.dependencies ?? {})) {
+    await stageDependencies(
+      dependency,
+      join(dir, 'package.json'),
+      join(destDir, 'node_modules'),
+      seen,
+    );
   }
   return true;
+}
+
+/**
+ * Copy a package and the runtime dependencies it needs to load.
+ *
+ * The addons are not self-contained: `@julusian/midi` requires `tslib` and
+ * `pkg-prebuilds` at load time, and `node-datachannel` requires `detect-libc`.
+ * Staging the addon without them produces a build that fails at the first
+ * `require` with a message naming a package nobody has heard of — which is
+ * exactly how a packaged bridge came to report itself as a machine with no
+ * MIDI system.
+ *
+ * Walks the dependency graph rather than listing them, because the list is
+ * theirs to change and a hand-maintained copy of it silently rots.
+ */
+async function stageDependencies(name, fromManifest, destModules, seen = new Set()) {
+  if (seen.has(name)) return;
+  seen.add(name);
+
+  const dir = await resolvePackageDir(name, fromManifest);
+  if (dir === null) {
+    console.warn(`  ! ${name} is not installed; the addon may fail to load`);
+    return;
+  }
+
+  const to = join(destModules, ...name.split('/'));
+  if (!existsSync(to)) {
+    await mkdir(dirname(to), { recursive: true });
+    await cp(dir, to, { recursive: true });
+  }
+
+  const manifest = JSON.parse(await readFile(join(dir, 'package.json'), 'utf8'));
+  for (const dependency of Object.keys(manifest.dependencies ?? {})) {
+    await stageDependencies(dependency, join(dir, 'package.json'), destModules, seen);
+  }
 }
 
 /**
@@ -160,11 +224,15 @@ async function copyDataChannel(target, destDir) {
   for (const file of ['package.json', 'dist']) {
     await cp(join(libDir, file), join(modules, 'node-datachannel', file), { recursive: true });
   }
+  // Only this platform's addon: the other eight are a hundred megabytes of
+  // binaries for machines that will never run this build.
   await cp(addonDir, join(modules, wanted), { recursive: true });
 
-  // Its loader reads this to tell glibc from musl, so it has to come along.
-  const libc = await resolvePackageDir('detect-libc', join(libDir, 'package.json'));
-  if (libc !== null) await cp(libc, join(modules, 'detect-libc'), { recursive: true });
+  const manifest = JSON.parse(await readFile(join(libDir, 'package.json'), 'utf8'));
+  const seen = new Set(['node-datachannel', wanted]);
+  for (const dependency of Object.keys(manifest.dependencies ?? {})) {
+    await stageDependencies(dependency, join(libDir, 'package.json'), modules, seen);
+  }
   return true;
 }
 
@@ -199,6 +267,24 @@ async function copyKoffi(target, destDir) {
   return true;
 }
 
+/**
+ * The packager's own entry point.
+ *
+ * Run through `process.execPath` rather than through a shell shim: the shim is
+ * `pkg.CMD` on Windows and `pkg` elsewhere, and going straight to the
+ * JavaScript sidesteps both that and whatever happens to be on PATH.
+ */
+async function pkgBinary() {
+  const dir = await resolvePackageDir('@yao-pkg/pkg');
+  if (dir === null) {
+    throw new Error('@yao-pkg/pkg is not installed; run pnpm install');
+  }
+  const manifest = JSON.parse(await readFile(join(dir, 'package.json'), 'utf8'));
+  const entry = typeof manifest.bin === 'string' ? manifest.bin : manifest.bin?.pkg;
+  if (entry === undefined) throw new Error('@yao-pkg/pkg declares no bin entry');
+  return join(dir, entry);
+}
+
 async function buildTarget(target) {
   const stage = join(outRoot, `vrmc-bridge-${VERSION}-${target.slug}`);
   await rm(stage, { recursive: true, force: true });
@@ -215,10 +301,21 @@ async function buildTarget(target) {
   console.log(`\n== ${target.slug} ==`);
   await exec(
     [
-      'npx --yes @yao-pkg/pkg',
+      // The pinned dependency, resolved directly, rather than `npx --yes`
+      // fetching whatever is newest. A different pkg brings a different
+      // pkg-fetch, which knows a different set of Node base binaries — and the
+      // first Windows release build spent ten minutes discovering that by
+      // trying to compile Node from source.
+      JSON.stringify(process.execPath),
+      JSON.stringify(await pkgBinary()),
       JSON.stringify(join(root, 'build/out/bridge.cjs')),
       `--targets ${target.pkg}`,
       `--output ${JSON.stringify(join(exeDir, exeName))}`,
+      // Fail rather than fall back to building Node from source. That fallback
+      // needs a full C++ toolchain, takes tens of minutes, and on a runner
+      // without one fails anyway — long after the real problem, which is a
+      // base binary that could not be downloaded.
+      '--no-native-build',
       '--public',
     ].join(' '),
     { cwd: root, maxBuffer: 32 * 1024 * 1024 },

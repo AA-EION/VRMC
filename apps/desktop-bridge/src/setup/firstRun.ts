@@ -83,7 +83,14 @@ export async function runFirstLaunch(): Promise<FirstRunResult> {
   }
 
   if (!autostartSupported()) {
-    return { first: true, registered: false, reason: 'not a packaged build' };
+    return {
+      first: true,
+      registered: false,
+      reason:
+        process.platform === 'darwin' || process.platform === 'win32'
+          ? 'not a packaged build, so there is nothing to register'
+          : 'this platform has no login item to register',
+    };
   }
   if (!inStableLocation()) {
     return {

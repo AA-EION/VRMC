@@ -2,6 +2,7 @@
 
 import { PacketKind, PacketWriter } from '@vrmc/protocol';
 import type { Router } from '../core/Router.js';
+import { requireNative, unwrapDefault } from '../native.js';
 import type { PacketSink } from './Broadcaster.js';
 
 /**
@@ -107,10 +108,7 @@ export class RtcTransport implements PacketSink {
   async load(): Promise<boolean> {
     if (this.rtc !== null) return true;
     try {
-      const mod = (await import('node-datachannel')) as unknown as RtcModule & {
-        default?: RtcModule;
-      };
-      this.rtc = mod.default ?? mod;
+      this.rtc = unwrapDefault(requireNative<RtcModule>('node-datachannel'));
       return true;
     } catch (err) {
       this.options.onLog(

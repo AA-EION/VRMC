@@ -1,5 +1,6 @@
 import { dataByteCount } from '@vrmc/protocol';
 import { SimpleVirtualPort, type MidiSink, type MidiSource, type VirtualPort } from './MidiSink.js';
+import { requireNative, unwrapDefault } from '../native.js';
 
 /**
  * Virtual MIDI on Windows.
@@ -87,8 +88,7 @@ interface TeVirtualMidiApi {
 async function bindTeVirtualMidi(): Promise<TeVirtualMidiApi | null> {
   let koffi: KoffiLike;
   try {
-    const mod = (await import('koffi')) as unknown as KoffiLike & { default?: KoffiLike };
-    koffi = mod.default ?? mod;
+    koffi = unwrapDefault(requireNative<KoffiLike>('koffi'));
   } catch {
     return null;
   }

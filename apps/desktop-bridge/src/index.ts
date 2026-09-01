@@ -3,6 +3,7 @@ import { networkInterfaces } from 'node:os';
 import { DeviceId, DeviceStatus, isPrivateAddress } from '@vrmc/protocol';
 import { ArgError, parseArgs, USAGE, type BridgeConfig } from './config.js';
 import { Router } from './core/Router.js';
+import { checkNativeModules, formatChecks } from './core/selfCheck.js';
 import { BRIDGE_VERSION, runSelfTest } from './core/selfTest.js';
 import { autostartState, toggleAutostart } from './setup/autostart.js';
 import { runFirstLaunch } from './setup/firstRun.js';
@@ -56,6 +57,27 @@ async function main(): Promise<void> {
   if (config === 'help') {
     process.stdout.write(USAGE);
     return;
+  }
+
+  /*
+   * Answer "does this build actually work" before anything else runs.
+   *
+   * Deliberately ahead of opening ports or touching the network: the question
+   * is about the build itself, and a check that needed a working bridge to run
+   * would be no use on the build where it matters.
+   */
+  if (config.check) {
+    const checks = checkNativeModules();
+    const { lines, ok } = formatChecks(checks);
+    process.stdout.write(`vrmc-bridge ${BRIDGE_VERSION} (${process.platform}-${process.arch})\n`);
+    process.stdout.write(`${lines.join('\n')}\n`);
+    if (!ok) {
+      process.stdout.write(
+        '\nThis build is missing a native library and cannot work.\n' +
+          'Re-download it, or report this with the lines above.\n',
+      );
+    }
+    process.exit(ok ? 0 : 1);
   }
 
   if (config.listPorts) {
