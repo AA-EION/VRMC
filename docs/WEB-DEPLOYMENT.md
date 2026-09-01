@@ -139,6 +139,19 @@ Remember that the proxy must serve HTTPS. WebXR requires a secure context: over
 plain `http://` the page loads and then refuses to start a session, with
 `navigator.xr` simply absent.
 
+### Serve it at a root, not a subpath
+
+The build emits absolute asset paths (`/assets/...`), so the client expects to
+live at the root of whatever hostname serves it — `studio.example.com/`, or
+`example.com/` — rather than under `example.com/studio/`. A subpath mount will
+serve the document and then 404 every asset.
+
+This is deliberate rather than an oversight: making it relocatable means baking
+the base path in at build time (Vite's `base` option), which would turn one
+image into one-image-per-mount-point. A subdomain costs a DNS record and keeps
+the image generic. If you genuinely need a subpath, rebuild with
+`vite build --base=/studio/` and adjust the nginx `location` to match.
+
 ## Static hosting checklist
 
 - Serve over HTTPS with HTTP/2 or HTTP/3. The bundle is ~305 KB gzipped, split
