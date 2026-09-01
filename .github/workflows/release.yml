@@ -51,14 +51,14 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           set -euo pipefail
-          APP=$(find apps/desktop-bridge/build/dist -type f -name 'vrmc-bridge' | head -1)
+          APP=$(find apps/desktop-bridge/build/dist -type f -name 'vrmc-bridge' | sed -n 1p)
           chmod +x "$APP"
           "$APP" --list-ports
       - name: Smoke test (Linux)
         if: runner.os == 'Linux'
         run: |
           set -euo pipefail
-          BIN=$(find apps/desktop-bridge/build/dist -type f -name 'vrmc-bridge' | head -1)
+          BIN=$(find apps/desktop-bridge/build/dist -type f -name 'vrmc-bridge' | sed -n 1p)
           chmod +x "$BIN"
           "$BIN" --help
       - name: Smoke test (Windows)
@@ -78,7 +78,7 @@ jobs:
         if: runner.os == 'macOS'
         run: |
           set -euo pipefail
-          STAGE=$(find apps/desktop-bridge/build/dist -maxdepth 1 -mindepth 1 -type d | head -1)
+          STAGE=$(find apps/desktop-bridge/build/dist -maxdepth 1 -mindepth 1 -type d | sed -n 1p)
           test -d "$STAGE/VRMC Bridge.app" || { echo "no .app in $STAGE"; exit 1; }
           # A symlink to /Applications makes the drag-to-install gesture obvious.
           ln -s /Applications "$STAGE/Applications"
@@ -109,7 +109,7 @@ jobs:
         run: |
           set -euo pipefail
           mkdir -p release
-          STAGE=$(find apps/desktop-bridge/build/dist -maxdepth 1 -mindepth 1 -type d | head -1)
+          STAGE=$(find apps/desktop-bridge/build/dist -maxdepth 1 -mindepth 1 -type d | sed -n 1p)
           tar -czf "release/vrmc-bridge-${{ matrix.target }}.tar.gz" -C "$STAGE" .
 
       - uses: actions/upload-artifact@v4
