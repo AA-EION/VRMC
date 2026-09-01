@@ -17,10 +17,15 @@ unity/UserSettings/
 *.csproj
 *.sln
 render-smoke.png
+# Screenshot the render test takes of the in-session pairing panel.
+connect-panel.png
 
 # Bridge packaging output. The scripts under build/ are source and are tracked,
 # so this is scoped to the two output directories rather than the whole folder.
 apps/desktop-bridge/build/out/
 apps/desktop-bridge/build/dist/
+apps/desktop-bridge/build/installer/out/
+# Compiled tray helpers. Their sources under native/ are tracked.
+apps/desktop-bridge/native/build/
 dashboard.png
 connect.png

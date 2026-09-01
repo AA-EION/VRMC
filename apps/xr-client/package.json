@@ -9,7 +9,7 @@
     "preview": "vite preview --host",
     "typecheck": "tsc -b --pretty",
     "clean": "rm -rf dist .turbo node_modules/.vite tsconfig.tsbuildinfo",
-    "test": "node test/render-smoke.mjs"
+    "test": "vitest run && node test/render-smoke.mjs"
   },
   "dependencies": {
     "@react-three/fiber": "^9.7.0",

@@ -9,6 +9,7 @@ import type { LinkStatus } from './net/BridgeLink.js';
 import { detectSupport, isBlending, startSession, type XrSupport } from './xr/session.js';
 import { PairingError, resolvePairingCode } from './net/pairing.js';
 import { rtcTransport, webSocketTransport } from './net/Transport.js';
+import { KeypadController } from './ui/KeypadController.js';
 
 /**
  * Remember the pairing code between visits.
@@ -69,6 +70,10 @@ export function App(): React.ReactElement {
   const [pairingNote, setPairingNote] = useState('');
   /** Name of the paired computer, once one is known. */
   const [pairedLabel, setPairedLabel] = useState('');
+  /** What the in-session keypad is showing. */
+  const [typedCode, setTypedCode] = useState('');
+  /** Shows the pairing panel outside a session. See Engine.showKeypad. */
+  const [forceKeypad, setForceKeypad] = useState(false);
   const [status, setStatus] = useState<LinkStatus>(() => engine.link.status());
   const [sessionActive, setSessionActive] = useState(false);
   const [passthrough, setPassthrough] = useState(false);
@@ -229,6 +234,64 @@ export function App(): React.ReactElement {
     [engine],
   );
 
+  /*
+   * The keypad the user types a code on with their hands.
+   *
+   * Built once and kept, rather than created when it is first needed: the
+   * moment it is needed is the moment a link dropped mid-session, and
+   * allocating a detector and a highlighter then would spend frame budget
+   * exactly when the user is least willing to forgive a hitch.
+   *
+   * It is wired to `handlePair`, so typing six characters in the headset does
+   * precisely what typing them on the page does — one path, not two.
+   */
+  // handlePair is rebuilt whenever its dependencies change; the keypad is not,
+  // so it calls through a ref rather than capturing a stale copy.
+  const handlePairRef = useRef(handlePair);
+  useEffect(() => {
+    handlePairRef.current = handlePair;
+  }, [handlePair]);
+
+  const keypad = useMemo(
+    () =>
+      new KeypadController({
+        onCode: setTypedCode,
+        onSubmit: (code) => void handlePairRef.current(code),
+        // The same click the instruments use. A key that makes no sound feels
+        // like one that did not register, and there is nothing else to confirm
+        // a press by touch.
+        onKey: () => engine.synth.strike(84, 40),
+      }),
+    [engine],
+  );
+
+  useEffect(() => {
+    engine.keypad = keypad;
+  }, [engine, keypad]);
+
+  /*
+   * Show the keypad only when it is the thing standing in the way.
+   *
+   * In a session, not connected, and not already busy connecting. Outside a
+   * session the overlay's own entry box is right there; when connected, a
+   * panel floating in front of the instruments would just be in the way.
+   */
+  const keypadVisible = (sessionActive || forceKeypad) && status.state !== 'open';
+  useEffect(() => {
+    engine.showKeypad = setForceKeypad;
+    return () => {
+      engine.showKeypad = null;
+    };
+  }, [engine]);
+
+  useEffect(() => {
+    engine.keypadVisible = keypadVisible;
+    keypad.setBusy(pairingBusy);
+    // A code left half-typed from a previous attempt should not be waiting
+    // there the next time the panel appears.
+    if (!keypadVisible) keypad.clear();
+  }, [engine, keypad, keypadVisible, pairingBusy]);
+
   // A headset going to sleep, or the user switching apps, leaves notes ringing
   // on the desktop. Release on the way out.
   useEffect(() => {
@@ -268,7 +331,20 @@ export function App(): React.ReactElement {
           camera.updateProjectionMatrix();
         }}
       >
-        <Scene engine={engine} devices={devices} />
+        <Scene
+          engine={engine}
+          devices={devices}
+          keypad={
+            keypadVisible
+              ? {
+                  controller: keypad,
+                  code: typedCode,
+                  message: error !== '' ? error : pairingNote,
+                  busy: pairingBusy,
+                }
+              : null
+          }
+        />
       </Canvas>
       </div>
 

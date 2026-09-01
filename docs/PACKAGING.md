@@ -6,29 +6,73 @@ package` produces a folder per platform under
 
 | Target | Output |
 |---|---|
-| `macos-arm64`, `macos-x64` | `VRMC Bridge.app` |
-| `windows-x64` | `vrmc-bridge.exe` |
+| `macos-arm64`, `macos-x64` | `VRMC Bridge.app`, shipped in a `.dmg` |
+| `windows-x64` | `vrmc-bridge.exe`, shipped in `VRMC-Setup.msi` |
 | `linux-x64` | `vrmc-bridge` |
 
-Build one target with `node build/package.mjs windows-x64`.
+Build one target with `node build/package.mjs windows-x64`. The tray helper is
+built separately, and first: `pnpm tray`.
 
 ## The one thing that makes this awkward
 
-The bridge depends on two compiled native addons — `@julusian/midi` for
-CoreMIDI and ALSA, and `koffi` for the Windows teVirtualMIDI FFI. Neither can
-be embedded in a JavaScript bundle: they are `.node` binaries the OS loads
-directly. So a "single executable" is really an executable plus a `prebuilds/`
-folder beside it, and the two must ship together.
+The bridge depends on three compiled native addons — `@julusian/midi` for
+CoreMIDI and ALSA, `koffi` for the Windows teVirtualMIDI FFI, and
+`node-datachannel` for WebRTC. None can be embedded in a JavaScript bundle:
+they are `.node` binaries the OS loads directly. So a "single executable" is
+really an executable plus some files beside it, and they must ship together.
 
-What makes this tractable is that both packages ship prebuilds for **every**
-platform in a single `pnpm install`. A Linux machine already has the macOS and
-Windows `.node` files on disk, so it can assemble all four targets. That is
-cross-*packaging*: nothing is compiled, only selected and copied. The packager
-warns rather than proceeding quietly if a target's prebuild is missing, since
-the resulting binary would start up and then fail to open any MIDI port.
+The MIDI and FFI addons ship prebuilds for **every** platform in a single
+`pnpm install`, so one machine can assemble those for all four targets. That is
+cross-*packaging*: nothing is compiled, only selected and copied.
+
+Two things break that convenience, and both are why the release matrix has one
+runner per OS:
+
+- **`node-datachannel`'s addons are separate optional packages**, and a package
+  manager installs only the one matching the machine it runs on. A Linux box
+  simply does not have the macOS binary to copy.
+- **The tray helper has to be compiled**, not selected. It is native GUI code
+  against AppKit and the Win32 shell.
+
+The packager warns rather than proceeding quietly when any of these is missing,
+because each failure is invisible until it matters: no MIDI addon means a
+bridge that opens no ports, no WebRTC addon means a headset that can never
+pair, and no tray helper means no way to read the pairing code.
 
 The `pkg` step downloads a prebuilt Node binary per target on first run, so the
 first build is slow and needs network access.
+
+## Installers
+
+Neither platform asks the user to think about where the bridge lives.
+
+**macOS** ships a `.dmg` containing `VRMC Bridge.app` and a symlink to
+`/Applications`, so the install is the drag everyone already knows. The bundle
+is marked `LSUIElement`: a menu bar item, no Dock tile, no application menu,
+and no window that could take focus from the DAW. (`LSBackgroundOnly` would
+also hide the Dock tile, but it forbids *any* interface — the status item
+simply never appears.) Opening it the first time from Applications registers a
+LaunchAgent so it comes back after a reboot; the menu shows that as a ticked
+"Start at login" you can turn off. `setup/firstRun.ts` skips registration when
+the app is still running from the disk image or a Downloads folder, because a
+login item recording a path that is about to change is worse than none.
+
+**Windows** ships an MSI built by `build/installer/`. It installs to Program
+Files, adds a Start menu shortcut, writes a per-user `Run` entry, and launches
+the bridge when it finishes.
+
+It is deliberately **not a Windows service**. A service runs in session 0,
+which has no desktop: it could not own a notification-area icon, so the user
+would have no way to read the pairing code or see whether anything was working,
+and it could not reach the per-user MIDI session the DAW lives in. A per-user
+login entry needs no elevation and puts the bridge in the same session as the
+DAW.
+
+The MSI's file list is harvested from the staged build rather than written by
+hand — the addons bring a nested directory tree, and a hand-maintained list is
+one that eventually ships without the MIDI binding in it. That harvesting is
+unit-tested (`test/installer.test.ts`) even though WiX itself only runs on the
+Windows runner.
 
 ## Signing
 
@@ -61,12 +105,20 @@ Tagging `v*` attaches zips to a GitHub release.
 produces a 205 KB CommonJS file that runs standalone on Node with the native
 addons resolved externally — `node build/out/bridge.cjs --help` works.
 
+**Verified:** the addon staging. The tree `copyDataChannel` and
+`copyMidiPrebuild` assemble was checked by loading `node-datachannel` from a
+staged copy and opening a peer connection with it, so the files a packaged
+build resolves at runtime are known to be sufficient.
+
+**Verified:** the MSI's file manifest, the tray protocol and the tray helper's
+JSON reader — the last compiled and run on every platform, not just Windows.
+
 **Not verified:** the `pkg` step and everything after it. `pkg` downloads a
 prebuilt Node binary per target from GitHub releases on first run, and the
-sandboxed environment this was developed in returns 403 for that host, so no
-executable has ever been produced here. The script, the target list and the
-`.app` assembly are written against `pkg`'s documented behaviour and have not
-been run end to end.
+sandboxed environment this was developed in cannot reach that host, so no
+executable has ever been produced here. The script, the target list, the `.app`
+assembly, the WiX build and both native helpers are written against documented
+behaviour and have not been run end to end.
 
 That is what the release workflow is for: it builds each target on its own
 runner, where the download works, and smoke tests the artifact on the OS it
@@ -77,6 +129,7 @@ No one has yet opened `VRMC Bridge.app` on a Mac and watched a MIDI port
 appear. Until that happens, treat the packaging as plausible rather than proven
 — see [Architecture](ARCHITECTURE.md#what-is-not-yet-verified).
 
-The `.app` bundle is deliberately minimal: `Info.plist` plus the executable,
-marked `LSBackgroundOnly` because the bridge has no window. It is not a GUI
-app, and a bouncing Dock icon for a background process would be noise.
+Neither the Swift nor the C helper has been compiled: this environment has no
+Swift toolchain and no MSVC. Their shared protocol and the C parser are tested
+here; the AppKit and Win32 code is not, and the release workflow's per-OS
+matrix is where it first runs.

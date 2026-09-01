@@ -511,6 +511,132 @@ check('touched pad flashes brighter than its resting colour',
   lit.ok && lit.touched[0] > 0.5,
   lit.ok ? `pad 44 rgb=${JSON.stringify(lit.touched)}` : '');
 
+/*
+ * The in-session pairing keypad.
+ *
+ * It only appears inside an XR session, which there is no way to enter here, so
+ * the engine's dev seam forces it on. Everything after that is real: the panel
+ * is built by the same component, laid out by the same transform, and poked
+ * through the same detector as an instrument.
+ */
+const keypad = await page.evaluate(async () => {
+  const h = window.__vrmc;
+  if (!h?.engine.showKeypad) return { ok: false, reason: 'no keypad seam' };
+  h.engine.showKeypad(true);
+  await new Promise((r) => setTimeout(r, 200));
+
+  const controller = h.engine.keypad;
+  if (!controller) return { ok: false, reason: 'no keypad controller' };
+
+  const layout = controller.layout;
+  const t = (() => {
+    let mesh = null;
+    h.scene.traverse((o) => {
+      if (o.isInstancedMesh && o.count === layout.zones.length) mesh = o;
+    });
+    return mesh;
+  })();
+  if (!t) return { ok: false, reason: 'keypad mesh not in the scene' };
+
+  // Poke K, 7, M, 2, Q, X — a real code, one key at a time, through the
+  // detector. Six presses should submit without any button being pressed.
+  const alphabet = layout.zones.map((z) => z.label).join('');
+  const wanted = 'K7M2QX';
+  const frame = h.engine.fingers;
+  const RIGHT_INDEX = 6;
+  const RADIUS = 0.008;
+  let clock = performance.now();
+
+  const pose = h.engine.keypadTransform ?? null;
+  void pose;
+
+  // Surface-local -> world for a tilt-only orientation, as elsewhere.
+  const zoneAt = (i) => layout.zones[i];
+  const origin = t.parent.position;
+  const q = t.parent.quaternion;
+  const th = 2 * Math.atan2(q.x, q.w);
+  const cos = Math.cos(th);
+  const sin = Math.sin(th);
+  const toWorld = (lx, ly, lz) => [
+    origin.x + lx,
+    origin.y + ly * cos - lz * sin,
+    origin.z + ly * sin + lz * cos,
+  ];
+
+  for (const character of wanted) {
+    const index = alphabet.indexOf(character);
+    const zone = zoneAt(index);
+    const lx = zone.rect.x + zone.rect.width / 2;
+    const ly = zone.rect.y + zone.rect.height / 2;
+
+    // Down through the key, then back out — the detector needs the release
+    // before it will accept the next press on a different key.
+    for (let i = 0; i <= 5; i++) {
+      const depth = 0.035 - (0.045 * i) / 5;
+      const [wx, wy, wz] = toWorld(lx, ly, zone.raise + RADIUS + depth);
+      clock += 1000 / 90;
+      frame.beginFrame(clock, 1 / 90);
+      frame.setFinger(RIGHT_INDEX, wx, wy, wz, RADIUS);
+      controller.update(frame, 1 / 90);
+    }
+    for (let i = 0; i < 3; i++) {
+      const [wx, wy, wz] = toWorld(lx, ly, zone.raise + RADIUS + 0.03);
+      clock += 1000 / 90;
+      frame.beginFrame(clock, 1 / 90);
+      frame.setFinger(RIGHT_INDEX, wx, wy, wz, RADIUS);
+      controller.update(frame, 1 / 90);
+    }
+  }
+
+  let instanced = 0;
+  h.scene.traverse((o) => {
+    if (o.isInstancedMesh) instanced++;
+  });
+
+  return {
+    ok: true,
+    keys: layout.zones.length,
+    typed: controller.value,
+    instanced,
+  };
+});
+
+check('pairing keypad renders in the scene', keypad.ok,
+  keypad.ok ? `${keypad.keys} keys` : keypad.reason);
+if (keypad.ok) {
+  // 24 characters in the pairing alphabet, plus backspace.
+  check('keypad offers every code character plus backspace', keypad.keys === 25,
+    `${keypad.keys} keys`);
+  check('poking keys types the code', keypad.typed === 'K7M2QX',
+    `typed "${keypad.typed}"`);
+}
+
+// Captured with the panel up, since the shot at the end is taken without it.
+// This is the only look anyone gets at the panel without a headset.
+await page.screenshot({ path: process.env.VRMC_PANEL_SHOT ?? 'connect-panel.png' });
+
+// The panel must go away once it is not needed, or it floats in front of the
+// instruments for the rest of the session.
+const hidden = await page.evaluate(async () => {
+  const h = window.__vrmc;
+  if (!h?.engine.showKeypad) return { instanced: -1, cleared: null };
+  h.engine.showKeypad(false);
+  await new Promise((r) => setTimeout(r, 200));
+  // Counted rather than matched on instance count: the 25-key keyboard has
+  // exactly as many instances as the keypad, so looking for "a mesh with 25"
+  // finds the keyboard and reports the panel as still on screen.
+  let instanced = 0;
+  h.scene.traverse((o) => {
+    if (o.isInstancedMesh) instanced++;
+  });
+  return { instanced, cleared: h.engine.keypad?.value ?? null };
+});
+check('keypad leaves the scene when dismissed',
+  keypad.ok && hidden.instanced === keypad.instanced - 1,
+  `${keypad.instanced} instanced meshes with the panel, ${hidden.instanced} without`);
+check('a half-typed code is not left waiting', hidden.cleared === '',
+  `left "${hidden.cleared}"`);
+
 await page.screenshot({ path: process.env.VRMC_SHOT ?? 'render-smoke.png' });
 
 await browser.close();

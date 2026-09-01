@@ -30,8 +30,16 @@ export interface PokeOptions {
   releaseMargin: number;
 
   /**
-   * Minimum time between two strikes on the same zone by the same finger, in
-   * ms. Guards against a bounce at the moment of crossing.
+   * Minimum time between two strikes by the same finger, in ms. Guards against
+   * a bounce at the moment of crossing.
+   *
+   * Per finger, not per zone: a fingertip that bounces on the way through
+   * often lands somewhere slightly different on the second crossing, so
+   * scoping this to one zone would let the bounce through whenever it drifted.
+   * The cost is that one finger cannot deliberately strike two zones closer
+   * together than this, which is why it defaults low enough not to matter for
+   * playing — a drum roll alternating two pads with a single finger is around
+   * 100 ms per hit at its fastest.
    */
   refractoryMs: number;
 

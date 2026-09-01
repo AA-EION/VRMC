@@ -6,6 +6,8 @@ import { InstrumentSurface } from './devices/InstrumentSurface.js';
 import { LaunchpadSurface } from './devices/LaunchpadSurface.js';
 import type { LaunchpadInstance } from './devices/LaunchpadInstance.js';
 import type { Engine } from './Engine.js';
+import { ConnectPanel } from './ui/ConnectPanel.js';
+import type { KeypadController } from './ui/KeypadController.js';
 
 /**
  * Debug handle, published on `window`.
@@ -39,6 +41,21 @@ export interface SceneProps {
    * cannot observe.
    */
   devices: readonly LaunchpadInstance[];
+  /**
+   * The in-session pairing keypad, or null when it should not be shown.
+   *
+   * Shown only while disconnected inside a session. A panel floating in front
+   * of an instrument that is already working would be in the way.
+   */
+  keypad?: KeypadView | null;
+}
+
+/** What the scene needs in order to draw the keypad. */
+export interface KeypadView {
+  controller: KeypadController;
+  code: string;
+  message: string;
+  busy: boolean;
 }
 
 /**
@@ -48,7 +65,7 @@ export interface SceneProps {
  * third argument. That is the only place hand joint poses can be read from —
  * they are valid for that frame and no other.
  */
-export function Scene({ engine, devices }: SceneProps): React.ReactElement {
+export function Scene({ engine, devices, keypad = null }: SceneProps): React.ReactElement {
   const gl = useThree((state) => state.gl);
   const scene = useThree((state) => state.scene);
   const camera = useThree((state) => state.camera);
@@ -98,6 +115,16 @@ export function Scene({ engine, devices }: SceneProps): React.ReactElement {
           quaternion={device.transform.quaternion}
         />
       ))}
+
+      {keypad !== null && (
+        <ConnectPanel
+          layout={keypad.controller.layout}
+          highlighter={keypad.controller.highlighter}
+          code={keypad.code}
+          message={keypad.message}
+          busy={keypad.busy}
+        />
+      )}
 
       <Knobs engine={engine} />
     </>

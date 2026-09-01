@@ -39,14 +39,21 @@ pnpm build
 
 **On the computer running your DAW:**
 
+Download the release for your platform — a `.dmg` on macOS, an MSI on Windows.
+Drag the app to Applications and open it, or run the installer. It has no
+window: look for the VRMC icon in the menu bar or notification area, which
+shows the pairing code and whether anything is connected. It starts at login
+from then on, which you can turn off from the same menu.
+
+To run it from a checkout instead:
+
 ```bash
 pnpm bridge
 ```
 
-It prints the addresses it is listening on. On macOS and Linux a virtual MIDI
-port named `VRMC` appears immediately — open your DAW's MIDI preferences and
-enable it as an input. On Windows there is a setup step first; see
-[docs/VIRTUAL-MIDI.md](docs/VIRTUAL-MIDI.md).
+On macOS and Linux a virtual MIDI port named `VRMC` appears immediately — open
+your DAW's MIDI preferences and enable it as an input. On Windows there is a
+setup step first; see [docs/VIRTUAL-MIDI.md](docs/VIRTUAL-MIDI.md).
 
 **On the headset:**
 
@@ -55,6 +62,10 @@ desktop app is showing. That is the whole setup. There is no address to enter,
 no certificate to accept and nothing to configure — the headset and the computer
 negotiate a direct connection between themselves, and the code is remembered so
 it is never needed again on that headset.
+
+If you are already in an immersive session when the link drops, the same code
+can be typed on a keypad that appears in front of you, so you never have to
+take the headset off.
 
 For local development instead, `pnpm xr` serves the client over HTTPS on your
 machine; see [Pairing](docs/PAIRING.md) for how the hosted path works.
@@ -151,8 +162,8 @@ it and is downloaded separately. See
   on someone's LAN with no DNS records and no certificates.
 - [Wire protocol](docs/PROTOCOL.md) — the packet format, for writing another
   client.
-- [Packaging](docs/PACKAGING.md) — building the `.app` and `.exe`, and why the
-  native addons make it more than one step.
+- [Packaging](docs/PACKAGING.md) — building the `.dmg` and the MSI, the tray
+  helpers, and why the native addons make it more than one step.
 
 ## Status
 

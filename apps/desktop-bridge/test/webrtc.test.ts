@@ -295,8 +295,13 @@ describe('connecting with nothing but a pairing code', () => {
     // A headset that loses power sends no Note Off. If the bridge did not
     // release on disconnect, that voice would sound until the DAW restarted.
     headset.close();
+    // Generous, because this waits on libdatachannel noticing a closed channel
+    // on its own threads. On a CI runner busy compiling the rest of the
+    // workspace that has taken longer than five seconds — a scheduling
+    // artefact, not a slow release, so the cure is patience rather than a
+    // weaker assertion.
     await vi.waitFor(() => expect(ports.sent(out)).toContainEqual([0x90, 12, 0]), {
-      timeout: 5000,
+      timeout: 20_000,
     });
   }, 40_000);
 

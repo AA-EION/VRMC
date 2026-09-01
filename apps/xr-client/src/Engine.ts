@@ -24,6 +24,7 @@ import {
   type SurfaceTheme,
 } from './devices/InstrumentSurface.js';
 import { HandTracker } from './xr/handTracking.js';
+import { KeypadController } from './ui/KeypadController.js';
 
 /** Everything needed to render and drive one instrument. */
 export interface Instrument {
@@ -80,11 +81,34 @@ export class Engine {
   /** Fires when a device is added or removed, so React can re-render the list. */
   onDevicesChanged: (() => void) | null = null;
 
+  /**
+   * The in-session pairing keypad.
+   *
+   * Always constructed, only rendered and updated while disconnected. Building
+   * it lazily would mean allocating a detector and a highlighter at the moment
+   * the link drops — which is precisely when the frame budget is least worth
+   * spending on setup.
+   */
+  keypad: KeypadController | null = null;
+
+  /**
+   * Force the pairing panel on screen outside an XR session.
+   *
+   * The panel only appears in a session, which makes it the one part of the
+   * interface you cannot look at while working on a desktop. This is the switch
+   * to flip when developing it, and the seam the render test reaches through to
+   * prove it actually draws. Set by the app; null before it mounts.
+   */
+  showKeypad: ((visible: boolean) => void) | null = null;
+
   /** Next id to hand out. Ids are never reused within a session. */
   private nextDeviceId = FIRST_DYNAMIC_DEVICE_ID;
 
   /** Set from the session; used to release notes on teardown. */
   private running = false;
+
+  /** Whether the pairing keypad is currently shown and taking input. */
+  keypadVisible = false;
 
   constructor() {
     this.link = new BridgeLink();
@@ -228,6 +252,9 @@ export class Engine {
         device.detector.update(this.fingers, device);
       }
       this.knobs.update(this.fingers, this.knobSink);
+      // Only while it is on screen. A detector running against a panel nobody
+      // can see would still consume every fingertip and could still fire.
+      if (this.keypadVisible) this.keypad?.update(this.fingers, dt);
     }
 
     this.link.endFrame();
