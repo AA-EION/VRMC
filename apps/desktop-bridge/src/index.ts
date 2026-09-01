@@ -1,8 +1,9 @@
 #!/usr/bin/env node
 import { networkInterfaces } from 'node:os';
-import { DeviceId } from '@vrmc/protocol';
+import { DeviceId, DeviceStatus } from '@vrmc/protocol';
 import { ArgError, parseArgs, USAGE, type BridgeConfig } from './config.js';
 import { Router } from './core/Router.js';
+import { BRIDGE_VERSION, runSelfTest } from './core/selfTest.js';
 import { DEFAULT_PORT_NAME_TEMPLATE, DeviceManager } from './devices/DeviceManager.js';
 import { listPorts } from './midi/openPort.js';
 import { UdpServer } from './net/UdpServer.js';
@@ -89,6 +90,7 @@ async function main(): Promise<void> {
     onHello: (name) => log(`client identified as "${name}"`),
     onBye: () => log('client said goodbye'),
     onRosterChange: () => ws?.sendRoster(devices.roster()),
+    onPong: () => ws?.notePong(),
     // Rate-limited by the caller below; a flood of malformed packets should not
     // itself become the thing that stalls the process.
     onMalformed: throttle((reason) => log(`dropped malformed packet: ${reason}`), 1000),
@@ -103,7 +105,32 @@ async function main(): Promise<void> {
         onLog: log,
       })
     : null;
-  if (ws !== null) ws.deviceCount = () => devices.count;
+  if (ws !== null) {
+    ws.deviceCount = () => devices.count;
+
+    ws.statusProvider = () => ({
+      version: BRIDGE_VERSION,
+      addresses: reachableAddresses(config.host),
+      wsPort: config.wsPort,
+      udpPort: config.udpPort,
+      secure: ws?.secure ?? false,
+      clients: ws?.clientCount ?? 0,
+      devices: devices.roster(),
+      lastPacketAgoMs:
+        router.stats.lastPacketAt === 0 ? null : Date.now() - router.stats.lastPacketAt,
+      packetsIn: router.stats.packets,
+      packetsOut: router.stats.packetsOut,
+      eventsIn: router.stats.events,
+      ledsOut: router.stats.ledsOut,
+      jitterMs: router.stats.jitterMs,
+      peakJitterMs: router.stats.peakJitterMs,
+      lossRatio: router.stats.lossRatio,
+      malformed: router.stats.malformed,
+      midiAvailable: devices.roster().some((d) => d.status === DeviceStatus.READY),
+    });
+
+    ws.selfTest = (what) => runSelfTest(what, ws, devices);
+  }
 
   const udp = config.enableUdp
     ? new UdpServer(router, { port: config.udpPort, host: config.host, onLog: log })

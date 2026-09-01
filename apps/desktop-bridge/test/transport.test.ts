@@ -139,14 +139,16 @@ describe('WebSocket transport', () => {
     expect(sink.log).toContainEqual([MidiStatus.NOTE_OFF, 60, 0]);
   });
 
-  it('serves a status document over plain HTTP for reachability checks', async () => {
+  it('serves a reachability probe over plain HTTP', async () => {
     const router = new Router(await managerWith(new NullSink('Port Name')));
     const port = takePort();
     const server = new WsServer(router, { port, host: '127.0.0.1', onLog: () => {} });
     await server.listen();
     cleanups.push(() => server.close());
 
-    const res = await fetch(`http://127.0.0.1:${port}/`);
+    // `/` is the dashboard now; `/healthz` is the probe, and unlike the
+    // dashboard it answers non-loopback callers so a headset can use it.
+    const res = await fetch(`http://127.0.0.1:${port}/healthz`);
     const body = (await res.json()) as { service: string; secure: boolean };
     expect(res.status).toBe(200);
     expect(body.service).toBe('vrmc-bridge');

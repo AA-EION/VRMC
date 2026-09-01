@@ -22,3 +22,4 @@ render-smoke.png
 # so this is scoped to the two output directories rather than the whole folder.
 apps/desktop-bridge/build/out/
 apps/desktop-bridge/build/dist/
+dashboard.png

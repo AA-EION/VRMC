@@ -23,6 +23,13 @@ import { LinkStats } from './Stats.js';
 export type PongResponder = (clientTime: number, serverTime: number) => void;
 
 export interface RouterEvents {
+  /**
+   * A client answered a PING the bridge sent.
+   *
+   * The bridge normally only *answers* pings; the audit reverses that to prove
+   * the return path works, so the reply needs somewhere to land.
+   */
+  onPong?: () => void;
   onPanic?: (releasedNotes: number) => void;
   onHello?: (clientName: string) => void;
   onBye?: () => void;
@@ -87,6 +94,10 @@ export class Router {
 
       case PacketKind.PING:
         pong?.(h.tClient, arrivalMs);
+        break;
+
+      case PacketKind.PONG:
+        this.events.onPong?.();
         break;
 
       case PacketKind.PANIC: {

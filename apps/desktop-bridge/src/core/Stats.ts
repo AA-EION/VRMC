@@ -29,6 +29,20 @@ export class LinkStats {
   /** Largest single |D| seen since the last reset, in ms. */
   peakJitterMs = 0;
 
+  /**
+   * Wall-clock time the last packet arrived, or 0 if none ever has.
+   *
+   * Deliberately `Date.now()` rather than the monotonic clock the jitter maths
+   * uses: this one is shown to a person as "3 seconds ago", and a monotonic
+   * reading has no meaning outside the process.
+   */
+  lastPacketAt = 0;
+
+  /** Packets the bridge has sent back to the headset (LED and roster pushes). */
+  packetsOut = 0;
+  /** LED changes pushed to the headset. */
+  ledsOut = 0;
+
   private lastSeq = -1;
   private lastArrival = 0;
   private lastSent = 0;
@@ -64,6 +78,13 @@ export class LinkStats {
     this.lastArrival = arrivalMs;
     this.lastSent = sentMs;
     this.primed = true;
+    this.lastPacketAt = Date.now();
+  }
+
+  /** Record traffic heading back to the headset. */
+  onOutbound(leds = 0): void {
+    this.packetsOut++;
+    this.ledsOut += leds;
   }
 
   onMalformed(): void {

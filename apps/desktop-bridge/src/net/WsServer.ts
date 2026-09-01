@@ -1,4 +1,9 @@
-import { createServer as createHttpServer, type Server as HttpServer } from 'node:http';
+import {
+  createServer as createHttpServer,
+  type IncomingMessage,
+  type Server as HttpServer,
+  type ServerResponse,
+} from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
 import { readFileSync } from 'node:fs';
 import { WebSocketServer, type WebSocket } from 'ws';
@@ -12,6 +17,7 @@ import {
   type DeviceStateEntry,
 } from '@vrmc/protocol';
 import type { Router } from '../core/Router.js';
+import { dashboardHtml, type DashboardStatus, type SelfTestResult } from './dashboard.js';
 
 export interface WsOptions {
   port: number;
@@ -86,20 +92,8 @@ export class WsServer {
         : createHttpServer();
     this.http = server as HttpServer;
 
-    // A plain GET is answered so the user can point a browser at the bridge to
-    // confirm it is reachable — and, over TLS, so they can accept a
-    // self-signed certificate before the WebSocket handshake needs it.
-    server.on('request', (_req, res) => {
-      res.writeHead(200, { 'content-type': 'application/json' });
-      res.end(
-        JSON.stringify({
-          service: 'vrmc-bridge',
-          transport: 'websocket',
-          secure: this.secure,
-          clients: this.clients,
-          devices: this.deviceCount(),
-        }),
-      );
+    server.on('request', (req, res) => {
+      void this.handleHttp(req, res);
     });
 
     const wss = new WebSocketServer({ server, perMessageDeflate: false });
@@ -154,6 +148,114 @@ export class WsServer {
 
   /** How many devices the bridge currently has open. Set by the owner. */
   deviceCount: () => number = () => 0;
+
+  /** Supplies everything the dashboard shows. Set by the owner at startup. */
+  statusProvider: (() => DashboardStatus) | null = null;
+
+  /** Runs one audit leg. Set by the owner. */
+  selfTest: ((what: string) => Promise<SelfTestResult>) | null = null;
+
+  /** Resolvers waiting for a client's PONG, for the audit's round-trip test. */
+  private readonly pongWaiters = new Set<() => void>();
+
+  /**
+   * Serve the dashboard, the status JSON and the self-tests.
+   *
+   * Everything except the reachability probe is restricted to loopback. The
+   * WebSocket has to accept LAN connections — that is the whole point — but the
+   * dashboard can trigger MIDI and reveal the machine's addresses, and nothing
+   * on the network besides the person at the keyboard has business doing that.
+   */
+  private async handleHttp(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    const url = new URL(req.url ?? '/', 'http://localhost');
+    const local = isLoopback(req.socket.remoteAddress ?? '');
+
+    // Answered for anyone, including over TLS, so a headset can confirm the
+    // bridge is reachable and accept a self-signed certificate before the
+    // WebSocket handshake needs it.
+    if (url.pathname === '/healthz') {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ service: 'vrmc-bridge', secure: this.secure }));
+      return;
+    }
+
+    if (!local) {
+      res.writeHead(403, { 'content-type': 'text/plain' });
+      res.end('The VRMC dashboard is only reachable from this computer.\n');
+      return;
+    }
+
+    if (url.pathname === '/' || url.pathname === '/index.html') {
+      res.writeHead(200, {
+        'content-type': 'text/html; charset=utf-8',
+        'cache-control': 'no-store',
+      });
+      res.end(dashboardHtml());
+      return;
+    }
+
+    if (url.pathname === '/api/status') {
+      const status = this.statusProvider?.() ?? null;
+      res.writeHead(status === null ? 503 : 200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(status ?? { error: 'status unavailable' }));
+      return;
+    }
+
+    if (url.pathname === '/api/selftest' && req.method === 'POST') {
+      const what = url.searchParams.get('what') ?? '';
+      const runner = this.selfTest;
+      const result: SelfTestResult =
+        runner === null
+          ? { ok: false, detail: 'self-tests are not wired up' }
+          : await runner(what).catch((err: unknown) => ({
+              ok: false,
+              detail: err instanceof Error ? err.message : String(err),
+            }));
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify(result));
+      return;
+    }
+
+    res.writeHead(404, { 'content-type': 'text/plain' });
+    res.end('not found\n');
+  }
+
+  /**
+   * Send a PING to every client and resolve when one answers.
+   *
+   * This is the audit's proof that the link works in both directions: the
+   * packet leaves the bridge, the headset receives it, and its reply comes
+   * back. A test that only counted inbound packets would pass while the return
+   * path — the one LEDs depend on — was broken.
+   */
+  pingClients(timeoutMs = 2000): Promise<number> {
+    return new Promise((resolve, reject) => {
+      if (this.clients === 0) {
+        reject(new Error('no headset connected'));
+        return;
+      }
+      const started = performance.now();
+      const onPong = (): void => {
+        clearTimeout(timer);
+        this.pongWaiters.delete(onPong);
+        resolve(performance.now() - started);
+      };
+      const timer = setTimeout(() => {
+        this.pongWaiters.delete(onPong);
+        reject(new Error(`no reply within ${timeoutMs} ms`));
+      }, timeoutMs);
+      this.pongWaiters.add(onPong);
+
+      const w = this.replyWriter;
+      w.begin(PacketKind.PING);
+      this.broadcast(w.finish(performance.now()));
+    });
+  }
+
+  /** Called when a client answers a PING the bridge sent. */
+  notePong(): void {
+    for (const waiter of [...this.pongWaiters]) waiter();
+  }
 
   /**
    * Queue an LED change for the headset.
@@ -212,6 +314,7 @@ export class WsServer {
           );
         }
         this.broadcast(w.finish(performance.now()));
+        this.router.stats.onOutbound(chunk.length);
       }
     }
   }
@@ -255,6 +358,19 @@ export class WsServer {
       this.http.close(() => resolve());
     });
   }
+}
+
+/**
+ * Whether a connection came from this machine.
+ *
+ * Node reports IPv4 loopback over a dual-stack socket as `::ffff:127.0.0.1`, so
+ * the mapped form has to be recognised too, or the dashboard would refuse the
+ * very browser it exists for.
+ */
+function isLoopback(address: string): boolean {
+  if (address === '::1' || address === '127.0.0.1') return true;
+  if (address.startsWith('::ffff:')) return isLoopback(address.slice(7));
+  return address.startsWith('127.');
 }
 
 /** Normalise the several shapes `ws` can hand a message handler. */
