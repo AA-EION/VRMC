@@ -213,8 +213,18 @@ evidence supports:
   this way is exactly the thing that cannot be tested without Ableton. Port
   naming is the most likely thing to need adjustment, which is why
   `--port-template` exists.
-- **The macOS and Windows binaries have never been run.** See
-  [Packaging](PACKAGING.md).
+- **The macOS and Windows binaries have never been run**, and neither has
+  either tray helper: this environment has no Swift toolchain and no MSVC, so
+  the AppKit and Win32 code has been compiled by nobody. Their shared protocol
+  and the C parser *are* tested here. See [Packaging](PACKAGING.md).
+- **Neither installer has been run.** The MSI's file manifest is unit-tested
+  and the WiX build happens on the Windows runner; whether the login entry
+  survives a reboot, and whether opening the `.app` from Applications registers
+  its LaunchAgent, are first observed by whoever installs it.
+- **The WebRTC path has not met a browser.** It is tested end to end between
+  two real peers — offer, answer, DTLS, data channel, MIDI both ways — but the
+  offering peer is libdatachannel, not Chromium, and both ends are on loopback.
+  The interop is standard; it has not been run.
 - **The client has not run in a headset.** The 3D scene itself *is* verified —
   see below — but nothing inside an XR session is: `immersive-ar` availability,
   the passthrough blend mode, `fillPoses` support and hand joint ordering have
@@ -226,7 +236,7 @@ difficult logic and none of the platform integration.
 ### What the headless render test does cover
 
 `apps/xr-client/test/render-smoke.mjs` loads the built app in Chromium with
-software WebGL and checks 21 properties of the running scene: that the React
+software WebGL and checks 35 properties of the running scene: that the React
 tree mounts with no uncaught exceptions, a WebGL 2 context is created, both
 instrument surfaces build as instanced meshes with all 41 zones, the frame loop
 advances, geometry rasterises, and both surfaces fall inside the preview
@@ -236,17 +246,22 @@ It then drives the *real* `PokeDetector` and `NoteRouter` with synthetic
 fingertip positions and asserts a strike on pad 1 produces MIDI note 36 with a
 velocity derived from approach speed, lights that pad in the instance colour
 buffer, and keeps it lit while held. It also spawns an emulated Launchpad,
-injects LED colours the way the bridge would, and checks they reach the GPU. That is the only test covering detection,
-routing, feedback and the GPU together — the pieces are unit-tested in
-`packages/interaction`, but the wiring between them exists only in the client.
+injects LED colours the way the bridge would, and checks they reach the GPU;
+and it puts the in-session pairing panel on screen, pokes a six-character code
+into it one key at a time through the same detector, and checks the panel then
+leaves the scene without holding what was typed. That is the only test covering
+detection, routing, feedback and the GPU together — the pieces are unit-tested
+in `packages/interaction`, but the wiring between them exists only in the
+client.
 
-Five real bugs came out of writing it, none of which any amount of type checking
-would have caught: the preview camera framed the instruments out of shot
-entirely; the label plane was occluded by the raised zone boxes; labels drew
-dark ink on the dark pad theme; `SurfaceHighlighter` faded held zones despite
-documenting that it did not; and every Launchpad pad rendered washed white,
+Seven real bugs came out of writing it, none of which any amount of type
+checking would have caught: the preview camera framed the instruments out of
+shot entirely; the label plane was occluded by the raised zone boxes; labels
+drew dark ink on the dark pad theme; `SurfaceHighlighter` faded held zones
+despite documenting that it did not; every Launchpad pad rendered washed white,
 because `emissive` is a single uniform shared by all instances while only the
-diffuse is multiplied by `instanceColor`.
+diffuse is multiplied by `instanceColor`; the pairing panel floated through the
+pad grid; and its message line was clipped by its own border.
 
 Run it alone with `pnpm --filter @vrmc/xr-client test`. It skips cleanly when no
 Chromium is available; set `CHROMIUM_PATH` to point at one.
