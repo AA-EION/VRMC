@@ -1,5 +1,7 @@
 # VRMC
 
+<img src="assets/icon/vrmc-256.png" alt="VRMC icon" width="128" align="right" />
+
 A mixed-reality MIDI controller for Meta Quest 3, and the desktop bridge that
 makes it look like real hardware to your DAW.
 
@@ -169,6 +171,26 @@ the CoreMIDI and teVirtualMIDI backends have never run on macOS or Windows; no
 DAW has ever seen an emulated Launchpad; and no latency figure in these docs is
 a measurement. See
 [Architecture](docs/ARCHITECTURE.md#what-is-not-yet-verified).
+
+## The icon
+
+<img src="assets/icon/sizes.png" alt="The VRMC icon from 16 to 256 pixels" width="620" />
+
+A pad grid whose lit pads form a **V** — the instrument and the initial of
+**V**R **M**IDI **C**ontroller in one shape.
+
+Small sizes get their own artwork rather than a scaled-down master. At 16 pixels
+a five-column grid gives each pad about three pixels and the letter dissolves
+into texture, so anything up to 48 draws a single bold V instead. The tray glyph
+drops the tile entirely, since it sits on a menu bar or taskbar whose colour the
+OS owns.
+
+Everything is generated from `assets/icon/generate.py` — SVG source, PNGs, a
+multi-resolution `.ico`, an `.icns`, and the tray glyphs:
+
+```bash
+python3 assets/icon/generate.py
+```
 
 ## Licence
 
