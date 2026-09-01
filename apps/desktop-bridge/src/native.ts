@@ -85,15 +85,19 @@ export function requireNative<T>(moduleName: string): T {
     ? [stagedPath(moduleName), moduleName]
     : [moduleName, stagedPath(moduleName)];
 
-  let last: unknown;
+  // The first attempt's error is the one worth keeping. The fallback fails
+  // with a bare "Cannot find module <name>", which says nothing; the first
+  // says what the module itself could not find — its platform binary, say —
+  // and reporting the wrong one sent a diagnosis off for an hour.
+  let first: unknown;
   for (const candidate of candidates) {
     try {
       return requireModule(candidate) as T;
     } catch (err) {
-      last = err;
+      if (first === undefined) first = err;
     }
   }
-  throw new NativeLoadError(moduleName, last);
+  throw new NativeLoadError(moduleName, first);
 }
 
 /**

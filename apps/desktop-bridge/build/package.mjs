@@ -270,12 +270,47 @@ async function copyTrayHelper(target, destDir) {
   return true;
 }
 
-/** Copy koffi's prebuilt binding for a platform. Windows-only in practice. */
+/**
+ * Copy koffi, the FFI used to reach the Windows teVirtualMIDI driver.
+ *
+ * Windows-only: on macOS and Linux the MIDI addon talks to CoreMIDI and ALSA
+ * directly and there is nothing for an FFI to do.
+ */
 async function copyKoffi(target, destDir) {
   if (target.platform !== 'win32') return false;
   const dir = await resolvePackageDir('koffi');
-  if (dir === null) return false;
+  if (dir === null) {
+    console.warn('  ! koffi is not installed');
+    return false;
+  }
   await cp(dir, join(destDir, 'node_modules/koffi'), { recursive: true });
+
+  /*
+   * koffi's actual binary lives in a separate package, exactly as
+   * node-datachannel's does: `@koromix/koffi-win32-x64` and friends, resolved
+   * from koffi's own manifest. Copying koffi alone stages a loader with
+   * nothing to load.
+   */
+  const platformPackage = `@koromix/koffi-win32-${target.arch}`;
+  const addonDir = await resolvePackageDir(platformPackage, join(dir, 'package.json'));
+  if (addonDir === null) {
+    console.warn(`  ! ${platformPackage} is not installed`);
+    return false;
+  }
+  await cp(addonDir, join(destDir, 'node_modules', ...platformPackage.split('/')), {
+    recursive: true,
+  });
+
+  const manifest = JSON.parse(await readFile(join(dir, 'package.json'), 'utf8'));
+  const seen = new Set(['koffi', platformPackage]);
+  for (const dependency of Object.keys(manifest.dependencies ?? {})) {
+    await stageDependencies(
+      dependency,
+      join(dir, 'package.json'),
+      join(destDir, 'node_modules'),
+      seen,
+    );
+  }
   return true;
 }
 
@@ -401,14 +436,34 @@ async function buildTarget(target) {
   );
 
   const hasMidi = await copyMidiPrebuild(target, exeDir);
-  await copyKoffi(target, exeDir);
+  const hasKoffi = await copyKoffi(target, exeDir);
   const hasRtc = await copyDataChannel(target, exeDir);
   const hasTray = await copyTrayHelper(target, exeDir);
-  if (!hasMidi) {
-    console.warn(`  ! ${target.slug} has no MIDI addon; it will run but open no ports`);
+
+  /*
+   * Refuse to produce a build that cannot work.
+   *
+   * These were warnings, and every one of them was ignored: a build shipped
+   * with no MIDI and no WebRTC while the console said so in yellow and the
+   * exit status said everything was fine. A missing addon is not a degraded
+   * build, it is a bridge that starts up and does nothing, so it fails here.
+   *
+   * The tray helper is the one genuine warning. Losing it costs the menu bar
+   * icon and nothing else — the bridge still carries MIDI, which is what it is
+   * for. The release workflow asserts it separately, where the toolchain to
+   * build one is supposed to exist.
+   */
+  const missing = [];
+  if (!hasMidi) missing.push('the MIDI addon (@julusian/midi): it could open no ports');
+  if (!hasRtc) missing.push('the WebRTC addon (node-datachannel): no headset could pair');
+  if (target.platform === 'win32' && !hasKoffi) {
+    missing.push('koffi: the Windows MIDI driver could not be reached');
   }
-  if (!hasRtc) {
-    console.warn(`  ! ${target.slug} has no WebRTC addon; a headset cannot pair with it`);
+  if (missing.length > 0) {
+    throw new Error(
+      `${target.slug} is missing ${missing.length === 1 ? 'a native library' : 'native libraries'}:\n` +
+        missing.map((m) => `    - ${m}`).join('\n'),
+    );
   }
   if (!hasTray && target.platform !== 'linux') {
     console.warn(`  ! ${target.slug} has no tray helper; run \`pnpm tray\` first`);
