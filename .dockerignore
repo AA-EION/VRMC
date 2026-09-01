@@ -1,0 +1,15 @@
+# Keep the build context small and free of host-specific artefacts.
+**/node_modules
+**/dist
+**/.turbo
+**/build/out
+**/build/dist
+.git
+.github
+docs
+*.md
+!README.md
+render-smoke.png
+**/*.tsbuildinfo
+.env
+.env.local

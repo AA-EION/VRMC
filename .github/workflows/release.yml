@@ -8,11 +8,11 @@ on:
 
 # Each platform builds on its own runner.
 #
-# The packaging script can assemble all three targets from one machine, because
-# the native MIDI addons ship prebuilds for every platform. Building on the
-# native runner anyway costs little and buys two things worth having: the
-# artifact is exercised on the OS it targets before release, and macOS builds
-# are in a position to be signed and notarised, which cannot happen elsewhere.
+# The packaging script can assemble every target from one machine, because the
+# native MIDI addons ship prebuilds for all platforms. Building on the native
+# runner anyway buys two things worth having: the artifact is exercised on the
+# OS it targets before release, and macOS builds are in a position to be signed
+# and notarised, which cannot happen elsewhere.
 jobs:
   build:
     strategy:
@@ -30,9 +30,9 @@ jobs:
     runs-on: ${{ matrix.os }}
     steps:
       - uses: actions/checkout@v4
+      # Version comes from package.json's `packageManager`; setting it here
+      # too makes the action fail.
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -43,32 +43,79 @@ jobs:
       - run: node build/package.mjs ${{ matrix.target }}
         working-directory: apps/desktop-bridge
 
-      # Smoke-test the artifact on the OS it targets. --list-ports exits after
-      # enumerating, which proves the executable runs and the native MIDI addon
-      # loaded — the two things most likely to be broken by packaging.
+      # Smoke-test on the OS the artifact targets. `--list-ports` enumerates and
+      # exits, which proves both that the executable runs and that the native
+      # MIDI addon loaded — the two things packaging most often breaks, and
+      # neither shows up in a typecheck.
       - name: Smoke test (macOS)
         if: runner.os == 'macOS'
         run: |
-          APP=$(find apps/desktop-bridge/build/dist -name 'vrmc-bridge' -type f | head -1)
+          set -euo pipefail
+          APP=$(find apps/desktop-bridge/build/dist -type f -name 'vrmc-bridge' | head -1)
           chmod +x "$APP"
           "$APP" --list-ports
       - name: Smoke test (Linux)
         if: runner.os == 'Linux'
         run: |
-          BIN=$(find apps/desktop-bridge/build/dist -name 'vrmc-bridge' -type f | head -1)
+          set -euo pipefail
+          BIN=$(find apps/desktop-bridge/build/dist -type f -name 'vrmc-bridge' | head -1)
           chmod +x "$BIN"
           "$BIN" --help
       - name: Smoke test (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          $exe = Get-ChildItem -Recurse apps/desktop-bridge/build/dist -Filter vrmc-bridge.exe | Select-Object -First 1
+          $exe = Get-ChildItem -Recurse apps/desktop-bridge/build/dist -Filter vrmc-bridge.exe |
+            Select-Object -First 1
+          if (-not $exe) { throw 'vrmc-bridge.exe was not produced' }
           & $exe.FullName --list-ports
+
+      # A .dmg is what a macOS user expects to download: it mounts as a disk
+      # image with the .app inside, ready to drag to Applications. Shipping a
+      # bare .app in a zip loses the executable bit and the bundle structure on
+      # some unarchivers.
+      - name: Build .dmg
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          STAGE=$(find apps/desktop-bridge/build/dist -maxdepth 1 -mindepth 1 -type d | head -1)
+          test -d "$STAGE/VRMC Bridge.app" || { echo "no .app in $STAGE"; exit 1; }
+          # A symlink to /Applications makes the drag-to-install gesture obvious.
+          ln -s /Applications "$STAGE/Applications"
+          mkdir -p release
+          hdiutil create \
+            -volname "VRMC Bridge" \
+            -srcfolder "$STAGE" \
+            -ov -format UDZO \
+            "release/vrmc-bridge-${{ matrix.target }}.dmg"
+          hdiutil verify "release/vrmc-bridge-${{ matrix.target }}.dmg"
+
+      - name: Collect Windows executable
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path release | Out-Null
+          $stage = Get-ChildItem apps/desktop-bridge/build/dist -Directory | Select-Object -First 1
+          # The .exe alone is not runnable: the native MIDI addon lives beside
+          # it. Zip the whole folder so the two stay together, and also publish
+          # the bare .exe for anyone who only wants to inspect it.
+          Compress-Archive -Path "$($stage.FullName)/*" `
+            -DestinationPath "release/vrmc-bridge-${{ matrix.target }}.zip"
+          Copy-Item "$($stage.FullName)/vrmc-bridge.exe" `
+            "release/vrmc-bridge-${{ matrix.target }}.exe"
+
+      - name: Collect Linux build
+        if: runner.os == 'Linux'
+        run: |
+          set -euo pipefail
+          mkdir -p release
+          STAGE=$(find apps/desktop-bridge/build/dist -maxdepth 1 -mindepth 1 -type d | head -1)
+          tar -czf "release/vrmc-bridge-${{ matrix.target }}.tar.gz" -C "$STAGE" .
 
       - uses: actions/upload-artifact@v4
         with:
           name: vrmc-bridge-${{ matrix.target }}
-          path: apps/desktop-bridge/build/dist/*
+          path: release/*
           if-no-files-found: error
 
   release:
@@ -81,18 +128,19 @@ jobs:
       - uses: actions/download-artifact@v4
         with:
           path: artifacts
-      - name: Zip each target
-        run: |
-          cd artifacts
-          for dir in */; do
-            (cd "$dir" && zip -qr "../${dir%/}.zip" .)
-          done
+          merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
-          files: artifacts/*.zip
+          files: artifacts/*
           body: |
-            Unsigned builds.
+            Desktop bridge builds.
 
-            macOS quarantines an unsigned app on download: right-click the app
-            and choose Open, then confirm. On Windows, SmartScreen shows a
-            warning; choose More info, then Run anyway.
+            - `.dmg` — macOS, contains VRMC Bridge.app
+            - `.exe` — Windows executable; the `.zip` beside it also carries the
+              native MIDI addon the .exe needs
+            - `.tar.gz` — Linux
+
+            These builds are unsigned. macOS quarantines an unsigned app on
+            download: right-click the app and choose Open, then confirm. On
+            Windows, SmartScreen shows a warning; choose More info, then Run
+            anyway.

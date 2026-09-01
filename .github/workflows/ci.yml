@@ -11,9 +11,9 @@ jobs:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
+      # No `version` input: package.json already pins pnpm through
+      # `packageManager`, and the action refuses to start when both are set.
       - uses: pnpm/action-setup@v4
-        with:
-          version: 10
       - uses: actions/setup-node@v4
         with:
           node-version: 22
@@ -25,3 +25,68 @@ jobs:
       # rather than the runner's, so the version matches the pinned library.
       - run: pnpm --filter @vrmc/xr-client exec playwright install --with-deps chromium
       - run: pnpm test
+
+  # Builds the web image and proves it actually serves the client.
+  #
+  # The Dockerfile and the nginx config cannot be checked by a typecheck or a
+  # unit test, and a broken one only shows up at deploy time. This does the
+  # whole thing: build, run, fetch the page, and confirm the bridge's native
+  # MIDI addons did not end up in the image.
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Validate compose file
+        run: docker compose config
+
+      - name: Build image
+        run: docker build -t vrmc-web:ci .
+
+      - name: Serve and check
+        run: |
+          set -euo pipefail
+          docker run -d --name vrmc-web-ci -p 127.0.0.1:8080:80 vrmc-web:ci
+
+          # Wait for the container's own healthcheck rather than sleeping.
+          for i in $(seq 1 30); do
+            state=$(docker inspect -f '{{.State.Health.Status}}' vrmc-web-ci)
+            [ "$state" = "healthy" ] && break
+            [ "$state" = "unhealthy" ] && { docker logs vrmc-web-ci; exit 1; }
+            sleep 2
+          done
+
+          curl -fsS http://127.0.0.1:8080/healthz | grep -q ok
+          curl -fsS http://127.0.0.1:8080/ | grep -q '<div id="root">'
+
+          # Unknown paths must fall back to the document, not 404: the client is
+          # a single-page app and may be mounted under any route.
+          curl -fsS http://127.0.0.1:8080/some/deep/route | grep -q '<div id="root">'
+
+          # Hashed assets should be cacheable forever; the document never.
+          asset=$(curl -fsS http://127.0.0.1:8080/ | grep -o '/assets/[^"]*\.js' | head -1)
+          curl -fsSI "http://127.0.0.1:8080$asset" | grep -qi 'cache-control:.*immutable'
+          curl -fsSI http://127.0.0.1:8080/ | grep -qi 'cache-control:.*no-cache'
+
+      - name: Image must not contain the desktop bridge
+        run: |
+          set -euo pipefail
+          # The bridge needs native MIDI addons and host audio access; neither
+          # belongs in a container that only serves files. Assert they are
+          # absent rather than trusting the install filter.
+          if docker run --rm --entrypoint sh vrmc-web:ci -c \
+              'find / -name "*.node" -o -name "*julusian*" -o -name "*koffi*" 2>/dev/null | head -1' \
+              | grep -q .; then
+            echo "native MIDI addon found in the web image"
+            exit 1
+          fi
+          # Nor any JavaScript beyond the built client.
+          docker run --rm --entrypoint sh vrmc-web:ci -c 'test ! -d /app && test ! -d /usr/share/nginx/html/node_modules'
+
+      - name: Container logs on failure
+        if: failure()
+        run: docker logs vrmc-web-ci || true
+
+      - name: Clean up
+        if: always()
+        run: docker rm -f vrmc-web-ci || true

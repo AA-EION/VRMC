@@ -87,6 +87,58 @@ It is fine for development and a poor experience to ask of a customer.
   certificate problem and destroy the thing the design exists for — a local
   hop is a couple of milliseconds, a round trip through a cloud relay is tens.
 
+## Running it with Docker
+
+The repository ships a container for the client, and nothing else:
+
+```bash
+cp .env.example .env      # optional; WEB_PORT defaults to 8080
+docker compose up -d --build
+```
+
+That serves the built client on `127.0.0.1:8080`. Point your existing reverse
+proxy at it:
+
+```nginx
+server {
+    listen 443 ssl http2;
+    server_name studio.example.com;
+
+    # your certificate directives here
+
+    location / {
+        proxy_pass http://127.0.0.1:8080;
+        proxy_set_header Host              $host;
+        proxy_set_header X-Real-IP         $remote_addr;
+        proxy_set_header X-Forwarded-For   $proxy_add_x_forwarded_for;
+        proxy_set_header X-Forwarded-Proto $scheme;
+    }
+}
+```
+
+Three deliberate choices in that setup:
+
+**The container has no TLS and no proxy of its own.** It speaks plain HTTP and
+issues no redirects, because the proxy in front owns the public scheme and
+hostname. A container that redirected using its own view of those would emit
+`http://` links on an `https://` site.
+
+**The port is published on loopback only.** `127.0.0.1:${WEB_PORT}:80` rather
+than `${WEB_PORT}:80`. The only thing that should reach it is the proxy on the
+same host; binding the wildcard address would expose a plain HTTP port to the
+network and offer a way to reach the site while bypassing TLS.
+
+**The desktop bridge is not in the image.** It needs native MIDI addons and
+access to the host's audio subsystem, neither of which works from a container
+that only has to serve files — and the bridge belongs on the musician's
+machine, not on a web server. The build installs only the client and the
+workspace packages it depends on (`pnpm install --filter @vrmc/xr-client...`),
+so the native addons are never fetched rather than fetched and discarded.
+
+Remember that the proxy must serve HTTPS. WebXR requires a secure context: over
+plain `http://` the page loads and then refuses to start a session, with
+`navigator.xr` simply absent.
+
 ## Static hosting checklist
 
 - Serve over HTTPS with HTTP/2 or HTTP/3. The bundle is ~305 KB gzipped, split

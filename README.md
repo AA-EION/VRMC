@@ -121,6 +121,21 @@ pnpm --filter @vrmc/desktop-bridge run package   # build .app / .exe binaries
 Turborepo handles the dependency order and caches results, so a second
 `pnpm build` with nothing changed finishes immediately.
 
+## Hosting the client
+
+The XR client is a static site with a container ready to go:
+
+```bash
+cp .env.example .env        # optional; WEB_PORT defaults to 8080
+docker compose up -d --build
+```
+
+It serves on `127.0.0.1:${WEB_PORT}` for an existing reverse proxy to sit in
+front of and terminate TLS — which is required, since WebXR only runs in a
+secure context. The image holds the client alone; the desktop bridge is not in
+it and is downloaded separately. See
+[Web deployment](docs/WEB-DEPLOYMENT.md#running-it-with-docker).
+
 ## Documentation
 
 - [Architecture](docs/ARCHITECTURE.md) — how the pieces fit, and the latency

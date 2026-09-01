@@ -1,0 +1,47 @@
+# SPDX-License-Identifier: GPL-3.0-only
+#
+# Serves the VRMC XR client on WEB_PORT (default 8080).
+#
+# There is no reverse proxy here on purpose: this is meant to sit behind one you
+# already run. Point your existing nginx at http://127.0.0.1:${WEB_PORT} and let
+# it terminate TLS.
+#
+#   docker compose up -d --build
+#
+# TLS upstream is not optional. WebXR only runs in a secure context, so a client
+# reached over plain http:// cannot enter an immersive session — the headset
+# will load the page and refuse to start a session. See docs/WEB-DEPLOYMENT.md.
+
+services:
+  web:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: vrmc-web:latest
+    container_name: vrmc-web
+    restart: unless-stopped
+    ports:
+      # Bound to loopback: the only thing that should reach this container is
+      # the proxy on the same host. Publishing on 0.0.0.0 would expose a plain
+      # HTTP port to the network, which is both unnecessary and a way to reach
+      # the site while bypassing TLS.
+      - "127.0.0.1:${WEB_PORT:-8080}:80"
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://127.0.0.1/healthz"]
+      interval: 30s
+      timeout: 3s
+      retries: 3
+      start_period: 5s
+    # Static files only: nothing is written at runtime.
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/cache/nginx
+      - /var/run
+    security_opt:
+      - no-new-privileges:true
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
