@@ -1,0 +1,128 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!--
+  SPDX-License-Identifier: GPL-3.0-only
+
+  The VRMC Windows installer.
+
+  Two decisions are worth stating, because both look like shortcuts and are not.
+
+  **No Windows Service.** A service would be the obvious way to run a background
+  MIDI bridge, and it is the wrong one here. Services run in session 0, which
+  has no desktop: a service cannot own a notification-area icon, so the user
+  would have no way to read the pairing code or see whether anything is working.
+  It also could not reach the per-user MIDI session the DAW lives in. So VRMC
+  installs as an ordinary program with a per-user Run entry, which starts it in
+  the same session as the DAW and lets it own its icon.
+
+  **Per-machine install, per-user autostart.** The files go under Program Files
+  so every account shares one copy and updates replace it cleanly. The Run key
+  is HKCU, written into whichever user's profile ran the installer — so
+  installing does not silently start a background process for everyone who ever
+  logs into the machine.
+
+  Built by build/installer/build.mjs, which supplies Version and SourceDir.
+-->
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+      Name="VRMC Bridge"
+      Manufacturer="EION Studios"
+      Version="$(var.Version)"
+      UpgradeCode="8d1f4d64-1e2a-4c8e-9f3b-6a5c0b2d7e41"
+      Scope="perMachine"
+      Compressed="yes">
+
+    <!--
+      Removes the previous version before laying down the new one. Without this
+      an upgrade would leave two copies registered and the uninstaller would
+      only ever remove one of them.
+    -->
+    <MajorUpgrade
+        AllowSameVersionUpgrades="yes"
+        DowngradeErrorMessage="A newer version of VRMC Bridge is already installed." />
+
+    <MediaTemplate EmbedCab="yes" />
+
+    <Icon Id="VrmcIcon" SourceFile="$(var.IconFile)" />
+    <Property Id="ARPPRODUCTICON" Value="VrmcIcon" />
+    <Property Id="ARPURLINFOABOUT" Value="https://github.com/AA-EION/VRMC" />
+    <!-- No repair option: there is nothing to repair that reinstalling does
+         not do, and the entry only invites confusion. -->
+    <Property Id="ARPNOREPAIR" Value="1" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="VRMC" />
+    </StandardDirectory>
+
+    <StandardDirectory Id="ProgramMenuFolder">
+      <Directory Id="ShortcutFolder" Name="VRMC" />
+    </StandardDirectory>
+
+    <Feature Id="Main" Title="VRMC Bridge" Level="1">
+      <ComponentGroupRef Id="BridgeFiles" />
+      <ComponentGroupRef Id="Registration" />
+    </Feature>
+
+    <ComponentGroup Id="Registration">
+      <Component Id="StartMenuShortcut" Directory="ShortcutFolder" Guid="*">
+        <Shortcut
+            Id="StartMenuVrmc"
+            Name="VRMC Bridge"
+            Description="Virtual MIDI bridge for the VRMC mixed-reality controller"
+            Target="[INSTALLFOLDER]vrmc-bridge.exe"
+            WorkingDirectory="INSTALLFOLDER"
+            Icon="VrmcIcon" />
+        <RemoveFolder Id="RemoveShortcutFolder" Directory="ShortcutFolder" On="uninstall" />
+        <!--
+          A per-user component needs a per-user key path, and HKCU is the only
+          one an unelevated uninstall can remove. Both this and the Run entry
+          below hang off it.
+        -->
+        <RegistryValue
+            Root="HKCU"
+            Key="Software\EION Studios\VRMC"
+            Name="installed"
+            Type="integer"
+            Value="1"
+            KeyPath="yes" />
+      </Component>
+
+      <Component Id="RunAtLogin" Directory="INSTALLFOLDER" Guid="*">
+        <!--
+          Quoted, because the path contains a space: Windows would otherwise
+          read `C:\Program` as the command and `Files\VRMC\...` as an argument.
+        -->
+        <RegistryValue
+            Root="HKCU"
+            Key="Software\Microsoft\Windows\CurrentVersion\Run"
+            Name="VRMC"
+            Type="string"
+            Value="&quot;[INSTALLFOLDER]vrmc-bridge.exe&quot;"
+            KeyPath="yes" />
+      </Component>
+    </ComponentGroup>
+
+    <!--
+      Launch it once at the end of the install, so the icon appears without the
+      user having to find it and the pairing code is on screen immediately.
+      Deferred and non-impersonated would run it as SYSTEM, which is the
+      session-0 problem all over again, so this runs as the installing user.
+    -->
+    <Property Id="WixShellExecTarget" Value="[INSTALLFOLDER]vrmc-bridge.exe" />
+    <CustomAction
+        Id="LaunchBridge"
+        BinaryRef="Wix4UtilCA_X64"
+        DllEntry="WixShellExec"
+        Impersonate="yes"
+        Return="ignore" />
+
+    <InstallExecuteSequence>
+      <!-- Not on uninstall, and not on a silent install where nobody is
+           watching for an icon to appear. -->
+      <Custom Action="LaunchBridge" After="InstallFinalize"
+              Condition="NOT Installed AND UILevel &gt; 2" />
+    </InstallExecuteSequence>
+
+    <ui:WixUI xmlns:ui="http://wixtoolset.org/schemas/v4/wxs/ui" Id="WixUI_Minimal" />
+    <WixVariable Id="WixUILicenseRtf" Value="$(var.LicenseFile)" />
+  </Package>
+</Wix>

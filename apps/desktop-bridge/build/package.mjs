@@ -168,6 +168,28 @@ async function copyDataChannel(target, destDir) {
   return true;
 }
 
+/**
+ * Copy the tray helper, if one was built for this platform.
+ *
+ * Built by `native/build.mjs` on the machine that runs it — unlike the addons
+ * there is nothing to select, because these are native GUI binaries against
+ * AppKit and the Win32 shell and have to be compiled where they will run.
+ *
+ * Its absence is not an error. The bridge runs headless without it: no menu
+ * bar icon, everything else working, which is a far better outcome than a
+ * build that fails over an icon.
+ */
+async function copyTrayHelper(target, destDir) {
+  if (target.platform !== process.platform || target.arch !== process.arch) return false;
+  const name = target.platform === 'win32' ? 'vrmc-tray.exe' : 'vrmc-tray';
+  const built = join(root, 'native/build', name);
+  if (!existsSync(built)) return false;
+  const to = join(destDir, name);
+  await cp(built, to);
+  if (target.platform !== 'win32') await chmod(to, 0o755);
+  return true;
+}
+
 /** Copy koffi's prebuilt binding for a platform. Windows-only in practice. */
 async function copyKoffi(target, destDir) {
   if (target.platform !== 'win32') return false;
@@ -205,17 +227,26 @@ async function buildTarget(target) {
   const hasMidi = await copyMidiPrebuild(target, exeDir);
   await copyKoffi(target, exeDir);
   const hasRtc = await copyDataChannel(target, exeDir);
+  const hasTray = await copyTrayHelper(target, exeDir);
   if (!hasMidi) {
     console.warn(`  ! ${target.slug} has no MIDI addon; it will run but open no ports`);
   }
   if (!hasRtc) {
     console.warn(`  ! ${target.slug} has no WebRTC addon; a headset cannot pair with it`);
   }
+  if (!hasTray && target.platform !== 'linux') {
+    console.warn(`  ! ${target.slug} has no tray helper; run \`pnpm tray\` first`);
+  }
 
   if (appDir !== null) {
     await writeFile(join(appDir, 'Info.plist'), infoPlist(), 'utf8');
-    // LSBackgroundOnly keeps it out of the Dock; it is a background bridge with
-    // no window of its own, and a bouncing icon for one would be noise.
+    // The icon is what Finder shows in Applications and what the Get Info
+    // panel uses. The menu bar draws its own, so this is never seen there.
+    const icns = join(root, '../../assets/icon/vrmc.icns');
+    if (existsSync(icns)) {
+      await mkdir(join(appDir, 'Resources'), { recursive: true });
+      await cp(icns, join(appDir, 'Resources/vrmc.icns'));
+    }
     await chmod(join(exeDir, exeName), 0o755);
   } else if (target.platform !== 'win32') {
     await chmod(join(exeDir, exeName), 0o755);
@@ -238,8 +269,17 @@ function infoPlist() {
   <key>CFBundleShortVersionString</key><string>${VERSION}</string>
   <key>CFBundlePackageType</key><string>APPL</string>
   <key>CFBundleExecutable</key><string>vrmc-bridge</string>
+  <key>CFBundleIconFile</key><string>vrmc.icns</string>
   <key>LSMinimumSystemVersion</key><string>11.0</string>
-  <key>LSBackgroundOnly</key><true/>
+  <!--
+    LSUIElement, not LSBackgroundOnly.
+
+    Both hide the Dock tile, but LSBackgroundOnly forbids any user interface at
+    all — including the status item, which simply never appears. LSUIElement is
+    the tray-only policy: a menu bar item, no Dock icon, no application menu,
+    and no window that could steal focus from the DAW.
+  -->
+  <key>LSUIElement</key><true/>
   <key>NSHighResolutionCapable</key><true/>
 </dict>
 </plist>
@@ -249,14 +289,24 @@ function infoPlist() {
 function readmeFor(target) {
   const run =
     target.platform === 'win32'
-      ? 'Double-click vrmc-bridge.exe, or run it from a terminal for the log.'
+      ? [
+          'Run the installer (VRMC-Setup.msi) if you have one; it puts VRMC in',
+          'Program Files and starts it at login.',
+          '',
+          'Otherwise run vrmc-bridge.exe directly. Look for the VRMC icon in the',
+          'notification area, which shows the pairing code to type in the headset.',
+        ].join('\n')
       : target.platform === 'darwin'
         ? [
-            'Run "VRMC Bridge.app". It has no window: it runs in the background and',
-            'creates MIDI ports.',
+            'Drag "VRMC Bridge.app" to your Applications folder, then open it.',
             '',
-            'macOS will refuse to open it the first time if this build is unsigned.',
-            'Right-click the app and choose Open, then confirm.',
+            'That is the whole installation. It has no window: look for the VRMC',
+            'icon in the menu bar, which shows the pairing code to type in the',
+            'headset. Opening it also sets it to start at login, which you can',
+            'turn off from the same menu.',
+            '',
+            'macOS will refuse to open it the first time if this build is',
+            'unsigned. Right-click the app and choose Open, then confirm.',
           ].join('\n')
         : 'Run ./vrmc-bridge from a terminal.';
 
@@ -267,9 +317,9 @@ function readmeFor(target) {
     '',
     run,
     '',
-    'The bridge shows a six-character pairing code. Open the VRMC site in the',
-    'headset and type it — that is the whole setup. Devices are created from the',
-    'headset; MIDI ports appear and disappear as you add and remove them.',
+    'Open the VRMC site in the headset and type the six-character pairing code —',
+    'that is the whole setup. Devices are created from the headset; MIDI ports',
+    'appear and disappear on this computer as you add and remove them.',
     '',
     'GPL-3.0-only. See LICENSE.',
     'Launchpad protocol details derive from CoreFW:',

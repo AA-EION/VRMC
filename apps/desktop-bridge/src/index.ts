@@ -4,8 +4,13 @@ import { DeviceId, DeviceStatus, isPrivateAddress } from '@vrmc/protocol';
 import { ArgError, parseArgs, USAGE, type BridgeConfig } from './config.js';
 import { Router } from './core/Router.js';
 import { BRIDGE_VERSION, runSelfTest } from './core/selfTest.js';
+import { autostartState, toggleAutostart } from './setup/autostart.js';
+import { runFirstLaunch } from './setup/firstRun.js';
 import { ensureCertificate } from './setup/certificate.js';
 import { PairingPublisher } from './setup/pairing.js';
+import { copyToClipboard, openUrl } from './tray/desktop.js';
+import { buildMenu, buildTooltip, TrayAction, type TrayState } from './tray/menu.js';
+import { TrayController } from './tray/TrayController.js';
 import { DEFAULT_PORT_NAME_TEMPLATE, DeviceManager } from './devices/DeviceManager.js';
 import { listPorts } from './midi/openPort.js';
 import { Broadcaster } from './net/Broadcaster.js';
@@ -256,6 +261,92 @@ async function main(): Promise<void> {
     log(`open ${config.pairingService} in the headset and enter it`);
   }
 
+  /*
+   * The menu bar icon.
+   *
+   * This is the bridge's only user interface. It runs all day doing nothing
+   * visible, so a window would be wrong — but so is no presence at all: a
+   * musician whose headset will not connect needs somewhere to look, and
+   * "check whether a background process is running" is not an answer.
+   *
+   * Everything here degrades quietly. No helper binary, no toolchain that
+   * built one, a helper that crashes — the bridge logs it once and carries on
+   * serving MIDI, because an icon is worth nothing next to that.
+   */
+  const dashboardUrl = `${ws?.secure === true ? 'https' : 'http'}://127.0.0.1:${config.wsPort}/`;
+
+  // Dragging the app to Applications and opening it is the whole installation,
+  // so the first launch registers the login item itself. See setup/firstRun.ts
+  // for why that is a defensible thing to decide on someone's behalf.
+  const firstRun = await runFirstLaunch();
+  if (firstRun.first) {
+    log(firstRun.registered ? 'set up to start at login' : `first run: ${firstRun.reason}`);
+  }
+
+  let autostart = await autostartState();
+
+  const trayState = (): TrayState => ({
+    pairingCode: pairing?.displayCode ?? '',
+    pairingRegistered: pairing?.isRegistered ?? false,
+    clients: bus.clientCount,
+    devices: devices.count,
+    midiReady: devices.roster().some((d) => d.status === DeviceStatus.READY),
+    dashboardUrl,
+    autostart,
+  });
+
+  let tray: TrayController | null = null;
+  const refreshTray = (): void => {
+    if (tray === null) return;
+    const state = trayState();
+    tray.setMenu(buildTooltip(state), buildMenu(state));
+  };
+
+  const handleTrayClick = async (id: string): Promise<void> => {
+    switch (id) {
+      case TrayAction.COPY_CODE: {
+        const code = pairing?.displayCode ?? '';
+        if (code === '') return;
+        // Logged either way: a machine with no clipboard utility should still
+        // put the code somewhere the user can reach it.
+        log((await copyToClipboard(code)) ? `copied ${code}` : `pairing code: ${code}`);
+        return;
+      }
+      case TrayAction.DASHBOARD:
+        openUrl(dashboardUrl);
+        return;
+      case TrayAction.AUTOSTART:
+        autostart = await toggleAutostart();
+        log(autostart === 'on' ? 'will start at login' : 'will not start at login');
+        refreshTray();
+        return;
+      case TrayAction.QUIT:
+        await shutdown('menu');
+        return;
+      default:
+        return;
+    }
+  };
+
+  if (config.enableTray) {
+    const controller = new TrayController({
+      onLog: log,
+      onQuit: () => void shutdown('menu'),
+      onClick: (id) => void handleTrayClick(id),
+    });
+    if (controller.start()) {
+      tray = controller;
+      refreshTray();
+      // Rebuilt whole on a timer, which is cheap and means the rows can never
+      // be a mix of old and new state. Two seconds is well below the point
+      // where a glance at the menu would show something stale.
+      const trayTimer = setInterval(refreshTray, 2000);
+      trayTimer.unref();
+    } else {
+      log('no tray helper found; running without a menu bar icon');
+    }
+  }
+
   let statsTimer: NodeJS.Timeout | null = null;
   if (config.statsInterval > 0) {
     statsTimer = setInterval(() => {
@@ -278,6 +369,7 @@ async function main(): Promise<void> {
     // sounding until the DAW is restarted.
     const released = router.releaseAll();
     if (released > 0) log(`released ${released} sounding note(s)`);
+    tray?.stop();
     signalling?.stop();
     rtc?.close();
     bus.close();

@@ -40,8 +40,30 @@ jobs:
       - run: pnpm install --frozen-lockfile
       - run: pnpm --filter @vrmc/protocol --filter @vrmc/layout --filter @vrmc/interaction --filter @vrmc/devices build
       - run: pnpm --filter @vrmc/desktop-bridge run bundle
+
+      # The tray helper is a native GUI binary — AppKit on macOS, the Win32
+      # shell on Windows — so unlike the prebuilt addons it cannot be selected
+      # and copied from another machine. This is why the matrix exists.
+      - name: Build the tray helper
+        run: node native/build.mjs
+        working-directory: apps/desktop-bridge
+
       - run: node build/package.mjs ${{ matrix.target }}
         working-directory: apps/desktop-bridge
+
+      # Fail loudly if the icon did not make it into the build. A bridge with
+      # no tray icon still carries MIDI, so nothing else here would notice —
+      # and the user would simply have no way to read their pairing code.
+      - name: The tray helper must be packaged
+        if: runner.os != 'Linux'
+        shell: bash
+        run: |
+          set -euo pipefail
+          name=vrmc-tray
+          [ "${{ runner.os }}" = "Windows" ] && name=vrmc-tray.exe
+          found=$(find apps/desktop-bridge/build/dist -name "$name" | sed -n 1p)
+          test -n "$found" || { echo "no $name in the staged build"; exit 1; }
+          echo "packaged $found"
 
       # Smoke-test on the OS the artifact targets. `--list-ports` enumerates and
       # exits, which proves both that the executable runs and that the native
@@ -90,11 +112,29 @@ jobs:
             "release/vrmc-bridge-${{ matrix.target }}.dmg"
           hdiutil verify "release/vrmc-bridge-${{ matrix.target }}.dmg"
 
+      # An MSI is what a Windows user expects: it puts the bridge in Program
+      # Files, adds a Start menu entry, and registers it to start at login —
+      # rather than asking them to keep a folder somewhere and remember to run
+      # it. Deliberately not a service: services run in session 0, which has no
+      # desktop and therefore no tray icon. See build/installer/vrmc.wxs.
+      - name: Build the MSI
+        if: runner.os == 'Windows'
+        run: |
+          dotnet tool install --global wix --version 5.*
+          wix extension add -g WixToolset.UI.wixext
+          wix extension add -g WixToolset.Util.wixext
+          node build/installer/build.mjs
+        working-directory: apps/desktop-bridge
+
       - name: Collect Windows executable
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
           New-Item -ItemType Directory -Force -Path release | Out-Null
+          $msi = Get-ChildItem apps/desktop-bridge/build/dist -Filter '*.msi' |
+            Select-Object -First 1
+          if (-not $msi) { throw 'the MSI was not produced' }
+          Copy-Item $msi.FullName "release/VRMC-Setup.msi"
           $stage = Get-ChildItem apps/desktop-bridge/build/dist -Directory | Select-Object -First 1
           # The .exe alone is not runnable: the native MIDI addon lives beside
           # it. Zip the whole folder so the two stay together, and also publish

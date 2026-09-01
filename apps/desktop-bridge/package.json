@@ -11,10 +11,11 @@
     "start": "node --enable-source-maps dist/index.js",
     "dev": "tsc -p tsconfig.json --watch",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "test": "vitest run",
+    "test": "vitest run && node native/test/run.mjs",
     "clean": "rm -rf dist .turbo",
     "bundle": "node build/bundle.mjs",
-    "package": "pnpm bundle && node build/package.mjs"
+    "package": "pnpm bundle && node build/package.mjs",
+    "tray": "node native/build.mjs"
   },
   "dependencies": {
     "@vrmc/devices": "workspace:*",

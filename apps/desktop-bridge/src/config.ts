@@ -29,6 +29,14 @@ export interface BridgeConfig {
   pairingService: string;
   /** Accept headset connections brokered over WebRTC by the pairing service. */
   enableRtc: boolean;
+  /**
+   * Show a menu bar / notification-area icon.
+   *
+   * On by default because it is the bridge's only user interface. Turn it off
+   * for a headless machine, or when running under a supervisor that would
+   * rather the process had no desktop presence at all.
+   */
+  enableTray: boolean;
   loopbackPattern: RegExp;
   /**
    * How emulated devices name their MIDI ports. `{device}` is the model's
@@ -56,6 +64,7 @@ export const DEFAULT_CONFIG: BridgeConfig = {
   selfSignedTls: false,
   pairingService: 'https://vrmc.eionstudios.com',
   enableRtc: true,
+  enableTray: true,
 };
 
 export const USAGE = `
@@ -75,6 +84,7 @@ Usage: vrmc-bridge [options]
   --self-signed-tls    Generate a certificate and serve wss:// (rarely needed)
   --pair-service <url> Pairing service base URL ("" to disable)
   --no-rtc             Refuse WebRTC connections from the hosted client
+  --no-tray            Run without a menu bar / notification-area icon
   --loopback <regex>   Windows: pattern for the fallback port
   --port-template <s>  Naming for emulated device ports
                        (default: "{device} {port}", e.g. "Launchpad X LPX DAW")
@@ -153,6 +163,9 @@ export function parseArgs(argv: readonly string[]): BridgeConfig | 'help' {
         break;
       case '--no-rtc':
         config.enableRtc = false;
+        break;
+      case '--no-tray':
+        config.enableTray = false;
         break;
       case '--loopback':
         config.loopbackPattern = new RegExp(requireValue(arg, argv[++i]), 'i');
