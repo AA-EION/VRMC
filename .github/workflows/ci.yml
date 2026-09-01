@@ -74,14 +74,23 @@ jobs:
           # The bridge needs native MIDI addons and host audio access; neither
           # belongs in a container that only serves files. Assert they are
           # absent rather than trusting the install filter.
-          if docker run --rm --entrypoint sh vrmc-web:ci -c \
-              'find / -name "*.node" -o -name "*julusian*" -o -name "*koffi*" 2>/dev/null | head -1' \
-              | grep -q .; then
-            echo "native MIDI addon found in the web image"
+          #
+          # Searched directories are named explicitly rather than walking / —
+          # that would traverse the container's /proc and /sys for no benefit.
+          # No `head` in the pipeline either: under `pipefail` an early close
+          # would surface as a SIGPIPE failure and read as a positive find.
+          found=$(docker run --rm --entrypoint sh vrmc-web:ci -c \
+            'find /usr /etc /opt /srv /var /home /root \
+                  \( -name "*.node" -o -name "*julusian*" -o -name "*koffi*" \) \
+                  2>/dev/null' || true)
+          if [ -n "$found" ]; then
+            echo "native MIDI addon found in the web image:"
+            echo "$found"
             exit 1
           fi
-          # Nor any JavaScript beyond the built client.
-          docker run --rm --entrypoint sh vrmc-web:ci -c 'test ! -d /app && test ! -d /usr/share/nginx/html/node_modules'
+          # Nor any build leftovers beyond the served client.
+          docker run --rm --entrypoint sh vrmc-web:ci -c \
+            'test ! -d /app && test ! -d /usr/share/nginx/html/node_modules'
 
       - name: Container logs on failure
         if: failure()
