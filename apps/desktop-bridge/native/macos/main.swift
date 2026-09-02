@@ -12,10 +12,17 @@
 // run loop, and Node has neither. Talking to a tiny native process over a pipe
 // is far less machinery than embedding a GUI toolkit in the bridge.
 //
-// Build:  swiftc -O main.swift -o vrmc-tray
+// It has a second, non-graphical job: registering the app as a login item.
+// That belongs here rather than in the bridge because the sanctioned API for it
+// is SMAppService, which is Swift-only and needs a real bundle to point at —
+// and this executable is already inside one. Run with `--login-item <verb>` it
+// does that and exits without ever touching AppKit.
+//
+// Build:  swiftc -O -target arm64-apple-macosx26.0 main.swift -o vrmc-tray
 
 import AppKit
 import Foundation
+import ServiceManagement
 
 // MARK: - Protocol types
 
@@ -87,6 +94,7 @@ func makeStatusImage() -> NSImage {
 
 // MARK: - The status item
 
+@MainActor
 final class TrayDelegate: NSObject, NSApplicationDelegate {
     private var statusItem: NSStatusItem!
     /// Menu item tags map to command ids; AppKit gives us the tag on action.
@@ -101,21 +109,33 @@ final class TrayDelegate: NSObject, NSApplicationDelegate {
         readCommands()
     }
 
-    /// Read stdin on a background thread and apply each command on the main one.
+    /// Read stdin on a thread of its own and apply each command on the main one.
     ///
     /// AppKit is main-thread-only, and a blocking read on the main thread would
     /// freeze the menu bar item — the one visible symptom users would notice.
+    ///
+    /// A real thread rather than a detached `Task`, deliberately. `readLine`
+    /// blocks, and a task that blocks holds a thread of the cooperative pool
+    /// for as long as the bridge runs, which is exactly what that pool is not
+    /// for. And `DispatchQueue.main` rather than `MainActor.run`, because these
+    /// commands are ordered — a menu built from the second of two updates and
+    /// a tooltip from the first is a menu nobody can explain — and a serial
+    /// queue keeps that order where a series of tasks does not.
+    ///
+    /// `assumeIsolated` is the part that is new: it tells the compiler what was
+    /// previously only true in practice, that this closure runs on the main
+    /// actor, so every AppKit call below is checked rather than trusted.
     private func readCommands() {
-        Thread.detachNewThread {
+        Thread.detachNewThread { [self] in
             while let line = readLine(strippingNewline: true) {
                 guard let data = line.data(using: .utf8),
                       let command = try? JSONDecoder().decode(TrayCommand.self, from: data)
                 else { continue }
-                DispatchQueue.main.async { self.apply(command) }
+                DispatchQueue.main.async { MainActor.assumeIsolated { self.apply(command) } }
             }
             // stdin closed: the bridge exited, or was killed. Either way this
             // icon now represents nothing, so take it down.
-            DispatchQueue.main.async { NSApp.terminate(nil) }
+            DispatchQueue.main.async { MainActor.assumeIsolated { NSApp.terminate(nil) } }
         }
     }
 
@@ -172,7 +192,68 @@ final class TrayDelegate: NSObject, NSApplicationDelegate {
     }
 }
 
+// MARK: - Login items
+
+/// Registering the app to start when the user logs in.
+///
+/// SMAppService, not a hand-written LaunchAgent. Since macOS 13 this is the
+/// supported way, and the difference is visible to the user: an app registered
+/// through it appears in System Settings → General → Login Items under its own
+/// name, where it can be turned off the way every other login item can. A plist
+/// dropped into ~/Library/LaunchAgents appears there only as an opaque row, and
+/// on a system where the user has already denied background activity it is
+/// simply ignored with nothing said.
+///
+/// `requiresApproval` is a real state, not an error: macOS has accepted the
+/// registration but is waiting for the user to allow it in Settings. Saying
+/// "on" there would be a lie, and saying "off" would send them to a switch that
+/// is already flipped.
+enum LoginItem {
+    static func state() -> String {
+        switch SMAppService.mainApp.status {
+        case .enabled: return "on"
+        case .requiresApproval: return "approval"
+        case .notRegistered, .notFound: return "off"
+        @unknown default: return "off"
+        }
+    }
+
+    static func run(_ verb: String) -> [String: String] {
+        do {
+            switch verb {
+            case "status":
+                break
+            case "enable":
+                // Registering an already-registered app throws rather than
+                // succeeding quietly, and that is not a failure to report.
+                if SMAppService.mainApp.status != .enabled {
+                    try SMAppService.mainApp.register()
+                }
+            case "disable":
+                try SMAppService.mainApp.unregister()
+            default:
+                return ["error": "unknown verb"]
+            }
+        } catch {
+            return ["error": error.localizedDescription, "state": state()]
+        }
+        return ["state": state()]
+    }
+}
+
 // MARK: - Entry point
+
+// The non-graphical mode, handled before anything creates an NSApplication:
+// this path must not put an icon in the menu bar, and must exit on its own.
+let arguments = Array(CommandLine.arguments.dropFirst())
+if arguments.first == "--login-item" {
+    let result = LoginItem.run(arguments.count > 1 ? arguments[1] : "status")
+    if let data = try? JSONEncoder().encode(result),
+       let json = String(data: data, encoding: .utf8) {
+        emit(json)
+    }
+    exit(result["error"] == nil ? 0 : 1)
+}
 
 let app = NSApplication.shared
 // .accessory is the tray-only policy: a status item, no Dock tile, no menu bar

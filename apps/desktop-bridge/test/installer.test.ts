@@ -1,5 +1,9 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import { describe, it, expect } from 'vitest';
+// @ts-expect-error -- plain JS build tooling, deliberately untyped.
+import { infoPlist } from '../build/infoPlist.mjs';
+// @ts-expect-error -- plain JS build tooling, deliberately untyped.
+import { MACOS_DEPLOYMENT_TARGET } from '../native/target.mjs';
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
@@ -32,6 +36,63 @@ const STAGED = [
   'node_modules/@node-datachannel/win32-x64-msvc/node_datachannel.node',
   'node_modules/detect-libc/lib/detect-libc.js',
 ];
+
+describe('the macOS app bundle', () => {
+  const plist = infoPlist('1.2.3');
+
+  /** Value of a `<key>k</key><string>v</string>` pair. */
+  const value = (key: string): string | null => {
+    const at = plist.indexOf(`<key>${key}</key>`);
+    if (at < 0) return null;
+    const match = /<string>([^<]*)<\/string>/.exec(plist.slice(at));
+    return match?.[1] ?? null;
+  };
+  const isTrue = (key: string): boolean =>
+    new RegExp(`<key>${key}</key>\\s*<true/>`).test(plist);
+
+  it('declares the same macOS floor the helper is compiled against', () => {
+    // Compiled against one version and declared as another is how an app
+    // launches on a system and then calls a symbol that is not there.
+    expect(value('LSMinimumSystemVersion')).toBe(MACOS_DEPLOYMENT_TARGET);
+  });
+
+  it('is a menu bar app, not a background-only one', () => {
+    // LSBackgroundOnly forbids all UI, status item included, so the icon would
+    // simply never appear and the bridge would have no interface at all.
+    expect(isTrue('LSUIElement')).toBe(true);
+    // The comment beside the key names it; the key itself must be absent.
+    expect(plist).not.toContain('<key>LSBackgroundOnly</key>');
+  });
+
+  it('explains why it wants the local network, since macOS quotes it', () => {
+    const reason = value('NSLocalNetworkUsageDescription') ?? '';
+    expect(reason).toMatch(/headset/i);
+    expect(reason.length).toBeGreaterThan(20);
+  });
+
+  it('opts out of App Nap, which would throttle MIDI', () => {
+    expect(isTrue('NSAppSleepDisabled')).toBe(true);
+  });
+
+  it('runs the bridge, not the tray helper', () => {
+    expect(value('CFBundleExecutable')).toBe('vrmc-bridge');
+    expect(value('CFBundleIdentifier')).toBe('studio.eion.vrmc.bridge');
+    expect(value('CFBundleShortVersionString')).toBe('1.2.3');
+  });
+
+  it('is parseable XML', () => {
+    // Cheap structural check: every tag opened is closed, in order.
+    const stack: string[] = [];
+    for (const match of plist.matchAll(/<(\/?)([a-zA-Z]+)[^>]*?(\/?)>/g)) {
+      const [, closing, name, selfClosing] = match;
+      if (name === undefined || name === 'xml' || name === '!DOCTYPE') continue;
+      if (selfClosing === '/') continue;
+      if (closing === '/') expect(stack.pop()).toBe(name);
+      else stack.push(name);
+    }
+    expect(stack).toEqual([]);
+  });
+});
 
 describe('the installer file manifest', () => {
   const xml: string = buildFragment(STAGED);

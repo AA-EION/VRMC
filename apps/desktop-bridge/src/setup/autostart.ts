@@ -5,6 +5,7 @@ import { existsSync, mkdirSync, unlinkSync, writeFileSync } from 'node:fs';
 import { homedir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { promisify } from 'node:util';
+import { findHelper } from '../tray/helperPath.js';
 
 const run = promisify(execFile);
 
@@ -23,7 +24,15 @@ const run = promisify(execFile);
  * talks to.
  */
 
-export type AutostartState = 'on' | 'off' | 'unsupported';
+/**
+ * `approval` is macOS-only and is not a failure.
+ *
+ * SMAppService can accept a registration and still not run it: the user has to
+ * allow it in System Settings first. Reporting that as `on` would tell someone
+ * the bridge will come back after a reboot when it will not, and reporting it
+ * as `off` would send them to a switch that is already flipped.
+ */
+export type AutostartState = 'on' | 'off' | 'approval' | 'unsupported';
 
 /** The bundle identifier, and the LaunchAgent's label. */
 const LABEL = 'studio.eion.vrmc.bridge';
@@ -104,6 +113,8 @@ export async function autostartState(): Promise<AutostartState> {
   if (!autostartSupported()) return 'unsupported';
 
   if (process.platform === 'darwin') {
+    const viaService = await loginItem('status');
+    if (viaService !== null) return viaService;
     return existsSync(agentPath()) ? 'on' : 'off';
   }
 
@@ -128,6 +139,11 @@ export async function enableAutostart(): Promise<boolean> {
   const target = launchTarget();
 
   if (process.platform === 'darwin') {
+    const viaService = await loginItem('enable');
+    // `approval` counts as done: the registration exists and the rest is the
+    // user's to allow. Only a helper that could not answer at all falls back.
+    if (viaService !== null) return viaService !== 'off';
+
     const path = agentPath();
     try {
       mkdirSync(dirname(path), { recursive: true });
@@ -169,6 +185,11 @@ export async function disableAutostart(): Promise<boolean> {
   if (!autostartSupported()) return false;
 
   if (process.platform === 'darwin') {
+    // Both, in order. A machine set up by an older build has a plist as well
+    // as, or instead of, a service registration, and leaving either behind is
+    // a login item the user has just switched off still starting.
+    await loginItem('disable');
+
     const path = agentPath();
     try {
       if (existsSync(path)) {
@@ -202,10 +223,45 @@ export async function disableAutostart(): Promise<boolean> {
 export async function toggleAutostart(): Promise<AutostartState> {
   const state = await autostartState();
   if (state === 'unsupported') return state;
-  if (state === 'on') {
+  // `approval` is registered already, so the meaningful opposite is off.
+  if (state === 'on' || state === 'approval') {
     await disableAutostart();
     return 'off';
   }
   await enableAutostart();
-  return (await autostartState()) === 'on' ? 'on' : 'off';
+  const now = await autostartState();
+  return now === 'on' || now === 'approval' ? now : 'off';
+}
+
+/**
+ * Ask the tray helper to register the login item, and report what happened.
+ *
+ * Returns null when the helper could not answer — no helper in this build, an
+ * older one that does not know the flag, or a system where the service refused
+ * — and the LaunchAgent above is used instead. That fallback is not
+ * decoration: SMAppService can fail outright on an unsigned build, which is
+ * exactly what a downloaded release currently is.
+ *
+ * Not routed through TrayController on purpose. This runs at first launch,
+ * before there is an icon, and the answer is needed whether or not the user
+ * ends up with a menu bar item at all.
+ */
+async function loginItem(verb: 'status' | 'enable' | 'disable'): Promise<AutostartState | null> {
+  if (process.platform !== 'darwin') return null;
+  const helper = findHelper();
+  if (helper === null) return null;
+
+  try {
+    const { stdout } = await run(helper, ['--login-item', verb], { timeout: 5000 });
+    const last = stdout.trim().split('\n').pop() ?? '{}';
+    const parsed = JSON.parse(last) as { state?: string };
+    if (parsed.state === 'on' || parsed.state === 'off' || parsed.state === 'approval') {
+      return parsed.state;
+    }
+    return null;
+  } catch {
+    // A non-zero exit carries the reason on stdout, but by then the answer is
+    // the same either way: this path did not work, so use the other one.
+    return null;
+  }
 }

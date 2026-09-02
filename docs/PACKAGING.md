@@ -6,7 +6,7 @@ package` produces a folder per platform under
 
 | Target | Output |
 |---|---|
-| `macos-arm64`, `macos-x64` | `VRMC Bridge.app`, shipped in a `.dmg` |
+| `macos-arm64` | `VRMC Bridge.app`, shipped in a `.dmg`. Targets macOS 26; `macos-x64` still builds but is not released, because the Intel Macs that run 26 are a handful of late models. |
 | `windows-x64` | `vrmc-bridge.exe`, shipped in `VRMC-Setup.msi` |
 | `linux-x64` | `vrmc-bridge` |
 
@@ -51,11 +51,23 @@ Neither platform asks the user to think about where the bridge lives.
 is marked `LSUIElement`: a menu bar item, no Dock tile, no application menu,
 and no window that could take focus from the DAW. (`LSBackgroundOnly` would
 also hide the Dock tile, but it forbids *any* interface — the status item
-simply never appears.) Opening it the first time from Applications registers a
-LaunchAgent so it comes back after a reboot; the menu shows that as a ticked
-"Start at login" you can turn off. `setup/firstRun.ts` skips registration when
-the app is still running from the disk image or a Downloads folder, because a
-login item recording a path that is about to change is worse than none.
+simply never appears.) Opening it the first time from Applications registers it
+as a login item so it comes back after a reboot; the menu shows that as a
+ticked "Start at login" you can turn off. `setup/firstRun.ts` skips
+registration when the app is still running from the disk image or a Downloads
+folder, because a login item recording a path that is about to change is worse
+than none.
+
+That registration goes through `SMAppService`, which is why the tray helper has
+a `--login-item` mode: the API is Swift-only and needs a bundle to point at,
+and the helper is already inside one. Registering this way is what puts VRMC in
+System Settings → General → Login Items under its own name, where it can be
+turned off like anything else — a hand-written LaunchAgent appears there as an
+opaque row at best. The old LaunchAgent path is still the fallback, because
+`SMAppService` can refuse outright on an unsigned build, which is what a
+downloaded release currently is. `SMAppService` can also register and then wait
+for the user to allow it; the bridge reports that as its own state rather than
+claiming the setting took.
 
 **Windows** ships an MSI built by `build/installer/`. It installs to Program
 Files, adds a Start menu shortcut, writes a per-user `Run` entry, and launches

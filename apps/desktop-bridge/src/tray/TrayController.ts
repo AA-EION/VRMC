@@ -1,8 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 import { spawn, type ChildProcessWithoutNullStreams } from 'node:child_process';
-import { existsSync } from 'node:fs';
-import { dirname, join } from 'node:path';
+import { findHelper } from './helperPath.js';
 import { parseTrayEvent, type TrayCommand, type TrayItem } from './protocol.js';
 
 export interface TrayOptions {
@@ -10,30 +9,6 @@ export interface TrayOptions {
   /** The user chose Quit from the menu. */
   onQuit: () => void;
   onLog: (message: string) => void;
-}
-
-/**
- * Where the helper lives, in the order worth trying.
- *
- * Packaged first: beside the executable is where the packaging step puts it,
- * and inside a `.app` that is `Contents/MacOS`, the same directory. Then the
- * build output, so `pnpm start` during development picks up a helper compiled
- * by `native/build.sh` without anything being installed.
- */
-function helperCandidates(): string[] {
-  const name = process.platform === 'win32' ? 'vrmc-tray.exe' : 'vrmc-tray';
-  const beside = dirname(process.execPath);
-  const out: string[] = [join(beside, name)];
-
-  // Only meaningful when running from source; in a packaged binary this
-  // resolves inside the virtual filesystem and simply does not exist.
-  try {
-    const here = dirname(new URL(import.meta.url).pathname);
-    out.push(join(here, '../../native/build', name));
-  } catch {
-    // No import.meta.url under some bundlers; the packaged path above stands.
-  }
-  return out;
 }
 
 /**
@@ -64,8 +39,8 @@ export class TrayController {
 
   /** Launch the helper. Returns false when this platform has none installed. */
   start(): boolean {
-    const path = helperCandidates().find((p) => existsSync(p));
-    if (path === undefined) return false;
+    const path = findHelper();
+    if (path === null) return false;
 
     let child: ChildProcessWithoutNullStreams;
     try {

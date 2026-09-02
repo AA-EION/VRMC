@@ -19,10 +19,12 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-latest
+          # macos-26, not macos-latest: the app targets macOS 26, and a runner
+          # image one version behind carries an SDK that cannot compile for it
+          # — swiftc refuses, the tray helper is not produced, and the assertion
+          # below turns that into a failed release rather than a silent one.
+          - os: macos-26
             target: macos-arm64
-          - os: macos-13
-            target: macos-x64
           - os: windows-latest
             target: windows-x64
           - os: ubuntu-latest

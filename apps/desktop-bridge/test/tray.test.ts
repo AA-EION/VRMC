@@ -79,6 +79,17 @@ describe('the tray menu', () => {
     expect(on?.checked).toBe(true);
   });
 
+  it('does not tick Start at login while macOS is still waiting for approval', () => {
+    // SMAppService can accept a registration and hold it until the user allows
+    // it in Settings. A tick there would promise the bridge comes back after a
+    // reboot, which it does not, so the row says where to go instead.
+    const items = buildMenu({ ...READY, autostart: 'approval' });
+    expect(items.find((i) => i.id === TrayAction.AUTOSTART)?.checked).toBe(false);
+    const note = items.find((i) => i.id === 'autostart-approval');
+    expect(note?.label).toMatch(/Login Items/);
+    expect(note?.enabled).toBe(false);
+  });
+
   it('hides Start at login where it cannot be honoured', () => {
     // Offering a setting that silently does nothing is worse than not offering
     // it: the user believes the bridge will come back and it will not.

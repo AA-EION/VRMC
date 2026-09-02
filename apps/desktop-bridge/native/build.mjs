@@ -19,6 +19,7 @@ import { mkdir, rm } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { dirname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { MACOS_DEPLOYMENT_TARGET } from './target.mjs';
 
 const execFile = promisify(execFileCb);
 const here = dirname(fileURLToPath(import.meta.url));
@@ -46,16 +47,33 @@ async function buildMacOS() {
     console.warn('  ! swiftc not found; install the Xcode command line tools');
     return false;
   }
+
+  /*
+   * Refuse an SDK that cannot build what we target.
+   *
+   * swiftc's own message for this ("deployment target is newer than SDK") is
+   * clear enough, but it arrives after a compile and among other output. The
+   * cause is always the same and always environmental — a runner image or an
+   * Xcode a version behind — so it is worth naming before anything is built.
+   */
+  const sdk = await run('xcrun', ['--sdk', 'macosx', '--show-sdk-version']);
+  const sdkVersion = sdk === null ? '' : sdk.trim();
+  if (sdkVersion !== '' && Number.parseFloat(sdkVersion) < Number.parseFloat(MACOS_DEPLOYMENT_TARGET)) {
+    console.warn(
+      `  ! the macOS ${sdkVersion} SDK cannot build for macOS ${MACOS_DEPLOYMENT_TARGET};` +
+        ' install Xcode 26 or build on a macos-26 runner',
+    );
+    return false;
+  }
+
   const out = join(outDir, 'vrmc-tray');
   // -O rather than -Onone: this is a released binary, and the difference in
   // launch time is the difference between the icon being there when the user
   // looks and appearing a moment later.
   const result = await run('swiftc', [
     '-O',
-    // The status item API is stable well below the current SDK, and pinning the
-    // floor keeps the helper usable on the same macOS versions as the bridge.
     '-target',
-    `${process.arch === 'arm64' ? 'arm64' : 'x86_64'}-apple-macosx11.0`,
+    `${process.arch === 'arm64' ? 'arm64' : 'x86_64'}-apple-macosx${MACOS_DEPLOYMENT_TARGET}`,
     join(here, 'macos/main.swift'),
     '-o',
     out,

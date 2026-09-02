@@ -27,6 +27,7 @@ import { cp, mkdir, readFile, rm, writeFile, chmod, readdir } from 'node:fs/prom
 import { existsSync } from 'node:fs';
 import { dirname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
+import { infoPlist } from './infoPlist.mjs';
 
 const exec = promisify(execCb);
 const here = dirname(fileURLToPath(import.meta.url));
@@ -51,6 +52,16 @@ const VERSION = pkg.version ?? '0.0.0';
  */
 const TARGETS = [
   { slug: 'macos-arm64', pkg: 'node22-macos-arm64', platform: 'darwin', arch: 'arm64' },
+  /*
+   * Buildable, but not released.
+   *
+   * The app targets macOS 26, and the Intel Macs that run macOS 26 are a
+   * handful of late models. An Intel slice built to that floor would reach
+   * almost nobody, and one built to a lower floor would be a second product
+   * with a different set of APIs available to it. It stays here because the
+   * packaging works and someone may want it locally; the release workflow does
+   * not ask for it.
+   */
   { slug: 'macos-x64', pkg: 'node22-macos-x64', platform: 'darwin', arch: 'x64' },
   { slug: 'windows-x64', pkg: 'node22-win-x64', platform: 'win32', arch: 'x64' },
   { slug: 'linux-x64', pkg: 'node22-linux-x64', platform: 'linux', arch: 'x64' },
@@ -470,7 +481,7 @@ async function buildTarget(target) {
   }
 
   if (appDir !== null) {
-    await writeFile(join(appDir, 'Info.plist'), infoPlist(), 'utf8');
+    await writeFile(join(appDir, 'Info.plist'), infoPlist(VERSION), 'utf8');
     // The icon is what Finder shows in Applications and what the Get Info
     // panel uses. The menu bar draws its own, so this is never seen there.
     const icns = join(root, '../../assets/icon/vrmc.icns');
@@ -488,34 +499,6 @@ async function buildTarget(target) {
   console.log(`  -> ${stage}`);
 }
 
-function infoPlist() {
-  return `<?xml version="1.0" encoding="UTF-8"?>
-<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
-<plist version="1.0">
-<dict>
-  <key>CFBundleName</key><string>VRMC Bridge</string>
-  <key>CFBundleDisplayName</key><string>VRMC Bridge</string>
-  <key>CFBundleIdentifier</key><string>studio.eion.vrmc.bridge</string>
-  <key>CFBundleVersion</key><string>${VERSION}</string>
-  <key>CFBundleShortVersionString</key><string>${VERSION}</string>
-  <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleExecutable</key><string>vrmc-bridge</string>
-  <key>CFBundleIconFile</key><string>vrmc.icns</string>
-  <key>LSMinimumSystemVersion</key><string>11.0</string>
-  <!--
-    LSUIElement, not LSBackgroundOnly.
-
-    Both hide the Dock tile, but LSBackgroundOnly forbids any user interface at
-    all — including the status item, which simply never appears. LSUIElement is
-    the tray-only policy: a menu bar item, no Dock icon, no application menu,
-    and no window that could steal focus from the DAW.
-  -->
-  <key>LSUIElement</key><true/>
-  <key>NSHighResolutionCapable</key><true/>
-</dict>
-</plist>
-`;
-}
 
 function readmeFor(target) {
   const run =

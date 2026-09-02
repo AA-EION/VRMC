@@ -65,8 +65,17 @@ export function buildMenu(state: TrayState): TrayItem[] {
     items.push({
       id: TrayAction.AUTOSTART,
       label: 'Start at login',
+      // `approval` is registered but held: ticking it would say the bridge
+      // comes back after a reboot, and it does not until the user allows it.
       checked: state.autostart === 'on',
     });
+    if (state.autostart === 'approval') {
+      items.push({
+        id: 'autostart-approval',
+        label: '   allow it in Settings › General › Login Items',
+        enabled: false,
+      });
+    }
   }
 
   items.push({ id: 'sep-quit', label: '', separator: true });
