@@ -230,7 +230,9 @@ const scene = await page.evaluate(() => {
       instanced++;
       totalInstances += o.count;
       if (o.instanceColor) withInstanceColor++;
-    } else if (o.isMesh) {
+    } else if (o.isMesh && o.name !== 'backdrop-shell') {
+      // The room's shell is not an instrument, and the count below is about
+      // instruments.
       meshes++;
     }
   });
@@ -255,6 +257,9 @@ if (scene.ok) {
   check('instance colours allocated by the highlighter', scene.withInstanceColor === 2,
     `${scene.withInstanceColor}/2`);
   // 2 backing plates + 1 label plane (pads only) + 4 knobs x 2 meshes each.
+  // The room's own shell is excluded where this is gathered: this check is
+  // about the instruments, and a count that quietly includes the backdrop stops
+  // saying what its name says the moment the room gains anything.
   check('knobs, plates and labels present', scene.meshes === 11, `${scene.meshes} plain meshes`);
   check('geometry rasterised', scene.triangles > 400, `${scene.triangles} triangles/frame`);
 }
@@ -318,13 +323,27 @@ if (framing.ok) {
  * So the theme is pinned to dark for the reading. The scene's own colours do
  * not depend on it; only the paper behind them does.
  */
-await page.evaluate(() => {
+await page.evaluate(async () => {
   // `data-theme-ready` is what arms the 720 ms crossing. Removed first, so the
   // change lands on this frame instead of easing through mid-grey — a grey page
   // is above the `nonBackground` threshold, and sampling part-way through the
   // ease would measure the crossing rather than the scene.
   document.documentElement.removeAttribute('data-theme-ready');
-  document.documentElement.dataset.theme = 'dark';
+  /*
+   * Driven through the real control rather than by writing `data-theme`.
+   *
+   * The attribute is an *output* of brand/theme.ts, not an input: setting it by
+   * hand repaints the CSS and leaves the store still believing it is light, so
+   * anything reading the store — the galaxy's ink, the room's own surface —
+   * carries on in the other theme entirely. That divergence made the full-VR
+   * check below pass against a bone-white room in which a buried keyboard was
+   * every bit as near-white as a drawn one.
+   */
+  const control = document.querySelector('button.theme');
+  for (let i = 0; i < 5 && document.documentElement.dataset.theme !== 'dark'; i++) {
+    control.click();
+    await new Promise((r) => setTimeout(r, 30));
+  }
 });
 await page.addStyleTag({ content: '.overlay { display: none !important; }' });
 await page.waitForTimeout(300);
@@ -672,6 +691,205 @@ const keypad = await page.evaluate(async () => {
     typed: controller.value,
     instanced,
   };
+});
+
+/*
+ * The room, and the switch into it.
+ *
+ * The claim being tested is the one the whole feature rests on: going fully
+ * immersive is a *render* decision inside the existing session, so the shell
+ * and the clouds are already in the scene graph while the player is in
+ * passthrough — invisible and costing nothing — and the toggle only changes
+ * how opaque they are. If this ever starts building the galaxy on the toggle,
+ * the switch stops being free and starts being a stall.
+ */
+const backdrop = await page.evaluate(async () => {
+  const h = window.__vrmc;
+  if (!h) return { ok: false, reason: 'no handle' };
+
+  const survey = () => {
+    let points = 0;
+    let particles = 0;
+    let visiblePoints = 0;
+    let shellAlpha = null;
+    h.scene.traverse((o) => {
+      if (o.isPoints) {
+        points++;
+        particles += o.geometry.getAttribute('position')?.count ?? 0;
+        if (o.visible) visiblePoints++;
+      }
+      if (o.name === 'backdrop-shell') shellAlpha = o.material?.uniforms?.uAlpha?.value ?? null;
+    });
+    return { points, particles, visiblePoints, shellAlpha };
+  };
+
+  /*
+   * Wait for the fade to *settle*, not for a duration.
+   *
+   * The crossfade advances in frame time, and its per-frame step is clamped so
+   * that a hitch cannot make the room jump. Under SwiftShader a frame can take
+   * most of a second, so a fixed wall-clock wait lands wherever the software
+   * renderer happened to get to — 0.994 on the first run of this, which is a
+   * fact about the test host and not about the code. On a headset at 90 Hz the
+   * same 720 ms is 65 frames and long finished.
+   */
+  const settle = async (want) => {
+    for (let i = 0; i < 400; i++) {
+      const state = survey();
+      if (state.shellAlpha === want) return state;
+      await new Promise((r) => requestAnimationFrame(r));
+    }
+    return survey();
+  };
+
+  const before = survey();
+  const button = [...document.querySelectorAll('.segmented button')].find(
+    (b) => b.textContent.trim() === 'Full VR',
+  );
+  if (!button) return { ok: false, reason: 'no Full VR control' };
+  button.click();
+  const after = await settle(1);
+
+  const back = [...document.querySelectorAll('.segmented button')].find(
+    (b) => b.textContent.trim() === 'Your room',
+  );
+  back.click();
+  const returned = await settle(0);
+
+  return { ok: true, before, after, returned };
+});
+
+check('the galaxy is built before it is asked for', backdrop.ok && backdrop.before.points === 3,
+  backdrop.ok ? `${backdrop.before.points} clouds, ${backdrop.before.particles} particles` : backdrop.reason);
+if (backdrop.ok) {
+  check('the room costs nothing while it is not showing',
+    backdrop.before.visiblePoints === 0 && backdrop.before.shellAlpha === 0,
+    `${backdrop.before.visiblePoints} visible clouds, shell alpha ${backdrop.before.shellAlpha}`);
+  // Fully opaque, not merely nearly: at 0.999 the compositor is still blending
+  // a thousandth of the real room in, which reads as a dirty lens.
+  check('full VR reaches a completely opaque room',
+    backdrop.after.shellAlpha === 1 && backdrop.after.visiblePoints === 3,
+    `shell alpha ${backdrop.after.shellAlpha}, ${backdrop.after.visiblePoints} clouds drawn`);
+  check('switching back leaves the buffer transparent again',
+    backdrop.returned.shellAlpha === 0 && backdrop.returned.visiblePoints === 0,
+    `shell alpha ${backdrop.returned.shellAlpha}, ${backdrop.returned.visiblePoints} clouds drawn`);
+  check('no cloud was rebuilt by the switch',
+    backdrop.after.particles === backdrop.before.particles &&
+      backdrop.returned.particles === backdrop.before.particles,
+    `${backdrop.before.particles} -> ${backdrop.after.particles} -> ${backdrop.returned.particles}`);
+}
+
+/*
+ * The instruments survive the room.
+ *
+ * This is here because the room once ate them and every other check passed.
+ * three draws all opaque geometry first and only then the transparent objects,
+ * sorted among themselves — so a transparent shell with its depth test off is
+ * drawn *after* the pads and straight over them. What that looked like was a
+ * galaxy with the pad labels floating correctly in it (labels are transparent,
+ * and sorted after the shell) and solid black where every pad and every white
+ * key should have been. Counting the keys through the room is the cheapest
+ * thing that would have caught it.
+ */
+const throughTheRoom = await page.evaluate(async () => {
+  const button = [...document.querySelectorAll('.segmented button')].find(
+    (b) => b.textContent.trim() === 'Full VR',
+  );
+  button.click();
+  for (let i = 0; i < 600; i++) {
+    let alpha = null;
+    window.__vrmc.scene.traverse((o) => {
+      if (o.name === 'backdrop-shell') alpha = o.material?.uniforms?.uAlpha?.value ?? null;
+    });
+    if (alpha === 1) return true;
+    await new Promise((r) => requestAnimationFrame(r));
+  }
+  return false;
+});
+check('the room reached full opacity for the reading', throughTheRoom === true);
+
+/*
+ * Measured inside the keyboard's own projected box.
+ *
+ * This check exists because the room once ate the instruments and everything
+ * else still passed, so it is worth saying what it took to make it actually
+ * discriminate. A plain tally of near-white pixels does not: on the dark theme
+ * the galaxy's ink is Absolute White, so a million particle pixels clear the
+ * threshold whether or not the pads are buried underneath them. The longest
+ * unbroken *run* does not either — the white keys are drawn as separate boxes
+ * with a seam between them, so one key is about eighteen pixels wide and the
+ * only long run in the frame belonged to the bone-white shell that was doing
+ * the burying.
+ *
+ * What does discriminate is where the white is. The keys are projected to a
+ * screen box and the near-white inside it is counted: thousands when the
+ * keyboard is drawn, a scattering of stray particles when the room is over it.
+ */
+const keyBox = await page.evaluate(() => {
+  const h = window.__vrmc;
+  const keys = h?.engine?.instruments?.find((i) => i.id === 'keys');
+  if (!keys) return null;
+  const [ox, oy, oz] = keys.transform.origin;
+  const [qx, , , qw] = keys.transform.quaternion;
+  const th = 2 * Math.atan2(qx, qw);
+  const cos = Math.cos(th);
+  const sin = Math.sin(th);
+  let minX = 1;
+  let maxX = -1;
+  let minY = 1;
+  let maxY = -1;
+  // The four corners of the surface, in its own frame, projected out.
+  for (const [lx, ly] of [
+    [0, 0],
+    [keys.locator.width, 0],
+    [0, keys.locator.height],
+    [keys.locator.width, keys.locator.height],
+  ]) {
+    const v = new h.THREE.Vector3(ox + lx, oy + ly * cos, oz + ly * sin).project(h.camera);
+    minX = Math.min(minX, v.x);
+    maxX = Math.max(maxX, v.x);
+    minY = Math.min(minY, v.y);
+    maxY = Math.max(maxY, v.y);
+  }
+  return { minX, maxX, minY, maxY };
+});
+
+const roomShot = (await page.screenshot()).toString('base64');
+const inBox = await page.evaluate(
+  async ({ b64, box }) => {
+    const img = new Image();
+    img.src = `data:image/png;base64,${b64}`;
+    await img.decode();
+    const off = document.createElement('canvas');
+    off.width = img.width;
+    off.height = img.height;
+    const ctx = off.getContext('2d');
+    ctx.drawImage(img, 0, 0);
+    const px = (ndc) => Math.round(((ndc + 1) / 2) * (img.width - 1));
+    const py = (ndc) => Math.round(((1 - ndc) / 2) * (img.height - 1));
+    const x0 = Math.max(0, px(box.minX));
+    const x1 = Math.min(img.width - 1, px(box.maxX));
+    const y0 = Math.max(0, py(box.maxY));
+    const y1 = Math.min(img.height - 1, py(box.minY));
+    if (x1 <= x0 || y1 <= y0) return { bright: 0, area: 0 };
+    const { data } = ctx.getImageData(x0, y0, x1 - x0 + 1, y1 - y0 + 1);
+    let bright = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      if (data[i] > 200 && data[i + 1] > 200 && data[i + 2] > 200) bright++;
+    }
+    return { bright, area: (x1 - x0 + 1) * (y1 - y0 + 1) };
+  },
+  { b64: roomShot, box: keyBox ?? { minX: 0, maxX: 0, minY: 0, maxY: 0 } },
+);
+
+check('the instruments are still drawn inside the full-VR room',
+  keyBox !== null && inBox.bright > inBox.area * 0.25,
+  `${inBox.bright} near-white px in the keyboard's ${inBox.area}px box`);
+
+await page.evaluate(() => {
+  [...document.querySelectorAll('.segmented button')]
+    .find((b) => b.textContent.trim() === 'Your room')
+    .click();
 });
 
 check('pairing keypad renders in the scene', keypad.ok,

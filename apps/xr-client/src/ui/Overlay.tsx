@@ -4,7 +4,7 @@ import { PAIRING_CODE_LENGTH, isPairingCode, normalisePairingCode } from '@vrmc/
 import { DeviceStatus } from '@vrmc/protocol';
 import type { LaunchpadInstance } from '../devices/LaunchpadInstance.js';
 import type { LinkStatus } from '../net/BridgeLink.js';
-import type { XrSupport } from '../xr/session.js';
+import type { XrMode, XrSupport } from '../xr/session.js';
 import { Logo } from '../brand/Logo.js';
 import { SEAL } from '../brand/tokens.js';
 import { useTheme, type ThemePref } from '../brand/theme.js';
@@ -26,6 +26,8 @@ export interface OverlayProps {
   onPair: (code: string) => void;
   pairingBusy: boolean;
   pairingNote: string;
+  mode: XrMode;
+  onModeChange: (mode: XrMode) => void;
 }
 
 /** The three theme states, named the way the identity names them. */
@@ -69,6 +71,8 @@ export function Overlay(props: OverlayProps): React.ReactElement {
     onPair,
     pairingBusy,
     pairingNote,
+    mode,
+    onModeChange,
   } = props;
 
   const connected = status.state === 'open';
@@ -160,11 +164,43 @@ export function Overlay(props: OverlayProps): React.ReactElement {
           <p className="warn">{support.reason}</p>
         )}
         {sessionActive && (
-          <p className="hint">
+          <p className="hint spaced">
             {passthrough ? 'Passthrough active.' : 'Running without passthrough.'} Take the headset
             off or press the menu button to end the session.
           </p>
         )}
+
+        {/*
+          The room, and it is a choice rather than a fallback.
+          `startSession` still drops to immersive-vr on a headset that cannot
+          do passthrough, but that is a different thing entirely from someone
+          deciding they would rather work in the dark. This switch is live in
+          both directions at any moment, in or out of a session, and it does
+          not touch the session at all — see xr/Backdrop.tsx.
+        */}
+        <div className="segmented" role="group" aria-label="Room">
+          <button
+            type="button"
+            className={mode === 'passthrough' ? 'on' : ''}
+            aria-pressed={mode === 'passthrough'}
+            onClick={() => onModeChange('passthrough')}
+          >
+            Your room
+          </button>
+          <button
+            type="button"
+            className={mode === 'immersive' ? 'on' : ''}
+            aria-pressed={mode === 'immersive'}
+            onClick={() => onModeChange('immersive')}
+          >
+            Full VR
+          </button>
+        </div>
+        <p className="hint spaced">
+          {mode === 'immersive'
+            ? 'The instruments sit in the EION Studios galaxy. Switching back is instant and does not interrupt the MIDI connection.'
+            : 'The instruments sit in the room around you. Switch to full VR at any time, mid-session, without dropping the connection.'}
+        </p>
       </section>
 
       <section className="card">

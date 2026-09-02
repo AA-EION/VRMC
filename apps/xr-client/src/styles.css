@@ -456,3 +456,40 @@ code {
   letter-spacing: var(--eion-track-eyebrow);
   text-transform: uppercase;
 }
+
+/* ---- A pair of exclusive choices -----------------------------------------
+   Two cut boxes sharing one rule between them, and the chosen one inverted to
+   the ink. There is no third state and no tint: with the palette monochrome,
+   «selected» has to be the strongest mark the system owns, and the solid ink
+   is exactly that — the same emphasis `button.primary` spends, for the same
+   reason. */
+
+.segmented {
+  display: flex;
+  margin-top: var(--s-2);
+}
+
+.segmented button {
+  flex: 1;
+  border-radius: 0;
+  text-transform: uppercase;
+  letter-spacing: var(--eion-track-eyebrow);
+  font-size: 0.7rem;
+}
+
+/* The shared edge is drawn once, not twice — two abutting hairlines read as
+   one heavy rule, which is a weight this system does not have. */
+.segmented button + button {
+  border-left: 0;
+}
+
+.segmented button.on {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--surface);
+}
+
+.segmented button.on:hover {
+  background: var(--ink-2);
+  border-color: var(--ink-2);
+}

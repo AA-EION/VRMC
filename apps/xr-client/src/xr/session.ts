@@ -12,6 +12,15 @@
  *     transparent. A skybox, a clear colour with alpha 1, or a fullscreen quad
  *     will each silently turn the app back into VR. That is why the renderer is
  *     configured with `alpha: true` and a clear alpha of 0.
+ *
+ * Point 2 is also how full VR works, and it is worth being explicit that this
+ * is deliberate rather than a happy accident. Going fully immersive does not
+ * request a different session: it draws the opaque shell that point 2 warns
+ * about, and fades it in. See `Backdrop.tsx`. A session swap would have torn
+ * down the reference space, the input sources and — because the page's connect
+ * effect is keyed to the engine — nothing about the MIDI link at all, but it
+ * would still have taken the player out of the headset's rendering for as long
+ * as the runtime took to hand back a second session, mid-phrase.
  */
 
 export interface XrSupport {
@@ -39,8 +48,49 @@ export interface XrSupport {
  */
 const SESSION_INIT: XRSessionInit = {
   requiredFeatures: ['hand-tracking'],
-  optionalFeatures: ['local-floor', 'bounded-floor', 'anchors', 'plane-detection'],
+  optionalFeatures: [
+    'local-floor',
+    'bounded-floor',
+    'anchors',
+    'plane-detection',
+    // Dropping a device onto the real desk needs a ray cast against the room,
+    // and a feature that is not asked for here cannot be used later however
+    // well the runtime supports it — `requestHitTestSource` on a session
+    // without it simply rejects. Quest's browser has backed hit testing with
+    // the Depth API since Horizon 40.4, so it resolves without waiting for a
+    // scene mesh to exist.
+    'hit-test',
+    // Environment occlusion. Optional in the strongest sense: it is best-effort
+    // even where it is supported (see `Occlusion.tsx`), and the app is
+    // completely usable without it.
+    'depth-sensing',
+  ],
+  /*
+   * Only read when 'depth-sensing' is granted, and both fields are required by
+   * the spec whenever it is asked for — a request that omits them is rejected
+   * outright, which would take the whole session down with it rather than just
+   * the feature.
+   *
+   * GPU first because that is the only mode three can consume: WebXRManager
+   * initialises its depth-sensing module solely when `session.depthUsage` is
+   * 'gpu-optimized'. 'luminance-alpha' first because every user agent that
+   * supports the API at all must support it, so the preference list can never
+   * come back empty.
+   */
+  depthSensing: {
+    usagePreference: ['gpu-optimized', 'cpu-optimized'],
+    dataFormatPreference: ['luminance-alpha', 'float32'],
+  },
 };
+
+/**
+ * Which room the player is in.
+ *
+ * Not which session: there is one session and it is always `immersive-ar` where
+ * the device can give us one. This is a rendering state, switchable at any
+ * moment without the link, the roster or a held note noticing.
+ */
+export type XrMode = 'passthrough' | 'immersive';
 
 export async function detectSupport(): Promise<XrSupport> {
   const xr = navigator.xr;

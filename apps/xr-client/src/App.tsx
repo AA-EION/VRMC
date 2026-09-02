@@ -6,7 +6,13 @@ import type { LaunchpadInstance } from './devices/LaunchpadInstance.js';
 import { Scene } from './Scene.js';
 import { Overlay } from './ui/Overlay.js';
 import type { LinkStatus } from './net/BridgeLink.js';
-import { detectSupport, isBlending, startSession, type XrSupport } from './xr/session.js';
+import {
+  detectSupport,
+  isBlending,
+  startSession,
+  type XrMode,
+  type XrSupport,
+} from './xr/session.js';
 import { PairingError, resolvePairingCode } from './net/pairing.js';
 import { rtcTransport, webSocketTransport } from './net/Transport.js';
 import { KeypadController } from './ui/KeypadController.js';
@@ -22,6 +28,15 @@ const CODE_STORAGE_KEY = 'vrmc.pairingCode';
 
 /** Remember a manually entered address, for the advanced path. */
 const URL_STORAGE_KEY = 'vrmc.bridgeUrl';
+
+/**
+ * Remember which room the player likes.
+ *
+ * Someone who works in the full room wants the full room the next time too,
+ * and the alternative is asking them to make the same choice at the start of
+ * every session — which is the kind of thing this project exists not to do.
+ */
+const MODE_STORAGE_KEY = 'vrmc.xrMode';
 
 /** Read a remembered value, tolerating storage being unavailable. */
 function recall(key: string): string {
@@ -77,6 +92,14 @@ export function App(): React.ReactElement {
   const [status, setStatus] = useState<LinkStatus>(() => engine.link.status());
   const [sessionActive, setSessionActive] = useState(false);
   const [passthrough, setPassthrough] = useState(false);
+  /*
+   * Which room is showing. Not which session — see xr/session.ts and
+   * xr/Backdrop.tsx. This flips freely at any point, in or out of a session,
+   * and nothing about the link, the roster or a sounding note depends on it.
+   */
+  const [mode, setMode] = useState<XrMode>(() =>
+    recall(MODE_STORAGE_KEY) === 'immersive' ? 'immersive' : 'passthrough',
+  );
   const [error, setError] = useState('');
 
   useEffect(() => {
@@ -192,6 +215,11 @@ export function App(): React.ReactElement {
   }, [engine]);
 
   const handlePanic = useCallback(() => engine.allNotesOff(), [engine]);
+
+  const handleMode = useCallback((next: XrMode) => {
+    setMode(next);
+    remember(MODE_STORAGE_KEY, next);
+  }, []);
 
   /**
    * Turn a pairing code into a live connection.
@@ -320,7 +348,15 @@ export function App(): React.ReactElement {
         // It still has to frame the instruments, or the page looks broken
         // before you put the headset on: aimed straight down -Z from standing
         // height, the panels sit below the frustum and nothing is visible.
-        camera={{ fov: 60, near: 0.01, far: 20, position: PREVIEW_CAMERA }}
+        /*
+         * far reaches 100 m because the galaxy's far field lives between 26
+         * and 60 (see xr/galaxy.ts). At 20 that shell was not dimmed but
+         * clipped, in the projection, before any depth test ran. The precision
+         * cost is nil at the range that matters: with near at 1 cm the depth
+         * buffer still resolves to about a micron half a metre out, and the
+         * pads are five millimetres apart.
+         */
+        camera={{ fov: 60, near: 0.01, far: 100, position: PREVIEW_CAMERA }}
         onCreated={({ gl, scene, camera }) => {
           rendererRef.current = gl;
           gl.setClearAlpha(0);
@@ -334,6 +370,7 @@ export function App(): React.ReactElement {
         <Scene
           engine={engine}
           devices={devices}
+          mode={mode}
           keypad={
             keypadVisible
               ? {
@@ -359,6 +396,8 @@ export function App(): React.ReactElement {
         onConnect={handleConnect}
         onEnterXR={() => void handleEnterXR()}
         onPanic={handlePanic}
+        mode={mode}
+        onModeChange={handleMode}
         devices={devices}
         onAddDevice={(model) => engine.addDevice(model)}
         onRemoveDevice={(id) => engine.removeDevice(id)}

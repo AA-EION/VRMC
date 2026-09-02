@@ -6,6 +6,8 @@ import { InstrumentSurface } from './devices/InstrumentSurface.js';
 import { LaunchpadSurface } from './devices/LaunchpadSurface.js';
 import type { LaunchpadInstance } from './devices/LaunchpadInstance.js';
 import type { Engine } from './Engine.js';
+import { Backdrop } from './xr/Backdrop.js';
+import type { XrMode } from './xr/session.js';
 import { ConnectPanel } from './ui/ConnectPanel.js';
 import type { KeypadController } from './ui/KeypadController.js';
 
@@ -48,6 +50,14 @@ export interface SceneProps {
    * of an instrument that is already working would be in the way.
    */
   keypad?: KeypadView | null;
+  /**
+   * Which room to draw.
+   *
+   * `immersive` fades an opaque shell and the galaxy in behind everything;
+   * `passthrough` fades them out and leaves the buffer transparent, which is
+   * all passthrough has ever been. The session is the same one either way.
+   */
+  mode?: XrMode;
 }
 
 /** What the scene needs in order to draw the keypad. */
@@ -65,7 +75,12 @@ export interface KeypadView {
  * third argument. That is the only place hand joint poses can be read from —
  * they are valid for that frame and no other.
  */
-export function Scene({ engine, devices, keypad = null }: SceneProps): React.ReactElement {
+export function Scene({
+  engine,
+  devices,
+  keypad = null,
+  mode = 'passthrough',
+}: SceneProps): React.ReactElement {
   const gl = useThree((state) => state.gl);
   const scene = useThree((state) => state.scene);
   const camera = useThree((state) => state.camera);
@@ -83,6 +98,14 @@ export function Scene({ engine, devices, keypad = null }: SceneProps): React.Rea
 
   return (
     <>
+      {/*
+        The room, when there is one. Drawn before anything else and behind
+        everything — it is the ground the instruments are read against, not a
+        layer over them. In passthrough it costs one invisible mesh and three
+        skipped vertex passes.
+      */}
+      <Backdrop immersive={mode === 'immersive'} />
+
       {/*
         Lighting is deliberately soft and mostly ambient. In passthrough the
         room's own light is the dominant cue, so a hard key light makes the
