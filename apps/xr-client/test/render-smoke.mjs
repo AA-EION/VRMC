@@ -142,6 +142,64 @@ const codeBox = await page.evaluate(() => {
 check('pairing code field is usably wide', codeBox !== null && codeBox > 120,
   codeBox === null ? 'missing' : `${Math.round(codeBox)}px wide`);
 
+/*
+ * The identity actually reached the page.
+ *
+ * Three things, and each one has failed on its own before: the token layer
+ * resolves (a stylesheet that does not load leaves every colour at its
+ * @property initial value, which looks deliberate); the mark is inline and
+ * takes `currentColor` (an <img> would be the one element that cannot cross a
+ * theme change); and a theme choice actually reaches <html data-theme>, which
+ * is the single attribute the whole stylesheet keys off.
+ */
+const brand = await page.evaluate(() => {
+  const root = document.documentElement;
+  const style = getComputedStyle(root);
+  const read = (name) => style.getPropertyValue(name).trim();
+  const mark = document.querySelector('.masthead .mark');
+  return {
+    ink: read('--ink'),
+    surface: read('--surface'),
+    bone: read('--eion-bone'),
+    theme: root.dataset.theme ?? '',
+    markIsInline: mark !== null && mark.tagName.toLowerCase() === 'svg',
+    markTakesCurrentColor:
+      mark !== null && mark.querySelector('path')?.getAttribute('fill') === 'currentColor',
+    seal: document.querySelector('.eion-seal')?.textContent ?? '',
+  };
+});
+check('brand tokens resolve on the root', brand.bone === '#f2f0eb',
+  `--eion-bone ${brand.bone || 'unset'}`);
+check('the theme layer paints from the identity',
+  (brand.theme === 'dark' && brand.surface === 'rgb(11, 11, 12)') ||
+    (brand.theme === 'light' && brand.surface === 'rgb(242, 240, 235)'),
+  `${brand.theme} surface ${brand.surface}`);
+check('the mark is inline and takes the page ink',
+  brand.markIsInline && brand.markTakesCurrentColor,
+  brand.markIsInline ? 'svg, currentColor' : 'not an inline svg');
+check('the seal is set, never romanised', brand.seal === '永音', brand.seal);
+
+// Cycling the control writes a literal theme, which is the only thing the
+// stylesheet reads. `system` is a deferral and must survive as its own state
+// rather than collapsing into whichever of the two it resolves to today.
+const themeCycle = await page.evaluate(async () => {
+  const button = document.querySelector('button.theme');
+  if (button === null) return null;
+  const seen = [];
+  for (let i = 0; i < 4; i++) {
+    seen.push(document.documentElement.dataset.themePref ?? '');
+    button.click();
+    await new Promise((r) => requestAnimationFrame(r));
+  }
+  return seen;
+});
+check('the theme control cycles all three states',
+  themeCycle !== null &&
+    themeCycle.length === 4 &&
+    new Set(themeCycle).size === 3 &&
+    themeCycle[0] === themeCycle[3],
+  themeCycle === null ? 'no control' : themeCycle.join(' -> '));
+
 const webgl = await page.evaluate(() => {
   const canvas = document.querySelector('canvas');
   if (!canvas) return { ok: false, reason: 'no canvas element' };
@@ -252,7 +310,22 @@ if (framing.ok) {
  * The overlay is hidden first, and the metric is near-white pixels: only the
  * keyboard's white keys are that bright, so this specifically proves the
  * instruments rendered rather than merely that the page has a background.
+ *
+ * That premise depends on the ground being dark, and since the UI took on the
+ * identity's palette the ground is Polymer Bone by default — itself near-white,
+ * and near-white across the whole viewport, which swamps the keys and turns
+ * both figures below into a measurement of the page rather than of the scene.
+ * So the theme is pinned to dark for the reading. The scene's own colours do
+ * not depend on it; only the paper behind them does.
  */
+await page.evaluate(() => {
+  // `data-theme-ready` is what arms the 720 ms crossing. Removed first, so the
+  // change lands on this frame instead of easing through mid-grey — a grey page
+  // is above the `nonBackground` threshold, and sampling part-way through the
+  // ease would measure the crossing rather than the scene.
+  document.documentElement.removeAttribute('data-theme-ready');
+  document.documentElement.dataset.theme = 'dark';
+});
 await page.addStyleTag({ content: '.overlay { display: none !important; }' });
 await page.waitForTimeout(300);
 const shot = (await page.screenshot()).toString('base64');

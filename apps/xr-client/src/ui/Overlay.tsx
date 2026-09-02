@@ -5,6 +5,9 @@ import { DeviceStatus } from '@vrmc/protocol';
 import type { LaunchpadInstance } from '../devices/LaunchpadInstance.js';
 import type { LinkStatus } from '../net/BridgeLink.js';
 import type { XrSupport } from '../xr/session.js';
+import { Logo } from '../brand/Logo.js';
+import { SEAL } from '../brand/tokens.js';
+import { useTheme, type ThemePref } from '../brand/theme.js';
 
 export interface OverlayProps {
   support: XrSupport | null;
@@ -24,6 +27,13 @@ export interface OverlayProps {
   pairingBusy: boolean;
   pairingNote: string;
 }
+
+/** The three theme states, named the way the identity names them. */
+const THEME_LABEL: Record<ThemePref, string> = {
+  system: 'Auto',
+  light: 'Light',
+  dark: 'Dark',
+};
 
 const STATE_LABEL: Record<LinkStatus['state'], string> = {
   idle: 'Not connected',
@@ -66,10 +76,7 @@ export function Overlay(props: OverlayProps): React.ReactElement {
 
   return (
     <div className="overlay">
-      <header>
-        <h1>VRMC</h1>
-        <p className="tagline">Mixed reality MIDI controller</p>
-      </header>
+      <Masthead />
 
       <section className="card">
         <h2>1 · Connect</h2>
@@ -221,7 +228,40 @@ export function Overlay(props: OverlayProps): React.ReactElement {
       </section>
 
       {error !== '' && <p className="warn banner">{error}</p>}
+
+      <footer className="colophon">
+        <span className="eion-seal">{SEAL}</span>
+        <span>EION Studios</span>
+      </footer>
     </div>
+  );
+}
+
+/**
+ * The head of the page: the mark, the name, one line, and the theme.
+ *
+ * The theme control lives here rather than in a settings section because it is
+ * a property of the page rather than of anything on it — and because a person
+ * who wants it wants it before they have read anything else.
+ */
+function Masthead(): React.ReactElement {
+  const { pref, cycle } = useTheme();
+  return (
+    <header className="masthead">
+      <Logo className="mark" />
+      <div>
+        <h1>VRMC</h1>
+        <p className="tagline">Mixed reality MIDI controller</p>
+      </div>
+      <button
+        type="button"
+        className="theme"
+        onClick={cycle}
+        aria-label={`Theme: ${THEME_LABEL[pref]}. Click to change.`}
+      >
+        {THEME_LABEL[pref]}
+      </button>
+    </header>
   );
 }
 

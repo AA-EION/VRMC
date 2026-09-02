@@ -1,0 +1,167 @@
+/* ============================================================
+   EION STUDIOS — the theme layer
+   永音 · Manual de identidad, edición 2026.2 «Monocromo»
+
+   One job: turn the two brand inks in brand.css into the semantic tokens this
+   app is written against, in both themes — and make the crossing between them
+   smooth without anything covering the page while it happens.
+
+   HOW THE SMOOTH CROSSING WORKS
+   Custom properties are normally un-animatable: `--ink: #0b0b0c` → `#f2f0eb` is
+   a discrete swap, so every element referencing it snaps at the same instant.
+   Registering each colour token with `@property` and a `<color>` syntax makes
+   it a real animatable value, so one transition declared on :root interpolates
+   all of them at once and every element that reads one inherits the
+   interpolated colour, frame by frame. Nothing is faded over the page, nothing
+   is masked, no element repaints out of step with its neighbour: the page
+   simply *is* a different colour 720 ms later.
+
+   A browser without @property gets the fallback block at the bottom, which
+   transitions the used colours on the elements themselves. The two mechanisms
+   are mutually exclusive on purpose — running both would ease an already-easing
+   value and land visibly late.
+   ============================================================ */
+
+/* ---- The animatable tokens ----------------------------------------------- */
+
+@property --surface {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #f2f0eb;
+}
+@property --surface-raise {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #f6f4f1;
+}
+@property --surface-inset {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #e4e2de;
+}
+@property --ink {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #0b0b0c;
+}
+@property --ink-2 {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #4b4b4a;
+}
+@property --ink-3 {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #686866;
+}
+@property --ink-4 {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #9e9c9a;
+}
+@property --line {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #cbc9c5;
+}
+@property --line-2 {
+  syntax: '<color>';
+  inherits: true;
+  initial-value: #b5b4b1;
+}
+
+/* ---- Claro — the default -------------------------------------------------
+   Every value is Sumi mixed into Polymer Bone at the percentage RAMP in
+   tokens.ts states. The dark block below is the same ladder read from the other
+   end — at *different* mix percentages, because sRGB mixing is not
+   perceptually symmetric and matching the numbers would leave the dark theme
+   reading a full step brighter all the way down. What the two themes match on
+   is contrast against their own surface: 17.3 · 7.7 · 4.9 · 2.4 · 1.82 · 1.45,
+   identical on both sides. */
+
+:root {
+  color-scheme: light;
+
+  --surface: #f2f0eb; /* Polymer Bone — the page */
+  --surface-raise: #f6f4f1; /* a panel standing off it */
+  --surface-inset: #e4e2de; /* a hover, or a recess cut into it */
+
+  --ink: #0b0b0c; /* Sumi Black — headings, body, the mark */
+  --ink-2: #4b4b4a; /* secondary text */
+  --ink-3: #686866; /* metadata, labels */
+  --ink-4: #9e9c9a; /* ghosted — a state, never a first reading */
+
+  --line: #cbc9c5; /* the hairline everything is divided by */
+  --line-2: #b5b4b1; /* the same hairline, asked to be noticed */
+
+  --galaxy-core: var(--eion-absolute-black);
+}
+
+/* ---- Oscuro --------------------------------------------------------------
+   brand/theme.ts always resolves the choice — system, light or dark — to a
+   literal `data-theme` on <html>, so this stylesheet never has to reason about
+   prefers-color-scheme and there is no specificity race. */
+
+:root[data-theme='dark'] {
+  color-scheme: dark;
+
+  --surface: #0b0b0c;
+  --surface-raise: #171617;
+  --surface-inset: #222222;
+
+  --ink: #f2f0eb;
+  --ink-2: #a3a29f;
+  --ink-3: #807f7d;
+  --ink-4: #4f4f4e;
+
+  --line: #2e2e2e;
+  --line-2: #3e3d3d;
+
+  --galaxy-core: var(--eion-absolute-white);
+}
+
+/* ---- The crossing --------------------------------------------------------
+   Declared once, on the root, and only after `data-theme-ready` — otherwise the
+   first paint would animate out of the @property initial values and the app
+   would open by fading in from the light theme even for someone who asked for
+   dark. */
+
+:root[data-theme-ready] {
+  transition:
+    --surface var(--eion-theme-ms) var(--eion-theme-ease),
+    --surface-raise var(--eion-theme-ms) var(--eion-theme-ease),
+    --surface-inset var(--eion-theme-ms) var(--eion-theme-ease),
+    --ink var(--eion-theme-ms) var(--eion-theme-ease),
+    --ink-2 var(--eion-theme-ms) var(--eion-theme-ease),
+    --ink-3 var(--eion-theme-ms) var(--eion-theme-ease),
+    --ink-4 var(--eion-theme-ms) var(--eion-theme-ease),
+    --line var(--eion-theme-ms) var(--eion-theme-ease),
+    --line-2 var(--eion-theme-ms) var(--eion-theme-ease);
+}
+
+/* ---- Fallback: no @property ---------------------------------------------
+   The tokens snap, so the *elements* carry the transition instead. Scoped to an
+   `@supports not`, so it can never run alongside the block above. */
+
+@supports not (background: paint(x)) {
+  @supports not (transition: --ink 1ms) {
+    :root[data-theme-ready] *,
+    :root[data-theme-ready] *::before,
+    :root[data-theme-ready] *::after {
+      transition:
+        background-color var(--eion-theme-ms) var(--eion-theme-ease),
+        border-color var(--eion-theme-ms) var(--eion-theme-ease),
+        color var(--eion-theme-ms) var(--eion-theme-ease),
+        fill var(--eion-theme-ms) var(--eion-theme-ease);
+    }
+  }
+}
+
+/* Someone who has asked for less motion still gets the theme they chose — they
+   just get it at once, which is the whole of what «less motion» means here.
+   There was never an overlay or a wipe to suppress. */
+@media (prefers-reduced-motion: reduce) {
+  :root[data-theme-ready] {
+    transition: none;
+  }
+}

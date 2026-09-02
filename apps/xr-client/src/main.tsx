@@ -1,6 +1,15 @@
 import { createRoot } from 'react-dom/client';
 import { App } from './App.js';
+import { startTheme } from './brand/theme.js';
 import './styles.css';
+
+/*
+ * Adopt whatever the pre-paint boot script in index.html decided, and keep
+ * following the OS from here on. A `system` preference means the theme can
+ * change while the app is open, and an app that only reads the OS at start-up
+ * is one that goes light at dusk and stays there.
+ */
+startTheme();
 
 const container = document.getElementById('root');
 if (container === null) throw new Error('#root is missing from index.html');
