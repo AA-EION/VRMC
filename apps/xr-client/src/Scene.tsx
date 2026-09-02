@@ -8,6 +8,7 @@ import type { LaunchpadInstance } from './devices/LaunchpadInstance.js';
 import type { Engine } from './Engine.js';
 import { Backdrop } from './xr/Backdrop.js';
 import { Hands } from './xr/Hands.js';
+import { FocusVignette } from './xr/FocusVignette.js';
 import {
   EnvironmentOcclusion,
   RENDER_ORDER as OCCLUSION_ORDER,
@@ -68,6 +69,8 @@ export interface SceneProps {
   mode?: XrMode;
   /** Whether the player asked for environment occlusion. See Occlusion.tsx. */
   depthOcclusion?: boolean;
+  /** Quiet everything around the instrument. See FocusVignette.tsx. */
+  focus?: boolean;
   /** Told what depth sensing actually did, so the interface can stop promising it. */
   onDepthState?: (state: DepthSensingState) => void;
 }
@@ -93,11 +96,14 @@ export function Scene({
   keypad = null,
   mode = 'passthrough',
   depthOcclusion = false,
+  focus = false,
   onDepthState,
 }: SceneProps): React.ReactElement {
   const gl = useThree((state) => state.gl);
   /** Scratch for the head position. One Vector3 for the session, not per frame. */
   const headPosition = useMemo(() => new Vector3(), []);
+  const headForward = useMemo(() => new Vector3(), []);
+  const headUp = useMemo(() => new Vector3(), []);
   const scene = useThree((state) => state.scene);
   const camera = useThree((state) => state.camera);
 
@@ -113,6 +119,27 @@ export function Scene({
     // turns it to face the player, and «the player» is this.
     state.camera.getWorldPosition(headPosition);
     engine.setViewer(headPosition.x, headPosition.y, headPosition.z);
+
+    /*
+     * And the audio listener, which is the other half of placing a click at
+     * the pad that was struck. Without it every click arrives relative to
+     * wherever the listener was left — the origin — so a pad on your left
+     * sounds on your left only while you are standing exactly where the
+     * session started.
+     */
+    state.camera.getWorldDirection(headForward);
+    headUp.set(0, 1, 0).applyQuaternion(state.camera.quaternion);
+    engine.synth.setListener(
+      headPosition.x,
+      headPosition.y,
+      headPosition.z,
+      headForward.x,
+      headForward.y,
+      headForward.z,
+      headUp.x,
+      headUp.y,
+      headUp.z,
+    );
     engine.update(xrFrame as XRFrame | undefined, gl.xr.getReferenceSpace(), delta);
   });
 
@@ -199,6 +226,13 @@ export function Scene({
       )}
 
       <Knobs engine={engine} />
+
+      {/*
+        Last of all, because it is a filter on the view rather than an object
+        in the room. It dims the galaxy exactly as it dims a real kitchen; the
+        mechanism does not care which is behind it.
+      */}
+      <FocusVignette enabled={focus} />
     </>
   );
 }

@@ -54,6 +54,15 @@ function serve() {
   });
 }
 
+/*
+ * Scene objects that belong to the room rather than to the instruments.
+ *
+ * Named, and excluded by name, so the instrument count below keeps saying what
+ * its name says. Counting them would mean this check failed — confusingly, and
+ * somewhere unrelated — every time the room gained anything.
+ */
+const ROOM_OBJECTS = ['backdrop-shell', 'focus-vignette'];
+
 const checks = [];
 const check = (name, pass, detail = '') => {
   checks.push({ name, pass, detail });
@@ -220,7 +229,7 @@ check('canvas has non-zero size', webgl.ok && webgl.width > 0 && webgl.height > 
   webgl.ok ? `${webgl.width}x${webgl.height}` : '');
 
 // Reach into the running scene through the debug handle the app publishes.
-const scene = await page.evaluate(() => {
+const scene = await page.evaluate((roomObjects) => {
   const h = window.__vrmc;
   if (!h) return { ok: false, reason: 'no window.__vrmc handle' };
   let instanced = 0;
@@ -232,9 +241,9 @@ const scene = await page.evaluate(() => {
       instanced++;
       totalInstances += o.count;
       if (o.instanceColor) withInstanceColor++;
-    } else if (o.isMesh && o.name !== 'backdrop-shell') {
-      // The room's shell is not an instrument, and the count below is about
-      // instruments.
+    } else if (o.isMesh && !roomObjects.includes(o.name)) {
+      // The room's own furniture is not an instrument, and the count below is
+      // about instruments.
       meshes++;
     }
   });
@@ -248,7 +257,7 @@ const scene = await page.evaluate(() => {
     frames: info.frame,
     triangles: info.triangles,
   };
-});
+}, ROOM_OBJECTS);
 check('R3F scene reachable', scene.ok, scene.ok ? '' : scene.reason);
 
 if (scene.ok) {

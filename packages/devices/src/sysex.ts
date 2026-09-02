@@ -20,6 +20,8 @@ export const Command = {
   SELECT_LAYOUT: 0x00,
   /** Set one or more LEDs. */
   LED: 0x03,
+  /** Scroll text across the grid. */
+  TEXT: 0x07,
   /** Switch between Live and Programmer mode. */
   MODE: 0x0e,
 } as const;
@@ -213,4 +215,37 @@ export function buildRgbLedMessage(spec: DeviceSpec, entries: Uint8Array): Uint8
   }
   out[o++] = SYSEX_END;
   return out.subarray(0, o);
+}
+
+/**
+ * Read the text out of a scroll-text message.
+ *
+ * `F0 00 20 29 02 <device> 07 <loop> <speed> [colour] <text…> F7`
+ *
+ * The payload is ASCII with control bytes embedded in it: values below 0x20 are
+ * speed changes and colour markers rather than characters, and a colour marker
+ * is followed by either a palette index or `01 RR GG BB`. Rather than model
+ * that — the layout differs between models and Novation's own documentation is
+ * thin on it — everything printable is kept and everything else is dropped.
+ * The result is the words, which is the whole of what is wanted; a mangled
+ * colour marker cannot corrupt them because it was never printable.
+ *
+ * WHAT THIS DOES AND DOES NOT GIVE YOU
+ * It gives the text a DAW actually sends the device — which for Ableton is
+ * mode and track names as you switch views, and is real. It does not give per
+ * clip names per pad, and nothing can: a Launchpad's grid is addressed as
+ * colours, and the hardware protocol has no message that says «pad 3 is called
+ * Verse». The names simply never leave the DAW.
+ */
+export function readScrollText(data: Uint8Array, spec: DeviceSpec): string | null {
+  if (commandOf(data, spec) !== Command.TEXT) return null;
+  // Header, command, loop and speed: nine bytes before any text can start.
+  let out = '';
+  for (let i = 9; i < data.length; i++) {
+    const byte = data[i]!;
+    if (byte === SYSEX_END) break;
+    if (byte >= 0x20 && byte <= 0x7e) out += String.fromCharCode(byte);
+  }
+  const trimmed = out.trim();
+  return trimmed === '' ? null : trimmed;
 }

@@ -11,6 +11,7 @@ import {
   type DevicePlacement,
 } from '@vrmc/protocol';
 import {
+  localToWorldInto,
   surfaceTransform,
   type SurfacePose,
   type SurfaceTransform,
@@ -62,11 +63,34 @@ export class LaunchpadInstance implements NoteSink {
   /** True when the pose was resolved against a real surface. */
   anchored = false;
 
+  /**
+   * The last text the DAW sent this device, or ''.
+   *
+   * Real hardware scrolls it across the grid a character at a time. There is
+   * nothing to scroll it across here — the grid is showing the DAW's own
+   * colours — so it is drawn as a label above the device, which is more
+   * legible than a Launchpad has ever managed.
+   */
+  displayText = '';
+
   /** What the bridge last said about this device's ports. */
   status: number = DeviceStatus.PENDING;
   detail = '';
 
   private readonly link: BridgeLink;
+
+  /**
+   * Told about each strike, with the world position of the pad that was hit.
+   *
+   * Emulated hardware had no tactile audio at all: the built-in surfaces
+   * clicked and a Launchpad — the device most people actually play — was
+   * silent until the DAW answered. A virtual pad has no edge to feel, so
+   * without something immediate you cannot tell a hit from a near miss.
+   */
+  onStrike: ((note: number, velocity: number, at: Float32Array) => void) | null = null;
+
+  /** Scratch for a struck pad's world position. One per device, not per note. */
+  private readonly strikeAt = new Float32Array(3);
 
   constructor(deviceId: number, spec: DeviceSpec, pose: SurfacePose, link: BridgeLink) {
     this.deviceId = deviceId;
@@ -148,6 +172,21 @@ export class LaunchpadInstance implements NoteSink {
     // trip is short but not instant, and a pad that does not acknowledge a
     // touch until the host says so feels broken rather than remote.
     this.leds.touch(zoneIndex);
+
+    const zone = this.layout.zones[zoneIndex];
+    if (this.onStrike !== null && zone !== undefined) {
+      localToWorldInto(
+        this.transform,
+        zone.rect.x + zone.rect.width / 2,
+        zone.rect.y + zone.rect.height / 2,
+        zone.raise,
+        this.strikeAt,
+      );
+      // Pitched by the control index rather than by a MIDI note, since a
+      // Launchpad's grid does not carry one — it is a position on a surface,
+      // and the click only has to make a run legible.
+      this.onStrike(48 + (controlIndex % 36), velocity, this.strikeAt);
+    }
     this.link.push(
       EventType.NOTE_ON,
       0,

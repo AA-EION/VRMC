@@ -235,6 +235,28 @@ export function readLedUpdate(body: Uint8Array, visit: LedVisitor): number {
   return deviceId;
 }
 
+// --- DEVICE_TEXT ---
+
+/** Body: deviceId, length, UTF-8 text. */
+export function writeDeviceText(w: PacketWriter, deviceId: number, text: string): boolean {
+  // Truncated by characters rather than bytes, so a multi-byte one is never cut
+  // in half into a replacement character.
+  let clipped = text.slice(0, 120);
+  let bytes = encoder.encode(clipped);
+  while (bytes.length > 200 && clipped.length > 0) {
+    clipped = clipped.slice(0, -1);
+    bytes = encoder.encode(clipped);
+  }
+  return w.pushU8(deviceId) && w.pushU8(bytes.length) && w.pushRaw(bytes);
+}
+
+export function readDeviceText(body: Uint8Array): { deviceId: number; text: string } | null {
+  if (body.length < 2) return null;
+  const len = body[1]!;
+  if (body.length < 2 + len) return null;
+  return { deviceId: body[0]!, text: decoder.decode(body.subarray(2, 2 + len)) };
+}
+
 // --- SYSEX ---
 
 /** Body: deviceId, u16 length, raw bytes. */

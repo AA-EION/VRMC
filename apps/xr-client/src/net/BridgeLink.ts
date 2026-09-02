@@ -5,6 +5,7 @@ import {
   PacketWriter,
   MAX_EVENTS_PER_PACKET,
   readDeviceState,
+  readDeviceText,
   readLayoutState,
   readLedUpdate,
   readLinkStats,
@@ -126,6 +127,9 @@ export class BridgeLink {
   /** Called when the bridge reports its stored arrangements. */
   onLayouts: ((state: LayoutState) => void) | null = null;
 
+  /** Called when the DAW sends a device text to display. */
+  onDeviceText: ((deviceId: number, text: string) => void) | null = null;
+
   /** Bound once, so decoding an LED packet allocates nothing. */
   private readonly ledVisitor: LedVisitor;
   /** Device id of the LED packet currently being decoded. */
@@ -236,6 +240,11 @@ export class BridgeLink {
       case PacketKind.DEVICE_STATE: {
         // Roster changes are rare and human-paced, so allocating here is fine.
         this.onDevices?.(readDeviceState(this.reader.bodyView()));
+        return;
+      }
+      case PacketKind.DEVICE_TEXT: {
+        const message = readDeviceText(this.reader.bodyView());
+        if (message !== null) this.onDeviceText?.(message.deviceId, message.text);
         return;
       }
       case PacketKind.LAYOUT_STATE: {

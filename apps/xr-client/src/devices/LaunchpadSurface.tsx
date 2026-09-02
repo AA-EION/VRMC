@@ -16,6 +16,7 @@ import {
 import type { LaunchpadLayout } from '@vrmc/devices';
 import type { LedState } from './LedState.js';
 import type { LaunchpadInstance } from './LaunchpadInstance.js';
+import { buildTextTexture } from './labels.js';
 
 /**
  * Build a rounded-square pad, extruded to a shallow depth.
@@ -49,6 +50,10 @@ function roundedPadGeometry(size: number, radiusFraction: number, depth: number)
   geometry.translate(0, 0, -depth / 2);
   return geometry;
 }
+
+/** How tall a floating label is, in metres, and how far it stands off the top. */
+const LABEL_HEIGHT = 0.022;
+const LABEL_LIFT = 0.028;
 
 export interface LaunchpadSurfaceProps {
   layout: LaunchpadLayout;
@@ -168,6 +173,18 @@ export function LaunchpadSurface({
     }
   });
 
+  /*
+   * The DAW's own words, above the device.
+   *
+   * Rebuilt only when the text changes, which is when somebody switches a view
+   * in their DAW — human speed, and nowhere near the frame path.
+   */
+  const label = useMemo(
+    () => buildTextTexture(device.displayText),
+    [device.displayText],
+  );
+  useEffect(() => () => label?.dispose(), [label]);
+
   const margin = 0.008;
   const bodyW = layout.width + margin * 2;
   const bodyH = layout.height + margin * 2;
@@ -186,6 +203,21 @@ export function LaunchpadSurface({
         args={[geometry, material, layout.zones.length]}
         frustumCulled={false}
       />
+
+      {label !== null && (
+        // Sized from the texture so the glyphs never stretch, and stood off the
+        // top edge rather than over the grid: a label across the pads is a
+        // label in the way of the thing it is describing.
+        <mesh
+          position={[layout.width / 2, layout.height + LABEL_LIFT, 0.01]}
+          renderOrder={1}
+        >
+          <planeGeometry
+            args={[LABEL_HEIGHT * (label.image.width / label.image.height), LABEL_HEIGHT]}
+          />
+          <meshBasicMaterial map={label} transparent depthWrite={false} />
+        </mesh>
+      )}
 
       {logo !== null && (
         <mesh position={[logo.x, logo.y, 0.002]}>

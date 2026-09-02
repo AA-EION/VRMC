@@ -2,6 +2,7 @@ import {
   KeyboardLayout,
   LAUNCHKEY_25,
   localToWorld,
+  localToWorldInto,
   MPC_4X4,
   PadGridLayout,
   surfaceTransform,
@@ -152,6 +153,21 @@ export class Engine {
   /** Knob index -> CC number. */
   private readonly knobSink: ControlSink;
 
+  /** Scratch for a struck zone's world position. One buffer, not one per note. */
+  private readonly strikeAt = new Float32Array(3);
+
+  /**
+   * The velocity curve fitted to this player, or null for the presets.
+   *
+   * Applied to detectors as they are built and pushed into the ones already
+   * running, so a calibration takes effect on every surface at once rather than
+   * on whatever happens to be created next.
+   */
+  private velocityFit: { gamma: number; minSpeed: number; maxSpeed: number } | null = null;
+
+  /** Kept so a device spawned mid-calibration is heard from too. */
+  private strikeListener: ((speed: number) => void) | null = null;
+
   /** Emulated hardware, spawned and removed at runtime from the headset. */
   readonly launchpads: LaunchpadInstance[] = [];
 
@@ -297,6 +313,13 @@ export class Engine {
     this.link.onDevices = (roster) => this.applyRoster(roster);
     this.link.onLayouts = (state) => this.receiveLayouts(state);
 
+    this.link.onDeviceText = (deviceId, text) => {
+      const device = this.launchpads.find((d) => d.deviceId === deviceId);
+      if (device === undefined || device.displayText === text) return;
+      device.displayText = text;
+      this.onDevicesChanged?.();
+    };
+
     this.surfaces.onPlaced = ({ deviceId, pose, anchored }) => {
       const device = this.launchpads.find((d) => d.deviceId === deviceId);
       if (device === undefined) return;
@@ -328,7 +351,7 @@ export class Engine {
     const instance = createLaunchpad(deviceId, model, this.nextPose(), this.link);
     if (instance === null) return null;
     this.launchpads.push(instance);
-    this.registerGrab(instance);
+    this.prepareDevice(instance);
     this.link.requestDeviceAdd(deviceId, model);
     this.onDevicesChanged?.();
     return instance;
@@ -364,6 +387,40 @@ export class Engine {
     this.surfaces.request(deviceId, device.pose);
     if (this.dropRequestedAt === 0) this.dropRequestedAt = performance.now();
     return true;
+  }
+
+  // --- velocity calibration ---
+
+  /**
+   * Route every measured strike into a calibration while one is running.
+   *
+   * Wired across every surface, so somebody can calibrate on whichever
+   * instrument is in front of them rather than on a nominated one.
+   */
+  listenForStrikes(listener: ((speed: number) => void) | null): void {
+    for (const instrument of this.instruments) instrument.detector.onStrikeSpeed = listener;
+    for (const device of this.launchpads) device.detector.onStrikeSpeed = listener;
+    this.strikeListener = listener;
+  }
+
+  /**
+   * Adopt a curve fitted to this player, on every surface at once.
+   *
+   * Pushed into the detectors that already exist rather than only into ones
+   * built afterwards: a calibration is finished while somebody is standing at
+   * their instruments, and «it will apply to the next Launchpad you add» is not
+   * an answer.
+   */
+  setVelocityFit(fit: { gamma: number; minSpeed: number; maxSpeed: number } | null): void {
+    this.velocityFit = fit;
+    if (fit === null) return;
+    for (const instrument of this.instruments) instrument.detector.setVelocityCurve(fit);
+    for (const device of this.launchpads) device.detector.setVelocityCurve(fit);
+  }
+
+  /** The curve in force, or null while the presets are. */
+  get velocityCurve(): { gamma: number; minSpeed: number; maxSpeed: number } | null {
+    return this.velocityFit;
   }
 
   /**
@@ -439,7 +496,7 @@ export class Engine {
     const instance = createLaunchpad(deviceId, model, this.nextPose(), this.link);
     if (instance === null) return undefined;
     this.launchpads.push(instance);
-    this.registerGrab(instance);
+    this.prepareDevice(instance);
     if (deviceId >= this.nextDeviceId) this.nextDeviceId = deviceId + 1;
     return instance;
   }
@@ -572,6 +629,23 @@ export class Engine {
     device.anchored = anchored;
     this.syncGrabTarget(device);
     return true;
+  }
+
+  /**
+   * Everything a newly created device needs from the engine.
+   *
+   * One place, so a device adopted from the bridge's roster and one spawned
+   * from the headset cannot end up differently wired — which is exactly the
+   * kind of divergence that leaves the startup Launchpad silent while the ones
+   * you add yourself click.
+   */
+  private prepareDevice(device: LaunchpadInstance): void {
+    this.registerGrab(device);
+    device.onStrike = (note, velocity, at) => {
+      this.synth.strike(note, velocity, at as unknown as [number, number, number]);
+    };
+    if (this.velocityFit !== null) device.detector.setVelocityCurve(this.velocityFit);
+    device.detector.onStrikeSpeed = this.strikeListener;
   }
 
   /** Make a device grabbable, and keep the target pointing at its pose. */
@@ -728,16 +802,29 @@ export class Engine {
     channel: number,
     velocityGamma: number,
   ): Instrument {
+    // Declared before the feedback sink so the sink can reach the instrument it
+    // belongs to: the sink is built first because the router needs it, and the
+    // instrument is built last because it holds the router.
+    let instrument: Instrument | undefined;
     const highlighter = new SurfaceHighlighter(locator, theme);
     const feedback: FeedbackSink = {
       onNoteOn: (zoneIndex, note, velocity) => {
         highlighter.strike(zoneIndex, velocity);
-        this.synth.strike(note, velocity);
+        this.clickAtZone(instrument, zoneIndex, note, velocity);
       },
       onNoteOff: (zoneIndex) => highlighter.release(zoneIndex),
     };
 
-    const detector = new PokeDetector(locator, { velocityGamma });
+    const fit = this.velocityFit;
+    const detector = new PokeDetector(locator, {
+      // A fitted curve wins over the preset. The presets differ per surface —
+      // a keyboard rewards a firmer curve than a pad grid — but a calibration
+      // is about the hand rather than the instrument, so it replaces both.
+      velocityGamma: fit?.gamma ?? velocityGamma,
+      ...(fit === null || fit === undefined
+        ? {}
+        : { velocityMinSpeed: fit.minSpeed, velocityMaxSpeed: fit.maxSpeed }),
+    });
     const transform = surfaceTransform(locator, pose);
     const { origin, quaternion } = transform;
     // The mesh is drawn at this transform and the detector inverts it, so both
@@ -752,7 +839,7 @@ export class Engine {
       quaternion[3],
     );
 
-    return {
+    instrument = {
       id,
       locator,
       detector,
@@ -762,6 +849,36 @@ export class Engine {
       pose,
       transform,
     };
+    return instrument;
+  }
+
+  /**
+   * Play the click where the pad is.
+   *
+   * A click in the middle of your head says something was struck; a click from
+   * the left says which. On a surface half a metre across that is the
+   * difference between a controller you have to look at and one you can play by
+   * ear, which is how anybody plays a real one.
+   */
+  private clickAtZone(
+    instrument: Instrument | undefined,
+    zoneIndex: number,
+    note: number,
+    velocity: number,
+  ): void {
+    const zone = instrument?.locator.zones[zoneIndex];
+    if (instrument === undefined || zone === undefined) {
+      this.synth.strike(note, velocity);
+      return;
+    }
+    localToWorldInto(
+      instrument.transform,
+      zone.rect.x + zone.rect.width / 2,
+      zone.rect.y + zone.rect.height / 2,
+      zone.raise,
+      this.strikeAt,
+    );
+    this.synth.strike(note, velocity, this.strikeAt as unknown as [number, number, number]);
   }
 
   /** Put a row of knobs above the pad grid, in world space. */

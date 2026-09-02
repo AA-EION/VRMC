@@ -24,6 +24,8 @@ export interface DeviceEvents {
   onLed(deviceId: number, ledIndex: number, r: number, g: number, b: number, blink: number): void;
   /** A device sent SysEx that the headset may want (rare; mostly diagnostics). */
   onSysEx?(deviceId: number, bytes: Uint8Array): void;
+  /** The host sent a device text to display. */
+  onText?(deviceId: number, text: string): void;
   /** The roster changed and should be pushed to the headset. */
   onRosterChange(): void;
   onLog(message: string): void;
@@ -382,6 +384,7 @@ export class DeviceManager {
           port.sink.send(bytes[0]!, bytes[1]!, bytes[2]!);
         }
       },
+      onText: (text) => this.events.onText?.(instance.id, text),
       onModeChange: (mode) => {
         this.events.onLog(
           `[device ${instance.id}] ${spec.displayName} entered ${mode === 1 ? 'Programmer' : 'Live'} mode`,

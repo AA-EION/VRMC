@@ -129,6 +129,10 @@ async function main(): Promise<void> {
       onLed: (deviceId, ledIndex, r, g, b, blink) => {
         broadcast?.queueLed(deviceId, ledIndex, r, g, b, blink);
       },
+      onText: (deviceId, text) => {
+        broadcast?.sendDeviceText(deviceId, text);
+        log(`[device ${deviceId}] display: ${text}`);
+      },
       onRosterChange: () => broadcast?.sendRoster(devices.roster()),
       onLog: log,
     },

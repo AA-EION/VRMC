@@ -8,6 +8,7 @@ import {
   commandOf,
   isDeviceInquiry,
   parseLedMessage,
+  readScrollText,
 } from './sysex.js';
 import { controlLookup, isGridIndex } from './layout.js';
 import {
@@ -31,6 +32,15 @@ export interface EmulatorObserver {
   onMidiOut(bytes: Uint8Array): void;
   /** The device switched between Live and Programmer mode. */
   onModeChange?(mode: number): void;
+  /**
+   * The host sent text for the device to display.
+   *
+   * Real hardware scrolls this across the grid. There is nothing to scroll it
+   * across here — the grid is showing the DAW's own colours — so it is passed
+   * up to be shown as a label instead, which is more legible than a Launchpad
+   * has ever managed.
+   */
+  onText?(text: string): void;
 }
 
 const LED_SLOTS = 110;
@@ -177,6 +187,11 @@ export class LaunchpadEmulator {
             );
           }
         });
+        break;
+      }
+      case Command.TEXT: {
+        const text = readScrollText(data, this.spec);
+        if (text !== null) this.observer.onText?.(text);
         break;
       }
       case Command.SELECT_LAYOUT:

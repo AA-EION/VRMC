@@ -163,6 +163,15 @@ export const PacketKind = {
    * headset.
    */
   LINK_STATS: 17,
+
+  /**
+   * Bridge -> headset: text the DAW sent a device to display.
+   *
+   * Real hardware scrolls this across the grid. There is nothing to scroll it
+   * across here, so it becomes a label above the device — which is more legible
+   * than a Launchpad has ever managed.
+   */
+  DEVICE_TEXT: 18,
 } as const;
 export type PacketKind = (typeof PacketKind)[keyof typeof PacketKind];
 

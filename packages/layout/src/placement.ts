@@ -128,6 +128,32 @@ export function localToWorld(
   ];
 }
 
+/**
+ * `localToWorld` without the array.
+ *
+ * The allocating form is fine for placement, which happens when somebody moves
+ * something. This one is for the note path: a chord is ten strikes in a frame,
+ * each of which now wants the world position of the pad it hit so the click can
+ * be placed there, and ten small arrays a frame is the sort of drip the whole
+ * design is arranged to avoid.
+ */
+export function localToWorldInto(
+  transform: SurfaceTransform,
+  x: number,
+  y: number,
+  z: number,
+  out: Float32Array,
+  offset = 0,
+): void {
+  const [qx, qy, qz, qw] = transform.quaternion;
+  const tx = qy * z - qz * y + qw * x;
+  const ty = qz * x - qx * z + qw * y;
+  const tz = qx * y - qy * x + qw * z;
+  out[offset] = transform.origin[0] + x + 2 * (qy * tz - qz * ty);
+  out[offset + 1] = transform.origin[1] + y + 2 * (qz * tx - qx * tz);
+  out[offset + 2] = transform.origin[2] + z + 2 * (qx * ty - qy * tx);
+}
+
 /** The surface's outward normal in world space. */
 export function surfaceNormal(transform: SurfaceTransform): [number, number, number] {
   return rotate(transform.quaternion, 0, 0, 1);

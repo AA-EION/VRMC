@@ -16,11 +16,13 @@ import {
   colOf,
   isDeviceInquiry,
   isGridIndex,
+  DeviceModel,
   nearestPaletteIndex,
   paletteB,
   paletteG,
   paletteR,
   parseLedMessage,
+  readScrollText,
   rowOf,
   specFor,
   to8Bit,
@@ -504,5 +506,52 @@ describe('LaunchpadLayout', () => {
     expect(grid.accidental).toBe(false);
     expect(top.accidental).toBe(true);
     expect(top.label).toBe('Up');
+  });
+});
+
+describe('text the DAW sends a device to display', () => {
+  const spec = specFor(DeviceModel.LAUNCHPAD_X)!;
+
+  /** F0 00 20 29 02 <device> 07 <loop> <speed> <payload…> F7 */
+  function textMessage(payload: readonly number[]): Uint8Array {
+    return Uint8Array.of(0xf0, 0x00, 0x20, 0x29, 0x02, spec.sysexDeviceId, 0x07, 0, 4, ...payload, 0xf7);
+  }
+
+  const ascii = (text: string): number[] => [...text].map((c) => c.charCodeAt(0));
+
+  it('reads the words out', () => {
+    expect(readScrollText(textMessage(ascii('Drums')), spec)).toBe('Drums');
+  });
+
+  it('drops the control bytes rather than trying to model them', () => {
+    /*
+     * The payload is ASCII with speed changes and colour markers embedded in
+     * it, and the layout of those differs between models. Everything printable
+     * is kept and everything else dropped: the result is the words, and a
+     * colour marker cannot corrupt them because it was never printable.
+     */
+    expect(readScrollText(textMessage([0x01, 0x05, ...ascii('Bass'), 0x03]), spec)).toBe('Bass');
+  });
+
+  it('answers null for an empty or blank display', () => {
+    expect(readScrollText(textMessage([]), spec)).toBeNull();
+    expect(readScrollText(textMessage(ascii('   ')), spec)).toBeNull();
+  });
+
+  it('ignores anything that is not a text message', () => {
+    const led = Uint8Array.of(0xf0, 0x00, 0x20, 0x29, 0x02, spec.sysexDeviceId, 0x03, 11, 5, 0xf7);
+    expect(readScrollText(led, spec)).toBeNull();
+    expect(readScrollText(Uint8Array.of(0xf0, 0xf7), spec)).toBeNull();
+  });
+
+  it('reaches the observer as text', () => {
+    const seen: string[] = [];
+    const emulator = new LaunchpadEmulator(spec, {
+      onLed: () => {},
+      onMidiOut: () => {},
+      onText: (text) => seen.push(text),
+    });
+    emulator.handleHostMessage(textMessage(ascii('Session')));
+    expect(seen).toEqual(['Session']);
   });
 });

@@ -5,6 +5,7 @@ import {
   PacketWriter,
   ledCapacity,
   writeDeviceState,
+  writeDeviceText,
   writeLayoutState,
   writeLinkStats,
   writeLedEntry,
@@ -146,6 +147,15 @@ export class Broadcaster {
     const w = this.writer;
     w.begin(PacketKind.DEVICE_STATE);
     if (!writeDeviceState(w, entries)) return;
+    this.send(w.finish(performance.now()));
+  }
+
+  /** Push text the DAW sent a device to display. */
+  sendDeviceText(deviceId: number, text: string): void {
+    if (this.clientCount === 0) return;
+    const w = this.writer;
+    w.begin(PacketKind.DEVICE_TEXT);
+    if (!writeDeviceText(w, deviceId, text)) return;
     this.send(w.finish(performance.now()));
   }
 

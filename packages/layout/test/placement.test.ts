@@ -1,6 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import { MPC_4X4, PadGridLayout } from '../src/pads.js';
-import { localToWorld, surfaceNormal, surfaceTransform } from '../src/placement.js';
+import {
+  localToWorld,
+  localToWorldInto,
+  surfaceNormal,
+  surfaceTransform,
+} from '../src/placement.js';
 
 const grid = new PadGridLayout(MPC_4X4);
 
@@ -137,5 +142,44 @@ describe('surfaceTransform', () => {
     for (let i = 0; i < 4; i++) {
       expect(withOut.quaternion[i]).toBeCloseTo(withZero.quaternion[i]!, 12);
     }
+  });
+
+  it('agrees with the allocating form it exists to replace', () => {
+    // Two implementations of one transform is exactly the drift this package
+    // warns about everywhere else, so they are checked against each other.
+    const scratch = new Float32Array(3);
+    for (const yawDeg of [-90, 0, 37, 180]) {
+      for (const tiltDeg of [0, 45, 90]) {
+        const t = surfaceTransform(grid, { centre: [0.2, 0.9, -0.4], tiltDeg, yawDeg });
+        for (const [x, y, z] of [
+          [0, 0, 0],
+          [0.1, 0.05, 0.01],
+          [-0.03, 0.2, -0.02],
+        ]) {
+          localToWorldInto(t, x!, y!, z!, scratch);
+          const expected = localToWorld(t, x!, y!, z!);
+          for (let axis = 0; axis < 3; axis++) {
+            /*
+             * Six places, not twelve. The scratch is a Float32Array, so the
+             * result is rounded to single precision on the way in — about a
+             * micrometre over a room this size, which is three orders below
+             * hand tracking's own noise floor and the same precision the wire
+             * format carries. The extra bits would be describing noise.
+             */
+            expect(scratch[axis]).toBeCloseTo(expected[axis]!, 6);
+          }
+        }
+      }
+    }
+  });
+
+  it('writes at an offset without touching what is beside it', () => {
+    const buffer = new Float32Array(9).fill(-1);
+    const t = surfaceTransform(grid, { centre: [0, 1, -0.5], tiltDeg: 0 });
+    localToWorldInto(t, 0.1, 0.2, 0, buffer, 3);
+    expect(buffer[0]).toBe(-1);
+    expect(buffer[2]).toBe(-1);
+    expect(buffer[6]).toBe(-1);
+    expect(buffer[3]).not.toBe(-1);
   });
 });
