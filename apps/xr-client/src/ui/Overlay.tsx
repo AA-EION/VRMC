@@ -1,7 +1,7 @@
 import { useState } from 'react';
 import { DeviceModel } from '@vrmc/devices';
 import { PAIRING_CODE_LENGTH, isPairingCode, normalisePairingCode } from '@vrmc/protocol';
-import { DeviceStatus } from '@vrmc/protocol';
+import { DeviceStatus, type LayoutState } from '@vrmc/protocol';
 import type { LaunchpadInstance } from '../devices/LaunchpadInstance.js';
 import type { LinkStatus } from '../net/BridgeLink.js';
 import type { XrMode, XrSupport } from '../xr/session.js';
@@ -25,6 +25,10 @@ export interface OverlayProps {
   onAddDevice: (model: string) => void;
   onRemoveDevice: (deviceId: number) => void;
   onPinDevice: (deviceId: number, pinned: boolean) => void;
+  layouts: LayoutState;
+  onSaveLayout: (name: string) => void;
+  onApplyLayout: (name: string) => void;
+  onDeleteLayout: (name: string) => void;
   onPair: (code: string) => void;
   pairingBusy: boolean;
   pairingNote: string;
@@ -88,6 +92,10 @@ export function Overlay(props: OverlayProps): React.ReactElement {
     onAddDevice,
     onRemoveDevice,
     onPinDevice,
+    layouts,
+    onSaveLayout,
+    onApplyLayout,
+    onDeleteLayout,
     onPair,
     pairingBusy,
     pairingNote,
@@ -313,6 +321,43 @@ export function Overlay(props: OverlayProps): React.ReactElement {
       </section>
 
       <section className="card">
+        <h2>4 · Layouts</h2>
+        <p className="hint">
+          A named arrangement remembers where every device is, how it is turned, and whether it
+          is pinned. It is stored on the computer rather than in this browser, so it comes back
+          the moment the headset reconnects — including after a restart.
+        </p>
+        <LayoutEntry onSave={onSaveLayout} disabled={!connected} />
+        {!connected && <p className="hint spaced">Connect first — layouts live on the computer.</p>}
+
+        {layouts.layouts.length === 0 ? (
+          connected && <p className="hint spaced">No saved layouts yet.</p>
+        ) : (
+          <ul className="devices">
+            {layouts.layouts.map((layout) => (
+              <li key={layout.name}>
+                <span className="device-name">{layout.name}</span>
+                <span>
+                  {layout.entries.length === 1 ? '1 device' : `${layout.entries.length} devices`}
+                </span>
+                <button
+                  type="button"
+                  className={layouts.current === layout.name ? 'on' : ''}
+                  aria-pressed={layouts.current === layout.name}
+                  onClick={() => onApplyLayout(layout.name)}
+                >
+                  {layouts.current === layout.name ? 'In use' : 'Use'}
+                </button>
+                <button type="button" onClick={() => onDeleteLayout(layout.name)}>
+                  Delete
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      <section className="card">
         <h2>Playing</h2>
         <ul className="hint list">
           <li>Poke the keys and pads with your fingertips. Harder and faster plays louder.</li>
@@ -363,6 +408,49 @@ function Masthead(): React.ReactElement {
   );
 }
 
+
+/**
+ * Naming an arrangement.
+ *
+ * A plain field and a button rather than a prompt: this is typed on a floating
+ * keyboard in a headset as often as on a real one, and a modal you have to
+ * dismiss is one more thing to aim at.
+ */
+function LayoutEntry({
+  onSave,
+  disabled,
+}: {
+  onSave: (name: string) => void;
+  disabled: boolean;
+}): React.ReactElement {
+  const [name, setName] = useState('');
+  const ready = name.trim() !== '';
+  return (
+    <form
+      className="row"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (!ready || disabled) return;
+        onSave(name);
+        setName('');
+      }}
+    >
+      <input
+        type="text"
+        value={name}
+        placeholder="Studio"
+        maxLength={48}
+        spellCheck={false}
+        aria-label="Layout name"
+        disabled={disabled}
+        onChange={(e) => setName(e.target.value)}
+      />
+      <button type="submit" disabled={!ready || disabled}>
+        Save this arrangement
+      </button>
+    </form>
+  );
+}
 
 /**
  * Pairing code entry.

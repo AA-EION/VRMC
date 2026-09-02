@@ -6,6 +6,7 @@ import type { LaunchpadInstance } from './devices/LaunchpadInstance.js';
 import { Scene } from './Scene.js';
 import { Overlay } from './ui/Overlay.js';
 import type { LinkStatus } from './net/BridgeLink.js';
+import type { LayoutState } from '@vrmc/protocol';
 import {
   detectSupport,
   isBlending,
@@ -86,6 +87,7 @@ export function App(): React.ReactElement {
   // The engine mutates its device array in place, which React cannot observe,
   // so it publishes a snapshot whenever the roster changes.
   const [devices, setDevices] = useState<readonly LaunchpadInstance[]>([]);
+  const [layouts, setLayouts] = useState<LayoutState>(() => engine.layouts);
   const [pairingBusy, setPairingBusy] = useState(false);
   const [pairingNote, setPairingNote] = useState('');
   /** Name of the paired computer, once one is known. */
@@ -127,9 +129,11 @@ export function App(): React.ReactElement {
     // A grab changes what the roster should say about a device without changing
     // which devices exist, so it publishes a fresh snapshot too.
     engine.onGrabChanged = () => setDevices([...engine.launchpads]);
+    engine.onLayoutsChanged = () => setLayouts(engine.layouts);
     return () => {
       engine.onDevicesChanged = null;
       engine.onGrabChanged = null;
+      engine.onLayoutsChanged = null;
     };
   }, [engine]);
 
@@ -441,6 +445,10 @@ export function App(): React.ReactElement {
         onAddDevice={(model) => engine.addDevice(model)}
         onRemoveDevice={(id) => engine.removeDevice(id)}
         onPinDevice={(id, pinned) => engine.pinDevice(id, pinned)}
+        layouts={layouts}
+        onSaveLayout={(name) => engine.saveLayout(name)}
+        onApplyLayout={(name) => engine.applyLayout(name)}
+        onDeleteLayout={(name) => engine.deleteLayout(name)}
         onPair={(code) => void handlePair(code)}
         pairingBusy={pairingBusy}
         pairingNote={pairingNote}

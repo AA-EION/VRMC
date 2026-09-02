@@ -19,9 +19,17 @@ import {
 } from '@vrmc/interaction';
 import { DeviceId, EventType, PlacementFlags, VelocityCurve } from '@vrmc/protocol';
 import { DeviceModel, type DeviceSpec } from '@vrmc/devices';
-import { FIRST_DYNAMIC_DEVICE_ID, MAX_DEVICE_ID, type DeviceStateEntry } from '@vrmc/protocol';
+import {
+  FIRST_DYNAMIC_DEVICE_ID,
+  MAX_DEVICE_ID,
+  normaliseLayoutName,
+  type DeviceStateEntry,
+  type Layout,
+  type LayoutState,
+} from '@vrmc/protocol';
 import { ClickSynth } from './audio/ClickSynth.js';
 import { createLaunchpad, type LaunchpadInstance } from './devices/LaunchpadInstance.js';
+import { matchLayout } from './devices/matchLayout.js';
 import { BridgeLink } from './net/BridgeLink.js';
 import { NoteRouter, type FeedbackSink } from './net/NoteRouter.js';
 import {
@@ -117,6 +125,21 @@ export class Engine {
 
   /** Emulated hardware, spawned and removed at runtime from the headset. */
   readonly launchpads: LaunchpadInstance[] = [];
+
+  /** The arrangements the bridge is storing, and which one is in use. */
+  layouts: LayoutState = { layouts: [], current: '' };
+
+  /** Fires when the stored arrangements change. */
+  onLayoutsChanged: (() => void) | null = null;
+
+  /**
+   * The arrangement this client has actually put into effect.
+   *
+   * Tracked so a layout is restored once per page rather than every time the
+   * bridge pushes its state — which it does on every save, and re-applying
+   * then would undo whatever the player had moved since.
+   */
+  private appliedLayout = '';
 
   /** Fires when a device is added or removed, so React can re-render the list. */
   onDevicesChanged: (() => void) | null = null;
@@ -243,6 +266,7 @@ export class Engine {
     };
 
     this.link.onDevices = (roster) => this.applyRoster(roster);
+    this.link.onLayouts = (state) => this.receiveLayouts(state);
   }
 
   /**
@@ -347,6 +371,97 @@ export class Engine {
     this.registerGrab(instance);
     if (deviceId >= this.nextDeviceId) this.nextDeviceId = deviceId + 1;
     return instance;
+  }
+
+  // --- named arrangements ---
+
+  /**
+   * Store the room as it stands, under a name.
+   *
+   * Every emulated device goes in, including pinned ones — pinning is part of
+   * an arrangement rather than a thing that happens to it. The built-in
+   * surfaces are left out, because they are the app rather than furniture in
+   * it: there is nothing to restore and nowhere else for them to be.
+   */
+  saveLayout(name: string): boolean {
+    const clean = normaliseLayoutName(name);
+    if (clean === '') return false;
+    const layout: Layout = {
+      name: clean,
+      entries: this.launchpads.map((device) => ({
+        placement: device.placement(),
+        model: device.spec.model,
+      })),
+    };
+    return this.link.saveLayout(layout);
+  }
+
+  deleteLayout(name: string): boolean {
+    return this.link.deleteLayout(normaliseLayoutName(name));
+  }
+
+  /**
+   * Put an arrangement into effect.
+   *
+   * Matched in two passes, and the second one is the point. A saved entry
+   * carries both a device id and a model; ids are handed out per session and
+   * are not stable across a restart of the bridge, so matching on id alone
+   * would put a Launchpad Pro where a Launchpad X had been the moment anybody
+   * restarted anything. So: exact id *and* model first, since that is
+   * unambiguous, then whatever is left over matched by model in order.
+   *
+   * Devices a hand is currently holding are skipped. An arrangement arriving
+   * mid-grab must not yank the instrument out from under somebody.
+   */
+  applyLayout(name: string): boolean {
+    const clean = normaliseLayoutName(name);
+    const layout = this.layouts.layouts.find((l) => l.name === clean);
+    if (layout === undefined) return false;
+
+    // Devices a hand is holding are excluded outright rather than skipped
+    // later, so a held Launchpad cannot absorb an entry that another device
+    // would otherwise have matched.
+    const free = this.launchpads.filter((d) => !this.grabs.isHeld(d.deviceId));
+    for (const { device, placement } of matchLayout(
+      layout.entries,
+      free.map((d) => ({ deviceId: d.deviceId, model: d.spec.model, instance: d })),
+    )) {
+      const instance = device.instance;
+      instance.setPose({
+        centre: [placement.centre[0], placement.centre[1], placement.centre[2]],
+        yawDeg: placement.yawDeg,
+        tiltDeg: placement.tiltDeg,
+      });
+      instance.pinned = (placement.flags & PlacementFlags.PINNED) !== 0;
+      instance.anchored = (placement.flags & PlacementFlags.ANCHORED) !== 0;
+      this.syncGrabTarget(instance);
+    }
+
+    this.appliedLayout = clean;
+    this.layouts = { ...this.layouts, current: clean };
+    // Tell the bridge which one is in use, so the next connection restores the
+    // same arrangement. It is not being asked to move anything.
+    this.link.applyLayout(clean);
+    this.onDevicesChanged?.();
+    this.onLayoutsChanged?.();
+    return true;
+  }
+
+  /**
+   * Take the bridge's word for what is stored, and restore on arrival.
+   *
+   * The restore is what makes layouts worth having: the bridge outlives the
+   * session and pushes this on every connection, so an arrangement is back
+   * before the player has finished putting the headset on. It runs once per
+   * named arrangement rather than on every push — the bridge also pushes after
+   * a save, and re-applying then would undo everything moved since.
+   */
+  private receiveLayouts(state: LayoutState): void {
+    this.layouts = state;
+    this.onLayoutsChanged?.();
+    if (state.current !== '' && state.current !== this.appliedLayout) {
+      this.applyLayout(state.current);
+    }
   }
 
   /**
