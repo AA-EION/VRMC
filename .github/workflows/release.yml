@@ -83,6 +83,37 @@ jobs:
           test -n "$found" || { echo "no $name in the staged build"; exit 1; }
           echo "packaged $found"
 
+      # The signature has to be real, and this is the only place it can be
+      # checked: `codesign` exists on no other runner.
+      #
+      # `--verify --deep --strict` is the step that catches a bundle signed in
+      # the wrong order — signing itself never complains about that, and the
+      # first person to notice would otherwise be somebody whose Mac says the
+      # app is damaged. See build/codesign.mjs.
+      - name: The app must be signed
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          APP=$(find apps/desktop-bridge/build/dist -maxdepth 2 -name 'VRMC Bridge.app' | sed -n 1p)
+          test -n "$APP" || { echo "no .app was assembled"; exit 1; }
+          codesign --verify --deep --strict --verbose=2 "$APP"
+          # For the record in the build log: which identity, and what it sealed.
+          codesign -dvv "$APP" 2>&1
+          # Every nested binary individually, because a bundle can verify while
+          # a library inside it carries somebody else's signature.
+          #
+          # A `find -exec` loop would not do: find returns its own exit status,
+          # not the command's, so a failing codesign in here would pass the step
+          # silently — which is the exact failure mode this check exists to
+          # catch. Read them and check each one.
+          while IFS= read -r binary; do
+            codesign --verify --strict "$binary" || {
+              echo "nested binary is not correctly signed: $binary"
+              exit 1
+            }
+          done < <(find "$APP" -type f \( -name '*.node' -o -name '*.dylib' -o -path '*/MacOS/*' \))
+          echo "signature verified"
+
       # Smoke-test on the OS the artifact targets.
       #
       # `--check` loads every native library and exits non-zero if one is
@@ -137,6 +168,18 @@ jobs:
             -ov -format UDZO \
             "release/vrmc-bridge-${{ matrix.target }}.dmg"
           hdiutil verify "release/vrmc-bridge-${{ matrix.target }}.dmg"
+
+          # And check the app as it exists *inside* the image, which is the
+          # thing a person actually downloads. Copying a bundle can lose
+          # extended attributes and turn a valid signature into "damaged" — so
+          # the artifact is verified rather than the staging directory it came
+          # from.
+          MOUNT=$(mktemp -d)
+          hdiutil attach "release/vrmc-bridge-${{ matrix.target }}.dmg" \
+            -mountpoint "$MOUNT" -nobrowse -readonly
+          codesign --verify --deep --strict --verbose=2 "$MOUNT/VRMC Bridge.app"
+          hdiutil detach "$MOUNT"
+          echo "the app inside the dmg is correctly signed"
 
       # An MSI is what a Windows user expects: it puts the bridge in Program
       # Files, adds a Start menu entry, and registers it to start at login —
@@ -213,7 +256,16 @@ jobs:
               native MIDI addon the .exe needs
             - `.tar.gz` — Linux
 
-            These builds are unsigned. macOS quarantines an unsigned app on
-            download: right-click the app and choose Open, then confirm. On
-            Windows, SmartScreen shows a warning; choose More info, then Run
-            anyway.
+            **macOS.** The app is signed ad-hoc, which is what stops it being
+            reported as damaged on Apple Silicon — but it is not notarised, so
+            macOS still asks once. Open it, let it be blocked, then go to
+            System Settings > Privacy & Security and press **Open Anyway**.
+            Right-click > Open is no longer a bypass on macOS 15 and later.
+
+            If it says the app is *damaged* rather than unverified, the download
+            lost its signature on the way; clear the quarantine flag and reopen:
+
+                xattr -dr com.apple.quarantine "/Applications/VRMC Bridge.app"
+
+            **Windows.** The executable is unsigned and SmartScreen warns until
+            it has built reputation: choose More info, then Run anyway.

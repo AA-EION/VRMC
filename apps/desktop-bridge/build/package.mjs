@@ -18,8 +18,11 @@
  *    nothing is compiled here — binaries are only selected and copied.
  *
  * A macOS `.app` is assembled by hand: it is a directory with an `Info.plist`
- * and the executable under `Contents/MacOS`. Note that an unsigned app is
- * quarantined by Gatekeeper on download — see docs/PACKAGING.md.
+ * and the executable under `Contents/MacOS`, and it is ad-hoc signed once
+ * everything is in place — see `codesign.mjs` for why that is not optional on
+ * Apple Silicon. It is still quarantined on download; ad-hoc signing changes
+ * the refusal from "damaged" to the ordinary unidentified-developer prompt,
+ * which is a thing a person can get past. See docs/PACKAGING.md.
  */
 import { exec as execCb } from 'node:child_process';
 import { promisify } from 'node:util';
@@ -28,6 +31,7 @@ import { existsSync } from 'node:fs';
 import { dirname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { infoPlist } from './infoPlist.mjs';
+import { signBundle, verifyBundle } from './codesign.mjs';
 
 const exec = promisify(execCb);
 const here = dirname(fileURLToPath(import.meta.url));
@@ -490,6 +494,9 @@ async function buildTarget(target) {
       await cp(icns, join(appDir, 'Resources/vrmc.icns'));
     }
     await chmod(join(exeDir, exeName), 0o755);
+    // Last, and it has to be last: a signature seals what is under it, so
+    // anything written into the bundle afterwards invalidates it.
+    await signApp(join(stage, 'VRMC Bridge.app'));
   } else if (target.platform !== 'win32') {
     await chmod(join(exeDir, exeName), 0o755);
   }
@@ -499,6 +506,65 @@ async function buildTarget(target) {
   console.log(`  -> ${stage}`);
 }
 
+
+/**
+ * Ad-hoc sign the assembled bundle.
+ *
+ * Skipped, loudly, where `codesign` does not exist — which is every machine
+ * that is not a Mac. A macOS build can be *assembled* anywhere (the addons all
+ * ship prebuilds), and there is no reason to make that impossible; but a build
+ * produced that way must not be handed to anybody, because it is the exact
+ * build that says "damaged". The release workflow runs on macOS and verifies
+ * the signature afterwards, so the artifact people actually download cannot
+ * reach them this way.
+ */
+async function signApp(appPath) {
+  if (!(await hasCodesign())) {
+    console.warn(
+      '  ! codesign is not available, so "VRMC Bridge.app" is unsigned.\n' +
+        '    It will report itself as damaged on Apple Silicon. Build on macOS to release.',
+    );
+    return;
+  }
+
+  const entries = await listBundle(appPath);
+  const run = (command, args) =>
+    exec(`${command} ${args.map((a) => JSON.stringify(a)).join(' ')}`);
+
+  await signBundle(appPath, entries, { run, log: (line) => console.log(line) });
+  await verifyBundle(appPath, { run });
+  console.log('  signed ad-hoc and verified');
+}
+
+/** Every path inside the bundle, relative to it. */
+async function listBundle(appPath) {
+  const out = [];
+  const walk = async (dir, prefix) => {
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      const relative = prefix === '' ? entry.name : `${prefix}/${entry.name}`;
+      // Symlinks are not followed and not signed: a bundle that contains one
+      // has it sealed by the enclosing signature, and following it would leave
+      // the walk somewhere outside the bundle entirely.
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) await walk(join(dir, entry.name), relative);
+      else out.push(relative);
+    }
+  };
+  await walk(appPath, '');
+  return out;
+}
+
+let codesignAvailable = null;
+async function hasCodesign() {
+  if (codesignAvailable !== null) return codesignAvailable;
+  try {
+    await exec('command -v codesign');
+    codesignAvailable = true;
+  } catch {
+    codesignAvailable = false;
+  }
+  return codesignAvailable;
+}
 
 function readmeFor(target) {
   const run =
@@ -519,8 +585,19 @@ function readmeFor(target) {
             'headset. Opening it also sets it to start at login, which you can',
             'turn off from the same menu.',
             '',
-            'macOS will refuse to open it the first time if this build is',
-            'unsigned. Right-click the app and choose Open, then confirm.',
+            'The first time you open it, macOS will say Apple cannot verify it.',
+            'That is expected: this build is signed ad-hoc rather than with a',
+            'paid Developer ID, so it is not notarised.',
+            '',
+            'Open it once and let it be blocked, then go to System Settings >',
+            'Privacy & Security and press "Open Anyway" next to the message',
+            'about VRMC. Right-clicking and choosing Open no longer works as a',
+            'bypass on macOS 15 and later.',
+            '',
+            'If it instead says the app is *damaged*, the download lost its',
+            'signature somewhere. Clear the quarantine flag and open it again:',
+            '',
+            '  xattr -dr com.apple.quarantine "/Applications/VRMC Bridge.app"',
           ].join('\n')
         : 'Run ./vrmc-bridge from a terminal.';
 
