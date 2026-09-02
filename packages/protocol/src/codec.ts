@@ -211,6 +211,30 @@ export class PacketWriter {
     return this.cursor - HEADER_BYTES;
   }
 
+  /** Append a little-endian u32 to the body. */
+  pushU32(v: number): boolean {
+    if (this.cursor + 4 > MAX_PACKET_BYTES) return false;
+    this.view.setUint32(this.cursor, v >>> 0, true);
+    this.cursor += 4;
+    return true;
+  }
+
+  /**
+   * Append an f32 to the body.
+   *
+   * f32 rather than f64 for every spatial quantity on the wire. A single
+   * precision float carries about seven significant digits, which over a room
+   * ten metres across resolves to under a micrometre — several orders below
+   * what hand tracking can measure and far below what anyone can place a
+   * Launchpad to. The other half of a f64 would be describing noise.
+   */
+  pushFloat32(v: number): boolean {
+    if (this.cursor + 4 > MAX_PACKET_BYTES) return false;
+    this.view.setFloat32(this.cursor, v, true);
+    this.cursor += 4;
+    return true;
+  }
+
   /** Append an f64 to the body. Used by PONG's server timestamp. */
   pushFloat64(v: number): boolean {
     if (this.cursor + 8 > MAX_PACKET_BYTES) return false;

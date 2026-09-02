@@ -8,6 +8,7 @@ import {
 } from '@vrmc/protocol';
 import { ArgError, parseArgs, USAGE, type BridgeConfig } from './config.js';
 import { Router } from './core/Router.js';
+import { loadWorkspace, saveWorkspace } from './core/workspaceFile.js';
 import { checkNativeModules, formatChecks } from './core/selfCheck.js';
 import { BRIDGE_VERSION, runSelfTest } from './core/selfTest.js';
 import { autostartState, toggleAutostart } from './setup/autostart.js';
@@ -99,6 +100,30 @@ async function main(): Promise<void> {
   // router because it is built from the router's stats.
   let broadcast: Broadcaster | null = null;
 
+  /*
+   * Where everything sits, restored from the last run.
+   *
+   * Read before any device is opened, so the roster that goes out on the first
+   * connection already carries each device's placement and the headset never
+   * shows a Launchpad at its default pose and then moves it.
+   *
+   * Writes are debounced. A grab produces a placement per settled move, and
+   * writing the file on each one would put a synchronous disk write on the path
+   * of somebody dragging an instrument around.
+   */
+  const workspace = loadWorkspace();
+  let saveTimer: NodeJS.Timeout | null = null;
+  workspace.onChange = () => {
+    broadcast?.sendLayouts(workspace.state());
+    broadcast?.sendRoster(devices.roster());
+    if (saveTimer !== null) clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      saveTimer = null;
+      if (!saveWorkspace(workspace)) log('could not write the workspace file');
+    }, 1000);
+    saveTimer.unref();
+  };
+
   const devices = new DeviceManager(
     {
       onLed: (deviceId, ledIndex, r, g, b, blink) => {
@@ -111,6 +136,7 @@ async function main(): Promise<void> {
       noMidi: config.noMidi,
       loopbackPattern: config.loopbackPattern,
       portNameTemplate: config.portNameTemplate,
+      placementOf: (deviceId) => workspace.placementOf(deviceId),
     },
   );
 
@@ -162,6 +188,10 @@ async function main(): Promise<void> {
     const bus = broadcast;
     if (bus === null) return;
     bus.sendRoster(devices.roster());
+    // The arrangements too. Restoring one on reconnect is the whole reason
+    // they are stored on this side, and a roster without them would have the
+    // headset place everything and then be told to place it again.
+    bus.sendLayouts(workspace.state());
     for (const entry of devices.roster()) {
       devices.forEachLed(entry.deviceId, (ledIndex, r, g, b, blink) => {
         bus.queueLed(entry.deviceId, ledIndex, r, g, b, blink);
@@ -183,7 +213,7 @@ async function main(): Promise<void> {
     // Rate-limited by the caller below; a flood of malformed packets should not
     // itself become the thing that stalls the process.
     onMalformed: throttle((reason) => log(`dropped malformed packet: ${reason}`), 1000),
-  });
+  }, workspace);
 
   // TLS on the WebSocket is opt-in, and almost nobody needs it. The headset
   // reaches this bridge over a WebRTC data channel — authenticated by DTLS
@@ -438,12 +468,46 @@ async function main(): Promise<void> {
     statsTimer.unref();
   }
 
+  /*
+   * Push link quality to the headset, once a second.
+   *
+   * A second is deliberately slower than the dashboard's own refresh. These are
+   * numbers a person glances at to answer «is it lagging or am I early», and a
+   * readout that changes faster than it can be read is one nobody trusts —
+   * jitter in particular is already a smoothed estimate, so sampling it at a
+   * comfortable reading rate loses nothing.
+   *
+   * Sent regardless of traffic. A link that has gone quiet because packets
+   * stopped arriving is exactly the case somebody needs told about, and a
+   * push conditioned on activity would go silent at that moment.
+   */
+  const linkStatsTimer = setInterval(() => {
+    broadcast?.sendLinkStats({
+      jitterMs: router.stats.jitterMs,
+      peakJitterMs: router.stats.peakJitterMs,
+      lossRatio: router.stats.lossRatio,
+      packets: router.stats.packets,
+      dropped: router.stats.dropped,
+      reordered: router.stats.reordered,
+      malformed: router.stats.malformed,
+      activeNotes: router.activeNotes,
+    });
+  }, 1000);
+  linkStatsTimer.unref();
+
   let closing = false;
   const shutdown = async (signal: string): Promise<void> => {
     if (closing) return;
     closing = true;
     log(`${signal} — shutting down`);
     if (statsTimer !== null) clearInterval(statsTimer);
+    clearInterval(linkStatsTimer);
+    // Flush anything the debounce is still holding: the last thing somebody did
+    // before quitting is the thing they most expect to find on the next run.
+    if (saveTimer !== null) {
+      clearTimeout(saveTimer);
+      saveWorkspace(workspace);
+    }
     // Release before closing the ports: once they are gone there is nothing
     // left to send the Note Offs through, and whatever was sounding stays
     // sounding until the DAW is restarted.

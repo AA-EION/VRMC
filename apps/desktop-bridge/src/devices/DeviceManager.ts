@@ -6,7 +6,14 @@ import {
   type DeviceSpec,
   type EmulatorObserver,
 } from '@vrmc/devices';
-import { DeviceStatus, EventType, MidiStatus, statusForEventType } from '@vrmc/protocol';
+import {
+  DeviceStatus,
+  EventType,
+  MidiStatus,
+  statusForEventType,
+  type DevicePlacement,
+  type DeviceStateEntry,
+} from '@vrmc/protocol';
 import { NoteTracker } from '../midi/NoteTracker.js';
 import type { VirtualPort } from '../midi/MidiSink.js';
 import { openBidirectionalPort, type PortOptions, type PortResult } from '../midi/openPort.js';
@@ -60,6 +67,15 @@ export interface DeviceManagerOptions {
    * suffix is what distinguishes the two ports of one device.
    */
   portNameTemplate: string;
+  /**
+   * Where a device is, if anybody has said.
+   *
+   * Injected rather than stored here because placement outlives the device: the
+   * Workspace keeps it across a remove and re-add, and across a restart of the
+   * bridge itself. The manager owns ports and emulators; it has no business
+   * also being the memory of where things sit in somebody's room.
+   */
+  placementOf?: (deviceId: number) => DevicePlacement | null;
 }
 
 export const DEFAULT_PORT_NAME_TEMPLATE = '{device} {port}';
@@ -123,10 +139,19 @@ export class DeviceManager {
   }
 
   /** Roster for a DEVICE_STATE packet. */
-  roster(): Array<{ deviceId: number; status: number; model: string; detail: string }> {
-    const out: Array<{ deviceId: number; status: number; model: string; detail: string }> = [];
+  roster(): DeviceStateEntry[] {
+    const out: DeviceStateEntry[] = [];
     for (const d of this.devices.values()) {
-      out.push({ deviceId: d.id, status: d.status, model: d.model, detail: d.detail });
+      out.push({
+        deviceId: d.id,
+        status: d.status,
+        model: d.model,
+        detail: d.detail,
+        // Null when nobody has placed it, which is a real answer rather than a
+        // missing one: the headset puts a never-placed device at its default
+        // pose instead of at the player's feet.
+        placement: this.options.placementOf?.(d.id) ?? null,
+      });
     }
     return out.sort((a, b) => a.deviceId - b.deviceId);
   }

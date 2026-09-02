@@ -92,6 +92,9 @@ describe('creating and destroying emulated devices', () => {
         status: DeviceStatus.READY,
         model: DeviceModel.LAUNCHPAD_X,
         detail: 'Launchpad X LPX MIDI, Launchpad X LPX DAW',
+        // No placement: this manager was built without a Workspace, which is
+        // the same answer a device nobody has moved gets from one that has.
+        placement: null,
       },
     ]);
   });
