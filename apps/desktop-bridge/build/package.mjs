@@ -28,10 +28,10 @@ import { exec as execCb } from 'node:child_process';
 import { promisify } from 'node:util';
 import { cp, mkdir, readFile, rm, writeFile, chmod, readdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { dirname, join, sep } from 'node:path';
+import { basename, dirname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { infoPlist } from './infoPlist.mjs';
-import { signBundle, verifyBundle } from './codesign.mjs';
+import { signBundle, unsignableEntries, verifyBundle } from './codesign.mjs';
 
 const exec = promisify(execCb);
 const here = dirname(fileURLToPath(import.meta.url));
@@ -116,6 +116,28 @@ async function resolvePackageDir(name, from = join(root, 'package.json')) {
  * Returns true if one was found — a missing prebuild is reported rather than
  * silently producing a binary that cannot open a MIDI port.
  */
+/**
+ * Should this path be left out of the staged copy?
+ *
+ * `node_modules/.bin` is the one that matters. pnpm fills it with shell shims
+ * for a package's build-time tools — `pkg-prebuilds-copy` and
+ * `pkg-prebuilds-verify` under `@julusian/midi` — which resolve relative to a
+ * store layout the stage does not have, and which nothing here would run
+ * anyway: the bridge shells out to no dependency.
+ *
+ * They are not merely dead weight. `codesign` walks the whole bundle when it
+ * seals it, treats that directory as a subcomponent, and refuses the entire
+ * app with "bundle format unrecognized, invalid, or unsuitable" — naming the
+ * `.bin` directory and nothing about why. That failed a release.
+ */
+function isBuildDetritus(src) {
+  const name = basename(src);
+  return name === '.bin' || name === '.tmp' || name === '.package-lock.json';
+}
+
+/** `fs.cp` filter form of the above: keep everything that is not detritus. */
+const keepRuntimeFiles = (src) => !isBuildDetritus(src);
+
 async function copyMidiPrebuild(target, destDir) {
   const dir = await resolvePackageDir('@julusian/midi');
   if (dir === null) return false;
@@ -148,7 +170,8 @@ async function copyMidiPrebuild(target, destDir) {
   const prebuildRoot = join(dir, 'prebuilds');
   await cp(dir, pkgDest, {
     recursive: true,
-    filter: (src) => src !== prebuildRoot && !src.startsWith(prebuildRoot + sep),
+    filter: (src) =>
+      src !== prebuildRoot && !src.startsWith(prebuildRoot + sep) && keepRuntimeFiles(src),
   });
 
   // The one prebuild this target needs, in both places its loader may look:
@@ -198,7 +221,7 @@ async function stageDependencies(name, fromManifest, destModules, seen = new Set
   const to = join(destModules, ...name.split('/'));
   if (!existsSync(to)) {
     await mkdir(dirname(to), { recursive: true });
-    await cp(dir, to, { recursive: true });
+    await cp(dir, to, { recursive: true, filter: keepRuntimeFiles });
   }
 
   const manifest = JSON.parse(await readFile(join(dir, 'package.json'), 'utf8'));
@@ -253,7 +276,7 @@ async function copyDataChannel(target, destDir) {
   }
   // Only this platform's addon: the other eight are a hundred megabytes of
   // binaries for machines that will never run this build.
-  await cp(addonDir, join(modules, wanted), { recursive: true });
+  await cp(addonDir, join(modules, wanted), { recursive: true, filter: keepRuntimeFiles });
 
   const manifest = JSON.parse(await readFile(join(libDir, 'package.json'), 'utf8'));
   const seen = new Set(['node-datachannel', wanted]);
@@ -298,7 +321,10 @@ async function copyKoffi(target, destDir) {
     console.warn('  ! koffi is not installed');
     return false;
   }
-  await cp(dir, join(destDir, 'node_modules/koffi'), { recursive: true });
+  await cp(dir, join(destDir, 'node_modules/koffi'), {
+    recursive: true,
+    filter: keepRuntimeFiles,
+  });
 
   /*
    * koffi's actual binary lives in a separate package, exactly as
@@ -314,6 +340,7 @@ async function copyKoffi(target, destDir) {
   }
   await cp(addonDir, join(destDir, 'node_modules', ...platformPackage.split('/')), {
     recursive: true,
+    filter: keepRuntimeFiles,
   });
 
   const manifest = JSON.parse(await readFile(join(dir, 'package.json'), 'utf8'));
@@ -528,6 +555,18 @@ async function signApp(appPath) {
   }
 
   const entries = await listBundle(appPath);
+
+  const unsignable = unsignableEntries(entries);
+  if (unsignable.length > 0) {
+    throw new Error(
+      'The bundle contains build tooling that codesign cannot classify, and it ' +
+        'would refuse the whole app with "bundle format unrecognized, invalid, ' +
+        'or unsuitable" while naming only the directory:\n' +
+        unsignable.map((e) => `  ${e}`).join('\n') +
+        '\nExclude it where it is staged — see isBuildDetritus above.',
+    );
+  }
+
   const run = (command, args) =>
     exec(`${command} ${args.map((a) => JSON.stringify(a)).join(' ')}`);
 

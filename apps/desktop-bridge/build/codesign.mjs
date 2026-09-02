@@ -44,23 +44,48 @@
  * exactly the ordering question this file is about.
  */
 
+import { BUNDLE_EXECUTABLE } from './infoPlist.mjs';
+
 /** Extensions that are Mach-O code even though they are not executables. */
 const CODE_EXTENSIONS = ['.node', '.dylib', '.so'];
+
+/** Where a bundle keeps its executables. */
+const MACOS_DIR = 'Contents/MacOS/';
 
 /**
  * Is this path something `codesign` has to sign in its own right?
  *
- * Nested code is anything loadable: the addons, any dylib beside them, and the
- * helper executables under `Contents/MacOS`. Resources are not — an `.icns` is
- * sealed by the bundle's signature rather than carrying one of its own, and
- * asking `codesign` to sign a picture fails the build for no reason.
+ * Nested code is anything loadable: the addons wherever they were staged, any
+ * dylib beside them, and the helper executables sitting directly next to the
+ * main one. Everything else is a resource, sealed by the bundle's own
+ * signature rather than carrying one — and asking `codesign` to sign a picture
+ * or a README fails the build for no reason.
+ *
+ * TWO THINGS HERE ARE NOT OBVIOUS, AND BOTH BROKE A RELEASE
+ *
+ * `Contents/MacOS` is executables *by definition of the bundle format*, which
+ * is true of the directory itself and emphatically not of the tree beneath it.
+ * The staged addons bring their own `node_modules` — tslib, node-addon-api,
+ * detect-libc — and those are a few hundred `.js`, `.h`, `.gypi` and `.md`
+ * files that this signed one by one before failing, because "starts with
+ * Contents/MacOS/" does not mean "is a program". So: the directory, not the
+ * subtree. The `.node` files staged in `prebuilds/` are still caught, by
+ * extension, which is the honest reason to match on one.
+ *
+ * And the main executable is excluded deliberately. `codesign` on the path of a
+ * bundle's `CFBundleExecutable` does not sign that file — it signs the
+ * enclosing bundle, which is a documented shortcut and a trap here: it means a
+ * plan that lists it as nested code signs the whole bundle partway through,
+ * before the rest of the nested code has been signed at all. The bundle's own
+ * pass covers it, last, which is where it belongs.
  */
-export function isNestedCode(relativePath) {
+export function isNestedCode(relativePath, mainExecutable = BUNDLE_EXECUTABLE) {
+  if (relativePath === MACOS_DIR + mainExecutable) return false;
   const lower = relativePath.toLowerCase();
   if (CODE_EXTENSIONS.some((ext) => lower.endsWith(ext))) return true;
-  // Everything under Contents/MacOS is executable code by definition — that is
-  // what the directory means to the bundle format.
-  return relativePath.startsWith('Contents/MacOS/');
+  if (!relativePath.startsWith(MACOS_DIR)) return false;
+  // Directly in Contents/MacOS — not somewhere in the tree under it.
+  return !relativePath.slice(MACOS_DIR.length).includes('/');
 }
 
 /**
@@ -71,11 +96,13 @@ export function isNestedCode(relativePath) {
  * would, and getting the general case right costs one comparator.
  *
  * @param entries relative paths inside the bundle, in any order
+ * @param mainExecutable the bundle's CFBundleExecutable, which is *not* signed
+ *   on its own — see `isNestedCode`
  * @returns relative paths to sign, then `''` standing for the bundle root
  */
-export function signingPlan(entries) {
+export function signingPlan(entries, mainExecutable = BUNDLE_EXECUTABLE) {
   const nested = entries
-    .filter((entry) => isNestedCode(entry))
+    .filter((entry) => isNestedCode(entry, mainExecutable))
     .sort((a, b) => {
       const byDepth = depthOf(b) - depthOf(a);
       // Depth first, then name — so the plan is stable and a diff of it is
@@ -97,8 +124,12 @@ function depthOf(path) {
  * is `execFile`. `identity` defaults to `-`, which is what makes it ad-hoc —
  * pass a Developer ID here the day one exists and nothing else changes.
  */
-export async function signBundle(bundlePath, entries, { run, identity = '-', log = () => {} }) {
-  const plan = signingPlan(entries);
+export async function signBundle(
+  bundlePath,
+  entries,
+  { run, identity = '-', log = () => {}, mainExecutable = BUNDLE_EXECUTABLE },
+) {
+  const plan = signingPlan(entries, mainExecutable);
   for (const relative of plan) {
     const target = relative === '' ? bundlePath : `${bundlePath}/${relative}`;
     // --force because several of these arrive already signed: pkg signs the
@@ -113,6 +144,37 @@ export async function signBundle(bundlePath, entries, { run, identity = '-', log
     log(`  signed ${relative === '' ? '(bundle)' : relative}`);
   }
   return plan;
+}
+
+/** Directories that are build tooling, not part of a shipped app. */
+const NOT_RUNTIME = ['.bin', '.tmp'];
+
+/**
+ * Anything in the bundle that `codesign` will refuse to look at.
+ *
+ * This exists because of how the refusal reads. `codesign` given a bundle with
+ * a `node_modules/.bin` in it fails the *whole app* with:
+ *
+ *     bundle format unrecognized, invalid, or unsuitable
+ *     In subcomponent: .../@julusian/midi/node_modules/.bin
+ *
+ * which names a directory, says nothing about what is wrong with it, and
+ * attaches the complaint to whichever `codesign` call happened to be walking
+ * the bundle at the time — so it reads as a fault in the binary being signed.
+ * It cost a release build to work out that it meant "there is a directory of
+ * shell scripts in here and I do not know what it is".
+ *
+ * Packaging does not stage these any more. This is the belt: if one reappears
+ * — a new dependency, a changed pnpm layout — the build says which file and
+ * why, instead of repeating that sentence.
+ *
+ * @param entries relative paths inside the bundle
+ * @returns the offending paths, empty when the bundle is clean
+ */
+export function unsignableEntries(entries) {
+  return entries.filter((entry) =>
+    entry.split('/').some((segment) => NOT_RUNTIME.includes(segment)),
+  );
 }
 
 /**

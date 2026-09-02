@@ -106,12 +106,22 @@ jobs:
           # not the command's, so a failing codesign in here would pass the step
           # silently — which is the exact failure mode this check exists to
           # catch. Read them and check each one.
+          #
+          # The selection has to match build/codesign.mjs exactly, and the
+          # obvious spelling of it is wrong: `-path '*/MacOS/*'` also matches
+          # the addons' staged dependency trees, so this would run
+          # `codesign --verify` against a few hundred READMEs and headers and go
+          # red on the first one. Contents/MacOS *itself* is executables; the
+          # tree under it is not.
           while IFS= read -r binary; do
             codesign --verify --strict "$binary" || {
               echo "nested binary is not correctly signed: $binary"
               exit 1
             }
-          done < <(find "$APP" -type f \( -name '*.node' -o -name '*.dylib' -o -path '*/MacOS/*' \))
+          done < <(find "$APP" -type f \( \
+               -name '*.node' -o -name '*.dylib' -o -name '*.so' \
+            -o \( -path "$APP/Contents/MacOS/*" ! -path "$APP/Contents/MacOS/*/*" \) \
+          \))
           echo "signature verified"
 
       # Smoke-test on the OS the artifact targets.
