@@ -493,3 +493,27 @@ code {
   background: var(--ink-2);
   border-color: var(--ink-2);
 }
+
+/* ---- A switch, set as a line of text -------------------------------------
+   The checkbox is the browser's own, in the current ink. A custom control here
+   would be a new object the identity does not have, drawn to look like a
+   control the platform already provides and already makes accessible. */
+
+.toggle {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-2);
+  margin-top: var(--s-3);
+  font-size: 0.875rem;
+  color: var(--ink-2);
+  cursor: pointer;
+}
+
+.toggle input {
+  accent-color: var(--ink);
+  margin: 0;
+}
+
+.toggle:hover span {
+  color: var(--ink);
+}

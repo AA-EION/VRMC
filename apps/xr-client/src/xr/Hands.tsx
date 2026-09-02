@@ -174,6 +174,27 @@ function HandModel({
     material.color.set(colour);
   }, [material, colour]);
 
+  /*
+   * Push the material onto an already-loaded rig.
+   *
+   * The rig is built once and kept; the material changes when the room does,
+   * because the same hand is a drawn object in the galaxy and a depth-only
+   * occluder against passthrough. Rebuilding the rig for that would refetch and
+   * re-clone a skinned mesh on a mode toggle — and using two rigs instead would
+   * mean the silhouette and the drawn hand could differ by a frame of tracking,
+   * which is a seam at the exact edge that has to be clean.
+   */
+  useEffect(() => {
+    const root = rig.current;
+    if (root === null) return;
+    root.traverse((o) => {
+      const mesh = o as SkinnedMesh;
+      if (mesh.isSkinnedMesh !== true) return;
+      mesh.material = material as Material;
+      mesh.renderOrder = renderOrder;
+    });
+  }, [material, bones, renderOrder]);
+
   /* Which hand is in this slot. Read from the binding rather than assumed:
      nothing guarantees the left hand is the first input source, and a left mesh
      bound to right-hand joints is a hand turned inside out. */
@@ -203,12 +224,15 @@ function HandModel({
         root.traverse((o) => {
           const mesh = o as SkinnedMesh;
           if (mesh.isSkinnedMesh !== true) return;
-          mesh.material = material as Material;
           // Bound to a skeleton the CPU never re-measures, and always within
           // arm's reach: culling it can only ever be wrong.
           mesh.frustumCulled = false;
-          mesh.renderOrder = renderOrder;
         });
+        // The material and the draw order are applied by the effect below,
+        // which also runs when the room changes. Setting them here as well
+        // would mean this effect had to depend on them — and then a mode
+        // toggle would refetch and re-clone a skinned mesh.
+
         rig.current = root;
         const group3 = group.current;
         if (group3 !== null) group3.add(root);
@@ -225,7 +249,7 @@ function HandModel({
       if (root !== null) root.removeFromParent();
       rig.current = null;
     };
-  }, [handedness, material, renderOrder]);
+  }, [handedness]);
 
   useFrame(() => {
     const root = rig.current;

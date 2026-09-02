@@ -1006,6 +1006,72 @@ if (hands.ok && hands.skinned === 2) {
   check('a tracked hand is drawn', hands.visible === 2, `${hands.visible} visible`);
 }
 
+/*
+ * The same rig, doing two different jobs.
+ *
+ * In the galaxy the hands are drawn. Against passthrough they write depth and
+ * no colour, which is what makes the compositor show your own hands there while
+ * the pad behind them is correctly hidden — Meta's own recommended route, since
+ * their depth map deliberately has hands removed from it.
+ *
+ * Checked as one rig rather than two on purpose: a silhouette that is not
+ * exactly the drawn hand's shape shows a seam at the one edge that has to be
+ * clean, and a mode toggle must not refetch and re-clone a skinned mesh.
+ */
+const occlusion = await page.evaluate(async () => {
+  const h = window.__vrmc;
+  const survey = () => {
+    let meshes = 0;
+    let colourWriting = 0;
+    let depthOnly = 0;
+    const orders = new Set();
+    const materials = new Set();
+    h.scene.traverse((o) => {
+      if (!o.isSkinnedMesh) return;
+      meshes++;
+      orders.add(o.renderOrder);
+      materials.add(o.material.uuid);
+      if (o.material.colorWrite) colourWriting++;
+      else if (o.material.depthWrite) depthOnly++;
+    });
+    return { meshes, colourWriting, depthOnly, orders: [...orders], materials: materials.size };
+  };
+
+  const click = (label) =>
+    [...document.querySelectorAll('.segmented button')]
+      .find((b) => b.textContent.trim() === label)
+      .click();
+
+  const settle = async () => {
+    for (let i = 0; i < 30; i++) await new Promise((r) => requestAnimationFrame(r));
+  };
+
+  const inGalaxy = survey();
+  click('Your room');
+  await settle();
+  const inRoom = survey();
+  click('Full VR');
+  await settle();
+  const back = survey();
+
+  return { inGalaxy, inRoom, back };
+});
+
+check('the hands are drawn in the galaxy',
+  occlusion.inGalaxy.meshes === 2 && occlusion.inGalaxy.colourWriting === 2,
+  `${occlusion.inGalaxy.colourWriting}/2 writing colour`);
+check('the hands become depth-only occluders against passthrough',
+  occlusion.inRoom.meshes === 2 &&
+    occlusion.inRoom.depthOnly === 2 &&
+    occlusion.inRoom.colourWriting === 0,
+  `${occlusion.inRoom.depthOnly}/2 depth-only, ${occlusion.inRoom.colourWriting} writing colour`);
+check('the occluder is drawn before the instruments',
+  occlusion.inRoom.orders.every((o) => o < 0),
+  `render order ${occlusion.inRoom.orders.join(', ')}`);
+check('switching rooms reuses the rig rather than rebuilding it',
+  occlusion.back.meshes === 2 && occlusion.back.colourWriting === 2,
+  `${occlusion.back.meshes} meshes after two switches`);
+
 await page.evaluate(() => {
   [...document.querySelectorAll('.segmented button')]
     .find((b) => b.textContent.trim() === 'Your room')

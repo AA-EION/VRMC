@@ -8,6 +8,11 @@ import type { LaunchpadInstance } from './devices/LaunchpadInstance.js';
 import type { Engine } from './Engine.js';
 import { Backdrop } from './xr/Backdrop.js';
 import { Hands } from './xr/Hands.js';
+import {
+  EnvironmentOcclusion,
+  RENDER_ORDER as OCCLUSION_ORDER,
+  type DepthSensingState,
+} from './xr/Occlusion.js';
 import { INK } from './brand/tokens.js';
 import { currentTheme } from './brand/theme.js';
 import type { XrMode } from './xr/session.js';
@@ -61,6 +66,10 @@ export interface SceneProps {
    * all passthrough has ever been. The session is the same one either way.
    */
   mode?: XrMode;
+  /** Whether the player asked for environment occlusion. See Occlusion.tsx. */
+  depthOcclusion?: boolean;
+  /** Told what depth sensing actually did, so the interface can stop promising it. */
+  onDepthState?: (state: DepthSensingState) => void;
 }
 
 /** What the scene needs in order to draw the keypad. */
@@ -83,6 +92,8 @@ export function Scene({
   devices,
   keypad = null,
   mode = 'passthrough',
+  depthOcclusion = false,
+  onDepthState,
 }: SceneProps): React.ReactElement {
   const gl = useThree((state) => state.gl);
   const scene = useThree((state) => state.scene);
@@ -94,12 +105,6 @@ export function Scene({
       delete window.__vrmc;
     };
   }, [engine, scene, gl, camera]);
-
-  // Whether the skeleton is worth filling at all. Set outside the frame loop:
-  // it changes when somebody picks a room, which is human speed.
-  useEffect(() => {
-    engine.drawHands = mode === 'immersive';
-  }, [engine, mode]);
 
   useFrame((_state, delta, xrFrame) => {
     engine.update(xrFrame as XRFrame | undefined, gl.xr.getReferenceSpace(), delta);
@@ -116,18 +121,33 @@ export function Scene({
       <Backdrop immersive={mode === 'immersive'} />
 
       {/*
-        Hands, in the full room only.
+        Hands — the same rig in both rooms, doing two different jobs.
 
-        In passthrough they are already there — your own, through the cameras,
-        at no cost and with tracking nothing drawn could match. A model over
-        the top would be a worse copy of something already correct. In the
-        galaxy there is nothing to see, and a pad struck by an invisible finger
-        is a pad you have to aim at from memory.
+        In the galaxy they are drawn, because there is nothing else to see and a
+        pad struck by an invisible finger is one you aim at from memory. In
+        passthrough they are drawn as depth and no colour, so the compositor
+        shows your actual hands there and the pad behind them is correctly
+        hidden. One rig rather than two: a silhouette that is not exactly the
+        drawn hand's shape is a seam at the one edge that has to be clean.
       */}
       <Hands
         skeleton={engine.skeleton}
-        visible={mode === 'immersive'}
+        visible
+        depthOnly={mode === 'passthrough'}
+        renderOrder={mode === 'passthrough' ? OCCLUSION_ORDER.hands : 0}
         colour={currentTheme() === 'dark' ? INK.bone : INK.sumi}
+      />
+
+      {/*
+        The real room's own depth, when the player has asked for it. Refused
+        outright in the galaxy: three replaces the camera's far plane with the
+        depth API's, which reaches about five metres, and that would clip the
+        sky away rather than dim it. See Occlusion.tsx.
+      */}
+      <EnvironmentOcclusion
+        enabled={depthOcclusion}
+        available={mode === 'passthrough'}
+        onState={onDepthState}
       />
 
       {/*

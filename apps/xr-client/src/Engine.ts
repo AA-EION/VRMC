@@ -74,11 +74,16 @@ export class Engine {
   readonly skeleton = new HandSkeleton();
 
   /**
-   * Whether the hand mesh is on screen.
+   * Whether anything is using the hand mesh this frame.
    *
-   * Set by the app from the room mode. Guarding the skeleton on it is what
-   * keeps twenty extra joints per hand off the frame of somebody working in
-   * passthrough, where their real hands are already visible and better.
+   * True for the whole of a session, and that is a change from what it first
+   * was. The mesh started as the full room's feature — passthrough already has
+   * your own hands, better than anything we could draw — so the skeleton was
+   * only filled there. Then the passthrough silhouette turned out to need the
+   * *same* rig, drawn as depth and no colour, which is the official way to make
+   * a hand read against the cameras. So both rooms need it, and what is left
+   * here is the switch that keeps twenty-five joints per hand off the frame
+   * outside a session, where there are no hands to read anyway.
    */
   drawHands = false;
   readonly fingers = new FingerFrame();
@@ -327,6 +332,7 @@ export class Engine {
     this.running = true;
     this.tracker.syncInputSources(session);
     this.skeleton.syncInputSources(session);
+    this.drawHands = true;
     this.synth.start();
     this.synth.resume();
   }

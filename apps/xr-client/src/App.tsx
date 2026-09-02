@@ -17,6 +17,7 @@ import { PairingError, resolvePairingCode } from './net/pairing.js';
 import { rtcTransport, webSocketTransport } from './net/Transport.js';
 import { KeypadController } from './ui/KeypadController.js';
 import { preloadHands } from './xr/Hands.js';
+import type { DepthSensingState } from './xr/Occlusion.js';
 
 /**
  * Remember the pairing code between visits.
@@ -38,6 +39,9 @@ const URL_STORAGE_KEY = 'vrmc.bridgeUrl';
  * every session — which is the kind of thing this project exists not to do.
  */
 const MODE_STORAGE_KEY = 'vrmc.xrMode';
+
+/** Remember whether environment occlusion was asked for. */
+const DEPTH_STORAGE_KEY = 'vrmc.depthOcclusion';
 
 /** Read a remembered value, tolerating storage being unavailable. */
 function recall(key: string): string {
@@ -101,6 +105,17 @@ export function App(): React.ReactElement {
   const [mode, setMode] = useState<XrMode>(() =>
     recall(MODE_STORAGE_KEY) === 'immersive' ? 'immersive' : 'passthrough',
   );
+  /*
+   * Environment occlusion, off unless asked for.
+   *
+   * The hand silhouette is not covered by this and is not optional — it is how
+   * passthrough is supposed to look. This is the room's own depth, which is
+   * best-effort on every runtime that has it. See xr/Occlusion.tsx.
+   */
+  const [depthOcclusion, setDepthOcclusion] = useState(
+    () => recall(DEPTH_STORAGE_KEY) === 'on',
+  );
+  const [depthState, setDepthState] = useState<DepthSensingState>('off');
   const [error, setError] = useState('');
 
   useEffect(() => {
@@ -210,6 +225,7 @@ export function App(): React.ReactElement {
           // The session is gone but the notes it started are not: release them
           // before anything else, or the DAW holds them until it is restarted.
           engine.allNotesOff();
+          engine.drawHands = false;
           setSessionActive(false);
           setPassthrough(false);
         },
@@ -228,6 +244,11 @@ export function App(): React.ReactElement {
   const handleMode = useCallback((next: XrMode) => {
     setMode(next);
     remember(MODE_STORAGE_KEY, next);
+  }, []);
+
+  const handleDepthOcclusion = useCallback((next: boolean) => {
+    setDepthOcclusion(next);
+    remember(DEPTH_STORAGE_KEY, next ? 'on' : 'off');
   }, []);
 
   /**
@@ -380,6 +401,8 @@ export function App(): React.ReactElement {
           engine={engine}
           devices={devices}
           mode={mode}
+          depthOcclusion={depthOcclusion}
+          onDepthState={setDepthState}
           keypad={
             keypadVisible
               ? {
@@ -407,6 +430,9 @@ export function App(): React.ReactElement {
         onPanic={handlePanic}
         mode={mode}
         onModeChange={handleMode}
+        depthOcclusion={depthOcclusion}
+        onDepthOcclusionChange={handleDepthOcclusion}
+        depthState={depthState}
         devices={devices}
         onAddDevice={(model) => engine.addDevice(model)}
         onRemoveDevice={(id) => engine.removeDevice(id)}

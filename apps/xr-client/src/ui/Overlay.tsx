@@ -5,6 +5,7 @@ import { DeviceStatus } from '@vrmc/protocol';
 import type { LaunchpadInstance } from '../devices/LaunchpadInstance.js';
 import type { LinkStatus } from '../net/BridgeLink.js';
 import type { XrMode, XrSupport } from '../xr/session.js';
+import type { DepthSensingState } from '../xr/Occlusion.js';
 import { Logo } from '../brand/Logo.js';
 import { SEAL } from '../brand/tokens.js';
 import { useTheme, type ThemePref } from '../brand/theme.js';
@@ -28,6 +29,9 @@ export interface OverlayProps {
   pairingNote: string;
   mode: XrMode;
   onModeChange: (mode: XrMode) => void;
+  depthOcclusion: boolean;
+  onDepthOcclusionChange: (on: boolean) => void;
+  depthState: DepthSensingState;
 }
 
 /** The three theme states, named the way the identity names them. */
@@ -35,6 +39,20 @@ const THEME_LABEL: Record<ThemePref, string> = {
   system: 'Auto',
   light: 'Light',
   dark: 'Dark',
+};
+
+/**
+ * What to say about depth sensing, given what it actually did.
+ *
+ * Reported rather than promised. The feature is requested as optional, may not
+ * be granted, and is best-effort even where it is — so the interface says which
+ * of those happened instead of showing a checkbox that claims to have worked.
+ */
+const DEPTH_NOTE: Record<DepthSensingState, string> = {
+  off: 'Uses the headset’s depth sensing, which is approximate: edges are soft and can shimmer.',
+  unsupported: 'This headset did not offer depth sensing, so nothing changed.',
+  waiting: 'Waiting for the headset’s first depth frame…',
+  active: 'Active. Edges are approximate and can shimmer — that is the sensor, not the app.',
 };
 
 const STATE_LABEL: Record<LinkStatus['state'], string> = {
@@ -73,6 +91,9 @@ export function Overlay(props: OverlayProps): React.ReactElement {
     pairingNote,
     mode,
     onModeChange,
+    depthOcclusion,
+    onDepthOcclusionChange,
+    depthState,
   } = props;
 
   const connected = status.state === 'open';
@@ -201,6 +222,32 @@ export function Overlay(props: OverlayProps): React.ReactElement {
             ? 'The instruments sit in the EION Studios galaxy. Switching back is instant and does not interrupt the MIDI connection.'
             : 'The instruments sit in the room around you. Switch to full VR at any time, mid-session, without dropping the connection.'}
         </p>
+
+        {/*
+          Environment occlusion, said plainly.
+
+          Hand occlusion is not offered here because it is not a choice: the
+          hands are drawn as depth in passthrough and that is simply how the
+          room is supposed to look. This is the *room's* depth, which is
+          best-effort on every runtime that has it, so it is opt-in and the
+          copy says what it actually does rather than promising occlusion.
+        */}
+        {mode === 'passthrough' && (
+          <>
+            <label className="toggle">
+              <input
+                type="checkbox"
+                checked={depthOcclusion}
+                onChange={(e) => onDepthOcclusionChange(e.target.checked)}
+              />
+              <span>Let real objects hide the instruments</span>
+            </label>
+            <p className="hint spaced">
+              {DEPTH_NOTE[depthState]} Your hands already pass in front of the instruments
+              correctly; this is about the desk and everything else in the room.
+            </p>
+          </>
+        )}
       </section>
 
       <section className="card">
