@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Canvas } from '@react-three/fiber';
 import type { WebGLRenderer } from 'three';
+import { DeviceModel } from '@vrmc/devices';
 import { Engine } from './Engine.js';
 import type { LaunchpadInstance } from './devices/LaunchpadInstance.js';
 import { Scene } from './Scene.js';
@@ -17,6 +18,8 @@ import {
 import { PairingError, resolvePairingCode } from './net/pairing.js';
 import { rtcTransport, webSocketTransport } from './net/Transport.js';
 import { KeypadController } from './ui/KeypadController.js';
+import { WristMenu, type WristMenuState } from './ui/WristMenu.js';
+import { Calibration, CALIBRATION_PROMPT, HITS_PER_STEP } from './ui/Calibration.js';
 import { preloadHands } from './xr/Hands.js';
 import type { DepthSensingState } from './xr/Occlusion.js';
 
@@ -43,6 +46,18 @@ const MODE_STORAGE_KEY = 'vrmc.xrMode';
 
 /** Remember whether environment occlusion was asked for. */
 const DEPTH_STORAGE_KEY = 'vrmc.depthOcclusion';
+
+/** …and focus mode. */
+const FOCUS_STORAGE_KEY = 'vrmc.focus';
+
+/**
+ * The velocity curve fitted to whoever uses this headset.
+ *
+ * Local rather than on the bridge, deliberately: a layout describes a room
+ * and belongs with the computer that room is in, but a velocity curve
+ * describes a pair of hands and belongs with the headset those hands put on.
+ */
+const VELOCITY_STORAGE_KEY = 'vrmc.velocityCurve';
 
 /** Read a remembered value, tolerating storage being unavailable. */
 function recall(key: string): string {
@@ -118,6 +133,10 @@ export function App(): React.ReactElement {
     () => recall(DEPTH_STORAGE_KEY) === 'on',
   );
   const [depthState, setDepthState] = useState<DepthSensingState>('off');
+  /** Quiet everything around the instrument. See xr/FocusVignette.tsx. */
+  const [focus, setFocus] = useState(() => recall(FOCUS_STORAGE_KEY) === 'on');
+  /** What the wrist console is showing, so its labels can be redrawn. */
+  const [wristState, setWristState] = useState<WristMenuState | null>(null);
   const [error, setError] = useState('');
 
   useEffect(() => {
@@ -267,6 +286,78 @@ export function App(): React.ReactElement {
 
   const handlePanic = useCallback(() => engine.allNotesOff(), [engine]);
 
+  /*
+   * The calibration this headset already has, if any.
+   *
+   * Applied before anything is played rather than when the routine next runs:
+   * somebody who calibrated yesterday should find their own curve today
+   * without being asked again.
+   */
+  useEffect(() => {
+    const stored = recall(VELOCITY_STORAGE_KEY);
+    if (stored === '') return;
+    try {
+      const fit = JSON.parse(stored) as { gamma: number; minSpeed: number; maxSpeed: number };
+      if ([fit.gamma, fit.minSpeed, fit.maxSpeed].every((v) => Number.isFinite(v))) {
+        engine.setVelocityFit(fit);
+      }
+    } catch {
+      // A stored curve that will not parse is one preset kept, which plays.
+    }
+  }, [engine]);
+
+  const calibration = useMemo(() => new Calibration(), []);
+  const [calibrating, setCalibrating] = useState(false);
+
+  /** True when every emulated device is pinned; drives the console's label. */
+  const allPinned = devices.length > 0 && devices.every((d) => d.pinned);
+
+  const handleFocus = useCallback((next: boolean) => {
+    setFocus(next);
+    remember(FOCUS_STORAGE_KEY, next ? 'on' : 'off');
+  }, []);
+
+  /*
+   * The guided routine, driven from the wrist.
+   *
+   * Every measured strike on any surface feeds it, so somebody calibrates on
+   * whichever instrument is in front of them rather than on a nominated one —
+   * and the prompts go in the console's own readout line, which is already
+   * read at the right distance. A second floating panel saying «hit five pads
+   * gently» would be a second thing to find while your hands are busy.
+   */
+  const startCalibration = useCallback(() => {
+    calibration.onChange = (state) => {
+      if (state.step !== null) {
+        const done = state.collected;
+        engine.wrist?.setNotice(
+          `${CALIBRATION_PROMPT[state.step]} (${done}/${HITS_PER_STEP})`,
+        );
+        return;
+      }
+      engine.listenForStrikes(null);
+      setCalibrating(false);
+      if (state.fit === null) {
+        engine.wrist?.setNotice(state.problem);
+        return;
+      }
+      engine.setVelocityFit(state.fit);
+      remember(VELOCITY_STORAGE_KEY, JSON.stringify(state.fit));
+      engine.wrist?.setNotice('Calibrated. Your soft, medium and hard now mean what you meant.');
+    };
+    setCalibrating(true);
+    calibration.start();
+    engine.listenForStrikes((speed) => calibration.record(speed));
+  }, [calibration, engine]);
+
+  const stopCalibration = useCallback(() => {
+    calibration.cancel();
+    engine.listenForStrikes(null);
+    setCalibrating(false);
+    engine.wrist?.setNotice('');
+  }, [calibration, engine]);
+
+
   const handleMode = useCallback((next: XrMode) => {
     setMode(next);
     remember(MODE_STORAGE_KEY, next);
@@ -317,6 +408,87 @@ export function App(): React.ReactElement {
     },
     [engine],
   );
+
+  /*
+   * The console worn on the wrist.
+   *
+   * Built once and re-labelled as state changes, rather than rebuilt: it owns a
+   * poke detector and a highlighter, and throwing those away every time
+   * somebody toggles focus mode would drop whatever a finger was resting on.
+   *
+   * The actions here are the ones you want *while playing*, which is a
+   * different list from the setup page's: nothing about pairing, nothing about
+   * MIDI ports, and everything about the room you are standing in.
+   */
+  const wrist = useMemo(() => new WristMenu([]), []);
+
+  useEffect(() => {
+    engine.wrist = wrist;
+    wrist.onChange = setWristState;
+    setWristState(wrist.state);
+    return () => {
+      engine.wrist = null;
+      wrist.onChange = null;
+    };
+  }, [engine, wrist]);
+
+  // Kept in a ref so the item list — which is rebuilt whenever a label would
+  // change — does not have to be rebuilt whenever a *handler* changes.
+  const actions = useRef({ mode, focus, depthOcclusion });
+  actions.current = { mode, focus, depthOcclusion };
+
+  useEffect(() => {
+    wrist.setItems([
+      {
+        id: 'room',
+        label: () => (mode === 'immersive' ? 'ROOM · GALAXY' : 'ROOM · YOURS'),
+        live: () => mode === 'immersive',
+        run: () => handleMode(mode === 'immersive' ? 'passthrough' : 'immersive'),
+      },
+      {
+        id: 'focus',
+        label: () => (focus ? 'FOCUS · ON' : 'FOCUS · OFF'),
+        live: () => focus,
+        run: () => handleFocus(!focus),
+      },
+      {
+        id: 'add',
+        label: () => '+ LAUNCHPAD',
+        run: () => {
+          engine.addDevice(DeviceModel.LAUNCHPAD_X);
+        },
+      },
+      {
+        id: 'pin',
+        label: () => (allPinned ? 'UNPIN ALL' : 'PIN ALL'),
+        live: () => allPinned,
+        run: () => {
+          for (const device of engine.launchpads) engine.pinDevice(device.deviceId, !allPinned);
+        },
+      },
+      {
+        id: 'surface',
+        label: () => 'DROP TO DESK',
+        run: () => {
+          for (const device of engine.launchpads) engine.dropToSurface(device.deviceId);
+        },
+      },
+      {
+        id: 'calibrate',
+        label: () => (calibrating ? 'STOP' : 'CALIBRATE'),
+        live: () => calibrating,
+        run: () => (calibrating ? stopCalibration() : startCalibration()),
+      },
+    ]);
+    // Labels are captured by value here, so the list is rebuilt whenever one of
+    // them would read differently — which is at human speed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wrist, mode, focus, allPinned, calibrating]);
+
+  // The link's own figures, at the rate they are readable rather than per frame.
+  useEffect(() => {
+    wrist.setLink(status.rttMs, status.quality);
+  }, [wrist, status.rttMs, status.quality]);
 
   /*
    * The keypad the user types a code on with their hands.
@@ -428,7 +600,10 @@ export function App(): React.ReactElement {
           devices={devices}
           mode={mode}
           depthOcclusion={depthOcclusion}
+          focus={focus}
           onDepthState={setDepthState}
+          wrist={wrist}
+          wristState={wristState}
           keypad={
             keypadVisible
               ? {

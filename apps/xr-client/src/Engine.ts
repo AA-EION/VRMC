@@ -43,6 +43,7 @@ import { HandTracker } from './xr/handTracking.js';
 import { HandSkeleton } from './xr/HandSkeleton.js';
 import { SurfaceAnchor } from './xr/SurfaceAnchor.js';
 import { KeypadController } from './ui/KeypadController.js';
+import type { WristMenu } from './ui/WristMenu.js';
 
 /** Everything needed to render and drive one instrument. */
 export interface Instrument {
@@ -207,6 +208,15 @@ export class Engine {
    * spending on setup.
    */
   keypad: KeypadController | null = null;
+
+  /**
+   * The console on the player's wrist.
+   *
+   * Set by the app, like the keypad. Advanced here rather than from the view
+   * because it reads the same `FingerFrame` the instruments do, and everything
+   * that reads that frame has to run inside one pass over it.
+   */
+  wrist: WristMenu | null = null;
 
   /**
    * Force the pairing panel on screen outside an XR session.
@@ -746,6 +756,23 @@ export class Engine {
       // Only while it is on screen. A detector running against a panel nobody
       // can see would still consume every fingertip and could still fire.
       if (this.keypadVisible) this.keypad?.update(this.fingers, dt);
+
+      /*
+       * The wrist console, after the instruments.
+       *
+       * It gates itself on whether the wrist is actually turned toward the eye
+       * — see WristMenu — so a hand playing a pad grid cannot press it. Called
+       * unconditionally because that gate is the menu's own business and
+       * duplicating it here would be two places to get it wrong.
+       */
+      this.wrist?.update(
+        this.skeleton,
+        this.fingers,
+        this.viewer[0],
+        this.viewer[1],
+        this.viewer[2],
+        dt,
+      );
     }
 
     this.link.endFrame();
@@ -778,6 +805,7 @@ export class Engine {
     }
     for (const device of this.launchpads) device.releaseAll();
     this.knobs.releaseAll(this.knobSink);
+    this.wrist?.close();
     this.link.endFrame();
     this.link.sendPanic();
     this.running = false;

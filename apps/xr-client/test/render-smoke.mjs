@@ -55,13 +55,15 @@ function serve() {
 }
 
 /*
- * Scene objects that belong to the room rather than to the instruments.
+ * Subtrees that are not instruments.
  *
- * Named, and excluded by name, so the instrument count below keeps saying what
- * its name says. Counting them would mean this check failed — confusingly, and
- * somewhere unrelated — every time the room gained anything.
+ * The room's own furniture and the wrist console. Both are mounted for the
+ * whole session — the console hides itself rather than unmounting, so its
+ * shaders are compiled before somebody first turns their wrist rather than at
+ * the moment they do — so both are in the scene graph while the counts below
+ * are taken. Excluded by name so those counts keep saying what their names say.
  */
-const ROOM_OBJECTS = ['backdrop-shell', 'focus-vignette'];
+const ROOM_OBJECTS = ['backdrop-shell', 'focus-vignette', 'wrist-console'];
 
 const checks = [];
 const check = (name, pass, detail = '') => {
@@ -236,14 +238,20 @@ const scene = await page.evaluate((roomObjects) => {
   let totalInstances = 0;
   let meshes = 0;
   let withInstanceColor = 0;
+  // True for anything inside a subtree the room owns rather than an instrument.
+  const isRoom = (node) => {
+    for (let n = node; n; n = n.parent) {
+      if (roomObjects.includes(n.name)) return true;
+    }
+    return false;
+  };
   h.scene.traverse((o) => {
+    if (isRoom(o)) return;
     if (o.isInstancedMesh) {
       instanced++;
       totalInstances += o.count;
       if (o.instanceColor) withInstanceColor++;
-    } else if (o.isMesh && !roomObjects.includes(o.name)) {
-      // The room's own furniture is not an instrument, and the count below is
-      // about instruments.
+    } else if (o.isMesh) {
       meshes++;
     }
   });

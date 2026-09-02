@@ -18,6 +18,8 @@ import { INK } from './brand/tokens.js';
 import { currentTheme } from './brand/theme.js';
 import type { XrMode } from './xr/session.js';
 import { ConnectPanel } from './ui/ConnectPanel.js';
+import { WristPanel } from './ui/WristPanel.js';
+import type { WristMenu, WristMenuState } from './ui/WristMenu.js';
 import type { KeypadController } from './ui/KeypadController.js';
 
 /**
@@ -71,6 +73,10 @@ export interface SceneProps {
   depthOcclusion?: boolean;
   /** Quiet everything around the instrument. See FocusVignette.tsx. */
   focus?: boolean;
+  /** The console worn on the wrist, or null before it is built. */
+  wrist?: WristMenu | null;
+  /** What it is showing, so its labels are redrawn when they change. */
+  wristState?: WristMenuState | null;
   /** Told what depth sensing actually did, so the interface can stop promising it. */
   onDepthState?: (state: DepthSensingState) => void;
 }
@@ -97,6 +103,8 @@ export function Scene({
   mode = 'passthrough',
   depthOcclusion = false,
   focus = false,
+  wrist = null,
+  wristState = null,
   onDepthState,
 }: SceneProps): React.ReactElement {
   const gl = useThree((state) => state.gl);
@@ -226,6 +234,19 @@ export function Scene({
       )}
 
       <Knobs engine={engine} />
+
+      {/*
+        The console on the wrist. Drawn whenever it exists — it hides itself
+        below the facing threshold, and the detector behind it is gated on the
+        same number, so an arm hanging by a side is neither drawn nor listening.
+      */}
+      {wrist !== null && (
+        <WristPanel
+          menu={wrist}
+          labels={wristState?.labels ?? []}
+          readout={wristState?.readout ?? ''}
+        />
+      )}
 
       {/*
         Last of all, because it is a filter on the view rather than an object
