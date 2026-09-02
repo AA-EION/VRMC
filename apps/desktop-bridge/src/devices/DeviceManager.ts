@@ -243,7 +243,15 @@ export class DeviceManager {
     return true;
   }
 
-  /** Remove everything. Used on shutdown and when the headset disconnects. */
+  /**
+   * Remove everything, closing every port.
+   *
+   * Called by the presence gate when the last client has been gone for the
+   * grace period, and on shutdown. This comment used to say "and when the
+   * headset disconnects" while nothing was wired to a disconnect at all —
+   * `onPeerChange` reported the count and index.ts discarded it — so the ports
+   * outlived the session that owned them.
+   */
   removeAll(): void {
     for (const id of [...this.devices.keys()]) this.remove(id);
   }

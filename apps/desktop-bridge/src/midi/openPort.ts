@@ -11,7 +11,6 @@ import {
   NullSink,
   NullSource,
   SimpleVirtualPort,
-  type MidiSink,
   type VirtualPort,
 } from './MidiSink.js';
 import { openTeVirtualMidiPort, WINDOWS_LOOPBACK_PATTERN } from './windowsBackend.js';
@@ -118,14 +117,6 @@ export async function openBidirectionalPort(options: PortOptions): Promise<PortR
 
 function nullPort(name: string): VirtualPort {
   return new SimpleVirtualPort(name, new NullSink(name), new NullSource(name));
-}
-
-/** Backwards-compatible single-sink helper, for the built-in surfaces. */
-export async function openBestPort(
-  options: PortOptions,
-): Promise<{ sink: MidiSink; notes: string[] }> {
-  const result = await openBidirectionalPort(options);
-  return { sink: result.port.sink, notes: result.notes };
 }
 
 export { listPorts, WINDOWS_LOOPBACK_PATTERN };

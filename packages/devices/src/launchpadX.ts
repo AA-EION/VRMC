@@ -27,10 +27,14 @@ export const LAUNCHPAD_X: DeviceSpec = {
   familyCode: [0x03, 0x01],
   firmwareVersion: [0x09, 0x09, 0x09],
 
-  // Names as the hardware presents them. Ableton's script matches on these, so
-  // they are functional strings rather than cosmetic ones.
-  portNames: ['LPX MIDI', 'LPX DAW'],
-  dawPortIndex: 1,
+  // Names and order as the hardware presents them, from CoreFW's USB descriptor
+  // (src/sys/driver/launchpad-x/usb.rs and common/usb/descriptors.rs): the DAW
+  // jack is cable 0 and carries string index 4, the MIDI jack is cable 1 with
+  // string index 5. Ableton's script matches on these, so they are functional
+  // strings rather than cosmetic ones — and the order is functional too,
+  // because it is the cable index a host enumerates by.
+  portNames: ['LPX (DAW)', 'LPX (MIDI)'],
+  dawPortIndex: 0,
 
   controls: [
     ...gridControls(),

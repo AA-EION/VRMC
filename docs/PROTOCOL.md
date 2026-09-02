@@ -124,7 +124,7 @@ offset  size  field
 ```
 
 The presence byte keeps *never placed* distinct from *placed at the origin*. A
-device the bridge opened at startup has never been anywhere and belongs at its
+device the bridge opened for a session has never been anywhere and belongs at its
 default pose; one somebody deliberately put at the origin belongs at the origin.
 Collapsing the two would move every fresh device to the player's feet.
 

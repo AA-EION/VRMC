@@ -64,6 +64,13 @@ export interface BridgeConfig {
    * draws it, so the lights the DAW sends have somewhere to land.
    */
   startupDevice: string;
+  /**
+   * How long the MIDI ports survive the last client leaving, in milliseconds.
+   *
+   * Not zero: a headset's Wi-Fi drops for a second at a time, and a DAW that
+   * sees a control surface vanish unbinds its script rather than waiting.
+   */
+  portGraceMs: number;
 }
 
 export const DEFAULT_CONFIG: BridgeConfig = {
@@ -84,7 +91,16 @@ export const DEFAULT_CONFIG: BridgeConfig = {
   pairingService: 'https://vrmc.eionstudios.com',
   enableRtc: true,
   enableTray: true,
-  startupDevice: DeviceModel.LAUNCHPAD_X,
+  /*
+   * Nothing, until a headset asks.
+   *
+   * This was LAUNCHPAD_X, opened at startup — which meant a Mac with the
+   * bridge merely running listed a Launchpad in every DAW on it, with nothing
+   * on the other end. Set it to a model to get that behaviour back; the device
+   * then appears when a headset connects rather than when the bridge starts.
+   */
+  startupDevice: 'none',
+  portGraceMs: 10_000,
 };
 
 export const USAGE = `
@@ -108,10 +124,14 @@ Usage: vrmc-bridge [options]
   --loopback <regex>   Windows: pattern for the fallback port
   --port-template <s>  Naming for emulated device ports
                        (default: "{device} {port}", e.g. "Launchpad X LPX DAW")
-  --device <model>     Emulated hardware to open at startup: ${HARDWARE_MODELS.join(
+  --device <model>     Emulated hardware to open for a session: ${HARDWARE_MODELS.join(
     ', ',
   )},
-                       or "none" (default: ${DEFAULT_CONFIG.startupDevice})
+                       or "none" (default: ${DEFAULT_CONFIG.startupDevice}).
+                       Ports open when a headset connects, not at startup.
+  --port-grace <secs>  Keep the ports open this long after the last client
+                       leaves, so a brief drop does not make the DAW unbind
+                       (default: ${DEFAULT_CONFIG.portGraceMs / 1000})
   --stats <seconds>    Stats interval, 0 to disable (default: 10)
   --list-ports         List MIDI outputs and exit
   --check              Verify the native libraries load, then exit
@@ -162,6 +182,17 @@ export function parseArgs(argv: readonly string[]): BridgeConfig | 'help' {
       case '--host':
         config.host = requireValue(arg, argv[++i]);
         break;
+      case '--port-grace': {
+        const seconds = Number(requireValue(arg, argv[++i]));
+        // Zero is allowed and means "close as soon as the last client goes" —
+        // a legitimate choice for a fixed installation where nothing ever
+        // reconnects, and the one case where a DAW unbinding does not matter.
+        if (!Number.isFinite(seconds) || seconds < 0) {
+          throw new Error(`${arg} needs a number of seconds, not "${argv[i]}"`);
+        }
+        config.portGraceMs = Math.round(seconds * 1000);
+        break;
+      }
       case '--no-udp':
         config.enableUdp = false;
         break;

@@ -95,6 +95,15 @@ export interface DeviceSpec {
    * Real Launchpads expose two ports: a "DAW" port carrying the session
    * protocol and a "MIDI" port behaving as a plain instrument. Ableton looks
    * for both by name, so the emulation creates both.
+   *
+   * The order is not presentational. A USB-MIDI device's ports are cables on
+   * one endpoint pair, and a host enumerates them by cable index — so this
+   * array is a claim about the descriptor, and it was wrong: it had MIDI first
+   * until it was checked against
+   * [CoreFW](https://github.com/anthonyhfm/launchpad-core-firmware), whose jack
+   * table puts the DAW jack on cable 0 for all six models. `dawPortIndex` is
+   * therefore 0 everywhere, and a test asserts that rather than leaving it to
+   * each spec to get right.
    */
   portNames: readonly string[];
   /** Index into `portNames` of the port the DAW protocol runs on. */

@@ -19,6 +19,7 @@ import { copyToClipboard, openUrl } from './tray/desktop.js';
 import { buildMenu, buildTooltip, TrayAction, type TrayState } from './tray/menu.js';
 import { TrayController } from './tray/TrayController.js';
 import { DEFAULT_PORT_NAME_TEMPLATE, DeviceManager } from './devices/DeviceManager.js';
+import { PresenceGate } from './core/PresenceGate.js';
 import { listPorts } from './midi/openPort.js';
 import { Broadcaster } from './net/Broadcaster.js';
 import { RtcTransport } from './net/RtcTransport.js';
@@ -144,35 +145,65 @@ async function main(): Promise<void> {
     },
   );
 
-  // The original surfaces are one plain MIDI port with no hardware identity,
-  // created up front so they behave exactly as they did before Launchpads
-  // existed. Pads, keys and knobs share it and are told apart by their event
-  // ids. Emulated hardware is spawned on demand from the headset instead.
-  await devices.add(DeviceId.PADS, config.portName);
-  devices.alias(DeviceId.KEYS, DeviceId.PADS);
-  devices.alias(DeviceId.KNOBS, DeviceId.PADS);
-
   /*
-   * And one piece of emulated hardware, open before anyone puts the headset on.
+   * The session's own devices, opened when a headset arrives rather than now.
    *
-   * The port above is anonymous. A DAW has no script that matches "VRMC", so
-   * it appears as a nameless keyboard: no session grid, no lights, nothing to
-   * bind. The device below is a Launchpad X, emulated closely enough that
-   * Ableton loads its own control-surface script — the port names match, the
-   * Device Inquiry reply carries the family code the script checks for, and
-   * the LED SysEx it sends is understood.
+   * These used to be created here, at startup, and closed only on SIGINT. That
+   * is why a Mac with the bridge merely running listed a Launchpad X in every
+   * DAW: a virtual MIDI port is published system-wide the instant it opens, so
+   * an unattended one is an instrument in somebody's dropdown that nobody can
+   * play. They now come and go with the headset — see core/PresenceGate.ts for
+   * why departure is delayed and arrival is not.
+   *
+   * The first is one plain port with no hardware identity, shared by pads,
+   * keys and knobs the way a single piece of hardware would be; they are told
+   * apart by their event ids.
+   *
+   * The second is emulated hardware, and only if `--startup-device` asks for
+   * it. The port above is anonymous — a DAW has no script matching "VRMC", so
+   * it appears as a nameless keyboard with no session grid and nothing to
+   * bind. A Launchpad X is emulated closely enough that Ableton loads its own
+   * control-surface script: the port names match, the Device Inquiry reply
+   * carries the family code the script checks for, and the LED SysEx it sends
+   * is understood.
    *
    * Not an alias of the surfaces above: those send plain note numbers, while a
    * Launchpad's controls are XY indices through the emulator, and routing one
    * into the other would light the wrong pads. It is a separate device, which
-   * is what it is on a desk too.
-   *
-   * It keeps the first dynamic id, so the roster the headset receives is
-   * indistinguishable from one it spawned itself, and the headset draws it.
+   * is what it is on a desk too. It keeps the first dynamic id, so the roster
+   * the headset receives is indistinguishable from one it spawned itself.
    */
-  if (config.startupDevice !== 'none') {
-    await devices.add(FIRST_DYNAMIC_DEVICE_ID, config.startupDevice);
-  }
+  const openSessionDevices = async (): Promise<void> => {
+    await devices.add(DeviceId.PADS, config.portName);
+    devices.alias(DeviceId.KEYS, DeviceId.PADS);
+    devices.alias(DeviceId.KNOBS, DeviceId.PADS);
+    if (config.startupDevice !== 'none') {
+      await devices.add(FIRST_DYNAMIC_DEVICE_ID, config.startupDevice);
+    }
+  };
+
+  const presence = new PresenceGate({
+    graceMs: config.portGraceMs,
+    onOpen: openSessionDevices,
+    onClose: () => devices.removeAll(),
+    onLog: log,
+  });
+
+  /*
+   * Every transport reports its client count here.
+   *
+   * The sum is what matters — a headset on WebRTC and the dashboard on the
+   * WebSocket are two clients of one session — so the gate is told the total
+   * rather than which transport changed.
+   *
+   * The resync waits for the open: the roster is what tells a headset what to
+   * draw, and one sent before the ports exist describes an empty room.
+   */
+  const clientsChanged = (): void => {
+    void presence.update(bus.clientCount).then(() => {
+      if (bus.clientCount > 0) resyncHeadset();
+    });
+  };
 
   /*
    * Bring a headset that has just arrived up to date.
@@ -247,6 +278,7 @@ async function main(): Promise<void> {
         tlsCert,
         tlsKey,
         onLog: log,
+        onClientChange: () => clientsChanged(),
       })
     : null;
   // Every headset-bound packet fans out through here, so a client on the
@@ -260,8 +292,9 @@ async function main(): Promise<void> {
         onLog: log,
         // A headset that has just arrived has no idea what devices exist, and
         // it is the roster that tells it what to draw — then the LEDs already
-        // on them.
-        onPeerChange: () => resyncHeadset(),
+        // on them. The count was reported here all along and thrown away,
+        // which is why nothing ever noticed a headset leaving.
+        onPeerChange: () => clientsChanged(),
       })
     : null;
   if (rtc !== null) bus.add(rtc);
@@ -318,7 +351,17 @@ async function main(): Promise<void> {
   }
 
   const scheme = ws?.secure === true ? 'wss' : 'ws';
-  log(`${devices.count} device(s) open; emulated hardware is added from the headset`);
+  /*
+   * Say that no ports exist yet, and why, because their absence is the thing
+   * somebody will go looking for. A DAW open on the other monitor lists
+   * nothing at this point, and without this line that reads as a broken build
+   * rather than as the design.
+   */
+  log(
+    config.startupDevice === 'none'
+      ? 'no MIDI ports yet: they open when a headset connects and close when it leaves'
+      : `no MIDI ports yet: a ${config.startupDevice} opens when a headset connects`,
+  );
   if (ws !== null) {
     for (const address of reachableAddresses(config.host)) {
       log(`listening  ${scheme}://${address}:${config.wsPort}`);
@@ -522,7 +565,9 @@ async function main(): Promise<void> {
     rtc?.close();
     bus.close();
     await Promise.all([ws?.close(), udp?.close(), pairing?.stop()]);
-    devices.removeAll();
+    // Through the gate rather than around it: a teardown may already be
+    // scheduled, and the process must not exit with ports still published.
+    presence.dispose();
     process.exit(0);
   };
 

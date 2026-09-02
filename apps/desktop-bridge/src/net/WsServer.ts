@@ -19,6 +19,15 @@ export interface WsOptions {
   tlsCert?: string;
   tlsKey?: string;
   onLog: (message: string) => void;
+  /**
+   * Called with the live client count whenever it changes.
+   *
+   * The MIDI ports follow it: they exist while somebody is connected and not
+   * otherwise, so a Mac running the bridge alone does not list instruments
+   * nobody can play. See core/PresenceGate.ts. RtcTransport reports the same
+   * thing through `onPeerChange`; only the sum of the two means anything.
+   */
+  onClientChange?: (clients: number) => void;
 }
 
 /**
@@ -81,6 +90,7 @@ export class WsServer implements PacketSink {
     wss.on('connection', (socket, req) => {
       this.clients++;
       this.sockets.add(socket);
+      this.options.onClientChange?.(this.clients);
       const peer = req.socket.remoteAddress ?? 'unknown';
 
       // Nagle batches small writes to save packets. Our packets *are* small and
@@ -102,6 +112,7 @@ export class WsServer implements PacketSink {
       socket.on('close', () => {
         this.clients--;
         this.sockets.delete(socket);
+        this.options.onClientChange?.(this.clients);
         // The client is gone and cannot send the Note Offs it owes. Release
         // whatever it left sounding, or the synth holds those voices forever.
         const released = this.router.releaseAll();

@@ -34,10 +34,11 @@ export const LAUNCHPAD_PRO_MK3: DeviceSpec = {
   familyCode: [0x23, 0x01],
   firmwareVersion: [0x09, 0x09, 0x09],
 
-  // The Pro MK3 presents three ports; the third carries DIN output and is not
-  // something a virtual device can usefully emulate, so two are created.
-  portNames: ['LPProMK3 MIDI', 'LPProMK3 DAW'],
-  dawPortIndex: 1,
+  // DAW first, then MIDI — the cable order in CoreFW's descriptor, same as
+  // every other model. The Pro MK3 presents a third port carrying DIN output,
+  // which a virtual device cannot usefully emulate, so two are created.
+  portNames: ['PRO MK3 (DAW)', 'PRO MK3 (MIDI)'],
+  dawPortIndex: 0,
 
   controls: [
     ...gridControls(),

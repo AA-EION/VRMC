@@ -83,15 +83,17 @@ describe('creating and destroying emulated devices', () => {
     const devices = makeManager(ports);
     await devices.add(20, DeviceModel.LAUNCHPAD_X);
 
-    // The names are what a DAW matches on, so they are asserted exactly.
-    expect(ports.opened).toEqual(['Launchpad X LPX MIDI', 'Launchpad X LPX DAW']);
+    // The names are what a DAW matches on, and the order is the cable order
+    // the hardware enumerates in, so both are asserted exactly. DAW first:
+    // it is cable 0 in the firmware's jack table.
+    expect(ports.opened).toEqual(['Launchpad X LPX (DAW)', 'Launchpad X LPX (MIDI)']);
     expect(devices.portNamesOf(20)).toEqual(ports.opened);
     expect(devices.roster()).toEqual([
       {
         deviceId: 20,
         status: DeviceStatus.READY,
         model: DeviceModel.LAUNCHPAD_X,
-        detail: 'Launchpad X LPX MIDI, Launchpad X LPX DAW',
+        detail: 'Launchpad X LPX (DAW), Launchpad X LPX (MIDI)',
         // No placement: this manager was built without a Workspace, which is
         // the same answer a device nobody has moved gets from one that has.
         placement: null,
@@ -104,8 +106,8 @@ describe('creating and destroying emulated devices', () => {
     const devices = makeManager(ports);
     await devices.add(21, DeviceModel.LAUNCHPAD_PRO_MK3);
     expect(ports.opened).toEqual([
-      'Launchpad Pro MK3 LPProMK3 MIDI',
-      'Launchpad Pro MK3 LPProMK3 DAW',
+      'Launchpad Pro MK3 PRO MK3 (DAW)',
+      'Launchpad Pro MK3 PRO MK3 (MIDI)',
     ]);
   });
 
@@ -121,7 +123,7 @@ describe('creating and destroying emulated devices', () => {
       },
     );
     await devices.add(20, DeviceModel.LAUNCHPAD_X);
-    expect(ports.opened).toEqual(['VRMC LPX MIDI', 'VRMC LPX DAW']);
+    expect(ports.opened).toEqual(['VRMC LPX (DAW)', 'VRMC LPX (MIDI)']);
   });
 
   it('runs several devices at once without their ids colliding', async () => {
@@ -157,7 +159,7 @@ describe('creating and destroying emulated devices', () => {
     const ports = new FakePorts();
     const devices = makeManager(ports);
     await devices.add(20, DeviceModel.LAUNCHPAD_X);
-    const daw = 'Launchpad X LPX DAW';
+    const daw = 'Launchpad X LPX (DAW)';
 
     devices.handleEvent(20, EventType.NOTE_ON, 0, 11, 100, 0);
     expect(ports.sent(daw)).toContainEqual([0x90, 11, 100]);
@@ -169,34 +171,47 @@ describe('creating and destroying emulated devices', () => {
   });
 });
 
-describe('what a DAW finds without anyone putting the headset on', () => {
+describe('what a DAW finds', () => {
   /*
-   * The complaint this answers: "Ableton shows it as VRMC".
+   * This block used to be called "what a DAW finds without anyone putting the
+   * headset on", and the answer now is: nothing.
    *
-   * It did, and that was all it could do. A plain port carries notes but
-   * matches no control-surface script, so Ableton listed it as a nameless
-   * keyboard — no session grid, no lights, nothing to bind — and the only way
-   * to get a real device was to spawn one from inside the headset, which is
-   * not a place anyone looks when the problem appears in a DAW on a desk.
+   * The original complaint was "Ableton shows it as VRMC" — a plain port
+   * carries notes but matches no control-surface script, so it listed a
+   * nameless keyboard with nothing to bind. The fix was to open an emulated
+   * Launchpad at startup, which fixed that and created a worse one: a virtual
+   * MIDI port is published system-wide the moment it opens, so every Mac
+   * running the bridge listed a Launchpad X that nobody was playing and no
+   * headset was attached to.
+   *
+   * Both ports now belong to a session. `PresenceGate` decides when that
+   * exists; what is checked here is that when it does, the device is still the
+   * recognisable one.
    */
-  it('opens hardware the DAW can recognise, before any headset connects', async () => {
+  it('opens nothing by default until a headset asks for it', () => {
+    // The default is the whole fix. A DAW on a machine with the bridge idle
+    // should see no instrument, because there is none.
+    expect(DEFAULT_CONFIG.startupDevice).toBe('none');
+  });
+
+  it('opens hardware the DAW can recognise when a session starts', async () => {
     const ports = new FakePorts();
     const devices = makeManager(ports);
 
     await devices.add(DeviceId.PADS, 'VRMC');
-    await devices.add(FIRST_DYNAMIC_DEVICE_ID, DEFAULT_CONFIG.startupDevice);
+    await devices.add(FIRST_DYNAMIC_DEVICE_ID, DeviceModel.LAUNCHPAD_X);
 
     // Both ports of the real thing, spelled the way a script matches them.
-    expect(ports.opened).toContain('Launchpad X LPX DAW');
-    expect(ports.opened).toContain('Launchpad X LPX MIDI');
+    expect(ports.opened).toContain('Launchpad X LPX (DAW)');
+    expect(ports.opened).toContain('Launchpad X LPX (MIDI)');
     // And the plain surface is still there for the keys, pads and knobs.
     expect(ports.opened).toContain('VRMC');
   });
 
-  it('answers a Device Inquiry on the startup device, which is how a script confirms', async () => {
+  it('answers a Device Inquiry on the session device, which is how a script confirms', async () => {
     const ports = new FakePorts();
     const devices = makeManager(ports);
-    await devices.add(FIRST_DYNAMIC_DEVICE_ID, DEFAULT_CONFIG.startupDevice);
+    await devices.add(FIRST_DYNAMIC_DEVICE_ID, DeviceModel.LAUNCHPAD_X);
 
     // The universal inquiry every DAW sends before it trusts a port name.
     devices.injectHostMessage(
@@ -205,7 +220,7 @@ describe('what a DAW finds without anyone putting the headset on', () => {
       new Uint8Array([0xf0, 0x7e, 0x7f, 0x06, 0x01, 0xf7]),
     );
 
-    const replies = ports.sent('Launchpad X LPX DAW').filter((m) => m[0] === 0xf0);
+    const replies = ports.sent('Launchpad X LPX (DAW)').filter((m) => m[0] === 0xf0);
     expect(replies.length).toBeGreaterThan(0);
     // Family code is what selects the script; a wrong one binds nothing.
     expect(replies[0]).toEqual(expect.arrayContaining([...LAUNCHPAD_X.familyCode]));
@@ -216,7 +231,7 @@ describe('what a DAW finds without anyone putting the headset on', () => {
     const devices = makeManager(ports);
     await devices.add(DeviceId.PADS, 'VRMC');
     devices.alias(DeviceId.KEYS, DeviceId.PADS);
-    await devices.add(FIRST_DYNAMIC_DEVICE_ID, DEFAULT_CONFIG.startupDevice);
+    await devices.add(FIRST_DYNAMIC_DEVICE_ID, DeviceModel.LAUNCHPAD_X);
 
     // Middle C from the headset's keyboard. A Launchpad reads data1 as an XY
     // index, so had these shared a device this would have lit a pad instead of
@@ -224,10 +239,13 @@ describe('what a DAW finds without anyone putting the headset on', () => {
     devices.handleEvent(DeviceId.KEYS, EventType.NOTE_ON, 0, 60, 100, 0);
 
     expect(ports.sent('VRMC')).toContainEqual([0x90, 60, 100]);
-    expect(ports.sent('Launchpad X LPX DAW')).toHaveLength(0);
+    expect(ports.sent('Launchpad X LPX (DAW)')).toHaveLength(0);
   });
 
-  it('can be turned off for someone who only wants the plain port', () => {
+  it('can be turned on for someone who wants it without reaching for the headset', () => {
+    expect(parseArgs(['--device', 'launchpad-x'])).toMatchObject({
+      startupDevice: DeviceModel.LAUNCHPAD_X,
+    });
     expect(parseArgs(['--device', 'none'])).toMatchObject({ startupDevice: 'none' });
     expect(() => parseArgs(['--device', 'mpc'])).toThrow(/launchpad/);
   });
@@ -247,7 +265,7 @@ describe('device recognition by the host', () => {
     );
     expect(delivered).toBe(true);
 
-    const reply = ports.sent('Launchpad X LPX DAW').at(-1)!;
+    const reply = ports.sent('Launchpad X LPX (DAW)').at(-1)!;
     expect(reply.slice(0, 10)).toEqual([
       0xf0, 0x7e, 0x00, 0x06, 0x02, 0x00, 0x20, 0x29, 0x03, 0x01,
     ]);
@@ -261,7 +279,7 @@ describe('device recognition by the host', () => {
     expect(
       devices.injectHostMessage(20, 0, Uint8Array.of(0xf0, 0x7e, 0x7f, 0x06, 0x01, 0xf7)),
     ).toBe(true);
-    expect(ports.sent('Launchpad X LPX DAW').length).toBeGreaterThan(0);
+    expect(ports.sent('Launchpad X LPX (DAW)').length).toBeGreaterThan(0);
   });
 
   it('gives the Pro MK3 its own family code', async () => {
@@ -273,7 +291,7 @@ describe('device recognition by the host', () => {
       LAUNCHPAD_PRO_MK3.dawPortIndex,
       Uint8Array.of(0xf0, 0x7e, 0x7f, 0x06, 0x01, 0xf7),
     );
-    const reply = ports.sent('Launchpad Pro MK3 LPProMK3 DAW').at(-1)!;
+    const reply = ports.sent('Launchpad Pro MK3 PRO MK3 (DAW)').at(-1)!;
     expect(reply.slice(8, 10)).toEqual([0x23, 0x01]);
   });
 });
@@ -351,7 +369,7 @@ describe('presses reaching the host', () => {
     const ports = new FakePorts();
     const devices = makeManager(ports);
     await devices.add(20, DeviceModel.LAUNCHPAD_X);
-    const daw = 'Launchpad X LPX DAW';
+    const daw = 'Launchpad X LPX (DAW)';
 
     devices.handleEvent(20, EventType.NOTE_ON, 0, 55, 100, 0);
     devices.handleEvent(20, EventType.NOTE_OFF, 0, 55, 0, 0);
@@ -366,7 +384,7 @@ describe('presses reaching the host', () => {
     const devices = makeManager(ports);
     await devices.add(20, DeviceModel.LAUNCHPAD_X);
     devices.handleEvent(20, EventType.NOTE_ON, 0, 91, 64, 0);
-    expect(ports.sent('Launchpad X LPX DAW')).toEqual([[0xb0, 91, 127]]);
+    expect(ports.sent('Launchpad X LPX (DAW)')).toEqual([[0xb0, 91, 127]]);
   });
 
   it('sends polyphonic aftertouch from sustained pressure', async () => {
@@ -375,7 +393,7 @@ describe('presses reaching the host', () => {
     await devices.add(20, DeviceModel.LAUNCHPAD_X);
     devices.handleEvent(20, EventType.NOTE_ON, 0, 55, 100, 0);
     devices.handleEvent(20, EventType.AFTERTOUCH_POLY, 0, 55, 90, 0);
-    expect(ports.sent('Launchpad X LPX DAW')).toContainEqual([0xa0, 55, 90]);
+    expect(ports.sent('Launchpad X LPX (DAW)')).toContainEqual([0xa0, 55, 90]);
   });
 
   it('drops events for a device that does not exist', async () => {
@@ -434,7 +452,7 @@ describe('end to end over the WebSocket link', () => {
     send(client, PacketKind.DEVICE_ADD, (w) => writeDeviceAdd(w, 30, DeviceModel.LAUNCHPAD_X));
 
     await vi.waitFor(() => expect(devices.count).toBe(1), { timeout: 2000 });
-    expect(ports.opened).toContain('Launchpad X LPX DAW');
+    expect(ports.opened).toContain('Launchpad X LPX (DAW)');
 
     // The roster push tells the headset the ports really opened.
     bus.sendRoster(devices.roster());
@@ -500,7 +518,7 @@ describe('end to end over the WebSocket link', () => {
     });
 
     await vi.waitFor(
-      () => expect(ports.sent('Launchpad X LPX DAW')).toContainEqual([0x90, 55, 120]),
+      () => expect(ports.sent('Launchpad X LPX (DAW)')).toContainEqual([0x90, 55, 120]),
       { timeout: 2000 },
     );
 

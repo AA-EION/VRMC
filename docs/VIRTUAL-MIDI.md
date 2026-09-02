@@ -14,17 +14,48 @@ system-wide the moment it opens. Run:
 pnpm bridge
 ```
 
-Three ports appear immediately: **VRMC**, and the two of an emulated Launchpad
-X — **Launchpad X LPX MIDI** and **Launchpad X LPX DAW**. Because CoreMIDI
-publishes them system-wide, DAWs that rescan MIDI devices while running will
-see them without a restart.
+**No ports appear yet, and that is deliberate.** They open when a headset
+connects and close when it leaves, because a virtual MIDI port is published
+system-wide the moment it exists — so a port opened at startup is an instrument
+in every DAW on the machine that nobody is playing and nothing is attached to.
+Connect the headset and **VRMC** appears: a plain instrument port carrying the
+keys, pads and knobs. Because CoreMIDI publishes system-wide, DAWs that rescan
+while running see it without a restart.
 
-The two are for different things. VRMC is a plain instrument port carrying the
-keys, pads and knobs; the Launchpad pair is hardware a DAW can identify, so
-Ableton loads its own Launchpad X control surface and drives the LEDs. A plain
-port cannot do that — no script matches the name "VRMC", so it is listed as a
-nameless keyboard and nothing lights up. Pass `--device none` if you want only
-the plain port, or `--device launchpad-pro-mk3` for the larger surface.
+A plain port is all it can be — no control-surface script matches the name
+"VRMC", so Ableton lists it as a nameless keyboard and nothing lights up. For
+hardware a DAW can identify, spawn a Launchpad from the wrist menu in the
+headset, or start the bridge with `--device launchpad-x` to have one opened for
+every session. Either way its two ports are named as the hardware names them:
+
+| Model | Ports, in the order the host enumerates them |
+|---|---|
+| Launchpad X | `LPX (DAW)`, `LPX (MIDI)` |
+| Launchpad Pro MK3 | `PRO MK3 (DAW)`, `PRO MK3 (MIDI)` |
+
+DAW first: on a real Launchpad the two ports are cables on one USB endpoint
+pair, and the DAW jack is cable 0. The names and the order are both taken from
+[CoreFW](https://github.com/anthonyhfm/launchpad-core-firmware)'s USB
+descriptor, because a DAW decides what a port is by its name — these are
+functional strings, not cosmetic ones.
+
+**One difference from real hardware that cannot be closed here.** A Launchpad
+is one USB device, so macOS shows one CoreMIDI *device* with two *entities*
+inside it. These are two standalone virtual endpoints: RtMidi's virtual-port
+API is `MIDISourceCreate`/`MIDIDestinationCreate`, and it has no call for
+creating a device with entities under it. So Audio MIDI Setup lists them as two
+separate entries rather than one expandable device, and the endpoint names
+carry a `{device} {port}` prefix to compensate for having no owning device.
+Closing that gap means talking to CoreMIDI directly rather than through RtMidi.
+
+### When the headset drops
+
+Ports survive a disconnection for ten seconds before closing. Headset Wi-Fi
+drops for a second at a time, and a DAW that sees a control surface vanish does
+not wait politely — Ableton unbinds the script, and rebinding is a manual trip
+through Preferences. A headset back inside that window finds its ports still
+open and the DAW none the wiser. Tune it with `--port-grace <seconds>`; `0`
+closes immediately.
 
 Where to enable the plain port:
 

@@ -4,6 +4,7 @@ import {
   ButtonRole,
   Command,
   ControlKind,
+  DEVICE_SPECS,
   LAUNCHPAD_PRO_MK3,
   LAUNCHPAD_X,
   LaunchpadEmulator,
@@ -133,6 +134,52 @@ describe.each([
   it('presents a DAW port whose index is in range', () => {
     expect(spec.portNames.length).toBeGreaterThanOrEqual(2);
     expect(spec.dawPortIndex).toBeLessThan(spec.portNames.length);
+  });
+});
+
+/**
+ * The ports, checked against the hardware rather than against ourselves.
+ *
+ * The assertion above is true of any two-port spec and stayed green for the
+ * whole time the order was backwards, which is the useful lesson: a test that
+ * only restates the code's own shape cannot catch the code being wrong about
+ * the world. These name the firmware's answer.
+ *
+ * Source: CoreFW's USB descriptor
+ * (https://github.com/anthonyhfm/launchpad-core-firmware), src/sys/driver/
+ * common/usb/descriptors.rs — embedded IN jack 1 is cable 0 and takes string
+ * index 4, which every per-model usb.rs sets to the DAW name; jack 2 is cable
+ * 1 and takes string index 5, the MIDI name.
+ */
+describe('the ports, as the hardware presents them', () => {
+  const models = Object.entries(DEVICE_SPECS);
+
+  it.each(models)('%s puts the DAW port on cable 0', (_model, spec) => {
+    // Not `dawPortIndex < length` — the actual claim is that it is *first*,
+    // because a host enumerates ports by cable index and the DAW jack is
+    // cable 0 on every model in the firmware.
+    expect(spec.dawPortIndex).toBe(0);
+    expect(spec.portNames[0]).toContain('DAW');
+    expect(spec.portNames[1]).toContain('MIDI');
+  });
+
+  it.each(models)('%s names its ports the way the descriptor does', (_model, spec) => {
+    // `PREFIX (DAW)` / `PREFIX (MIDI)` — parenthesised, with one shared
+    // prefix. A DAW decides what a port is by its name, so a drifting style
+    // here is a control surface that stops binding.
+    for (const name of spec.portNames) {
+      expect(name).toMatch(/^[A-Z0-9 ]+ \((?:DAW|MIDI)\)$/);
+    }
+    const prefixes = new Set(spec.portNames.map((n) => n.split(' (')[0]));
+    expect(prefixes.size).toBe(1);
+  });
+
+  it('matches the firmware model for model', () => {
+    // Transcribed from each src/sys/driver/<model>/usb.rs. Spelled out rather
+    // than derived so that changing a spec cannot quietly change the
+    // expectation with it.
+    expect(LAUNCHPAD_X.portNames).toEqual(['LPX (DAW)', 'LPX (MIDI)']);
+    expect(LAUNCHPAD_PRO_MK3.portNames).toEqual(['PRO MK3 (DAW)', 'PRO MK3 (MIDI)']);
   });
 });
 
