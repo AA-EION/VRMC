@@ -483,15 +483,24 @@ code {
   border-left: 0;
 }
 
-.segmented button.on {
+/* «On», wherever it appears. Solid ink is the strongest mark a monochrome
+   system owns, so it is what «selected» and «pinned» both are. */
+.segmented button.on,
+button.on {
   background: var(--ink);
   border-color: var(--ink);
   color: var(--surface);
 }
 
-.segmented button.on:hover {
+.segmented button.on:hover,
+button.on:hover:not(:disabled) {
   background: var(--ink-2);
   border-color: var(--ink-2);
+}
+
+/* The roster gained a pin control, so its rows are four columns now. */
+.devices li {
+  grid-template-columns: 1fr auto auto auto;
 }
 
 /* ---- A switch, set as a line of text -------------------------------------

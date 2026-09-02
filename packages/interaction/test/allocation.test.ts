@@ -1,7 +1,14 @@
 import { describe, it, expect } from 'vitest';
 import { MPC_4X4, PadGridLayout } from '@vrmc/layout';
 import { DeviceId, EventType, PacketReader, PacketWriter } from '@vrmc/protocol';
-import { Finger, FingerFrame, PokeDetector, type NoteSink } from '../src/index.js';
+import {
+  Finger,
+  FingerFrame,
+  Grabbable,
+  PokeDetector,
+  type GrabSink,
+  type NoteSink,
+} from '../src/index.js';
 
 /**
  * Allocation regression tests.
@@ -95,6 +102,49 @@ describe.skipIf(gc === undefined)('hot path allocation', () => {
     const growth = heapAfterGc() - before;
 
     expect(notes).toBeGreaterThan(1000);
+    expect(growth).toBeLessThan(2 * 1024 * 1024);
+  });
+
+  it('grabs and carries a device for an hour without growing the heap', () => {
+    /*
+     * The grab test runs against every device, every frame, for as long as a
+     * session lasts — including while somebody is playing, since a hand on a
+     * pad grid is permanently inside the volume it looks at. It is on the same
+     * frame as the notes, so it is held to the same standard.
+     */
+    const grab = new Grabbable();
+    for (let i = 0; i < 4; i++) {
+      grab.add({ id: i, centre: [i * 0.3, 1, -0.5], yawDeg: 0, reach: 0.2, pinned: false });
+    }
+    const frame = new FingerFrame();
+    let events = 0;
+    const sink: GrabSink = {
+      onGrab: () => void events++,
+      onMove: () => void events++,
+      onRelease: () => void events++,
+    };
+
+    // Pinch, carry, release, repeat — the whole cycle, not just the idle path.
+    const step = (i: number, t: number): void => {
+      frame.beginFrame(t, 1 / 90);
+      const phase = (i % 180) / 180;
+      const separation = phase < 0.5 ? 0.015 : 0.05;
+      const x = phase * 0.4;
+      frame.setFinger(Finger.LEFT_THUMB, x - separation / 2, 1, -0.5, 0.008);
+      frame.setFinger(Finger.LEFT_INDEX, x + separation / 2, 1, -0.5, 0.008);
+      frame.setFinger(Finger.RIGHT_THUMB, x - separation / 2, 1, -0.2, 0.008);
+      frame.setFinger(Finger.RIGHT_INDEX, x + separation / 2, 1, -0.2, 0.008);
+      grab.update(frame, sink);
+    };
+
+    let t = 0;
+    for (let i = 0; i < 2000; i++) step(i, (t += 11.1));
+
+    const before = heapAfterGc();
+    for (let i = 0; i < 300_000; i++) step(i, (t += 11.1));
+    const growth = heapAfterGc() - before;
+
+    expect(events).toBeGreaterThan(1000);
     expect(growth).toBeLessThan(2 * 1024 * 1024);
   });
 });

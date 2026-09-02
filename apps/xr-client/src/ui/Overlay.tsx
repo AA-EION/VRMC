@@ -24,6 +24,7 @@ export interface OverlayProps {
   devices: readonly LaunchpadInstance[];
   onAddDevice: (model: string) => void;
   onRemoveDevice: (deviceId: number) => void;
+  onPinDevice: (deviceId: number, pinned: boolean) => void;
   onPair: (code: string) => void;
   pairingBusy: boolean;
   pairingNote: string;
@@ -86,6 +87,7 @@ export function Overlay(props: OverlayProps): React.ReactElement {
     devices,
     onAddDevice,
     onRemoveDevice,
+    onPinDevice,
     onPair,
     pairingBusy,
     pairingNote,
@@ -288,6 +290,19 @@ export function Overlay(props: OverlayProps): React.ReactElement {
                       ? device.detail
                       : 'opening ports…'}
                 </span>
+                <button
+                  type="button"
+                  aria-pressed={device.pinned}
+                  className={device.pinned ? 'on' : ''}
+                  onClick={() => onPinDevice(device.deviceId, !device.pinned)}
+                  title={
+                    device.pinned
+                      ? 'Pinned: your hands cannot move it while you play.'
+                      : 'Loose: pinch it to move it.'
+                  }
+                >
+                  {device.pinned ? 'Pinned' : 'Pin'}
+                </button>
                 <button type="button" onClick={() => onRemoveDevice(device.deviceId)}>
                   Remove
                 </button>

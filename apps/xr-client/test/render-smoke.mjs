@@ -889,6 +889,128 @@ check('the instruments are still drawn inside the full-VR room',
   `${inBox.bright} near-white px in the keyboard's ${inBox.area}px box`);
 
 /*
+ * Grabbing a device moves the mesh and the detector together.
+ *
+ * This is the check that matters for movable instruments, and it is why the
+ * pose has exactly one setter. placement.ts is explicit about the failure mode:
+ * a transform the renderer derives separately from the one the detector inverts
+ * does not look broken — the pads simply trigger somewhere other than where
+ * they are drawn, which is far harder to find than an obvious break. So a poke
+ * is thrown at the device's *new* position and has to produce a note.
+ */
+const grabbed = await page.evaluate(async () => {
+  const h = window.__vrmc;
+  const engine = h?.engine;
+  const device = engine?.launchpads?.[0];
+  if (!device) return { ok: false, reason: 'no emulated device' };
+
+  const meshFor = () => {
+    let found = null;
+    h.scene.traverse((o) => {
+      if (o.isInstancedMesh && o.count === device.layout.zones.length) found = o;
+    });
+    return found;
+  };
+
+  const before = {
+    centre: [...device.pose.centre],
+    mesh: meshFor()?.parent?.position?.toArray() ?? null,
+  };
+
+  // Pinch inside the device, carry it, let go — through the real controller.
+  const frame = engine.fingers;
+  const sink = {
+    events: [],
+    noteOn(zone, control, velocity) { this.events.push({ zone, control, velocity }); },
+    noteOff() {},
+    aftertouch() {},
+  };
+  let clock = performance.now();
+  const step = (x, y, z, separation) => {
+    clock += 1000 / 90;
+    frame.beginFrame(clock, 1 / 90);
+    frame.setFinger(0, x - separation / 2, y, z, 0.008);
+    frame.setFinger(1, x + separation / 2, y, z, 0.008);
+    engine.grabs.update(frame, engine.grabSink);
+  };
+
+  const [cx, cy, cz] = device.pose.centre;
+  step(cx, cy, cz, 0.05);
+  step(cx, cy, cz, 0.015);
+  const moved = [cx + 0.25, cy + 0.1, cz + 0.05];
+  for (let i = 1; i <= 10; i++) {
+    step(cx + (0.25 * i) / 10, cy + (0.1 * i) / 10, cz + (0.05 * i) / 10, 0.015);
+  }
+  step(moved[0], moved[1], moved[2], 0.05);
+
+  await new Promise((r) => requestAnimationFrame(r));
+  await new Promise((r) => requestAnimationFrame(r));
+
+  const after = {
+    centre: [...device.pose.centre],
+    mesh: meshFor()?.parent?.position?.toArray() ?? null,
+  };
+
+  // Now poke where the device *now* is, through its own detector, and see
+  // whether it answers. This is the whole point of the check.
+  const zone = device.layout.zones[0];
+  const t = device.transform;
+  const q = t.quaternion;
+  const rotate = (x, y, z) => {
+    const [qx, qy, qz, qw] = q;
+    const tx = qy * z - qz * y + qw * x;
+    const ty = qz * x - qx * z + qw * y;
+    const tz = qx * y - qy * x + qw * z;
+    return [
+      x + 2 * (qy * tz - qz * ty),
+      y + 2 * (qz * tx - qx * tz),
+      z + 2 * (qx * ty - qy * tx),
+    ];
+  };
+  const toWorld = (lx, ly, lz) => {
+    const v = rotate(lx, ly, lz);
+    return [t.origin[0] + v[0], t.origin[1] + v[1], t.origin[2] + v[2]];
+  };
+
+  const lx = zone.rect.x + zone.rect.width / 2;
+  const ly = zone.rect.y + zone.rect.height / 2;
+  device.detector.releaseAll(sink);
+  sink.events = [];
+  for (let i = 0; i <= 6; i++) {
+    const depth = 0.03 - (0.04 * i) / 6;
+    const [wx, wy, wz] = toWorld(lx, ly, zone.raise + 0.008 + depth);
+    clock += 1000 / 90;
+    frame.beginFrame(clock, 1 / 90);
+    frame.setFinger(6, wx, wy, wz, 0.008);
+    device.detector.update(frame, sink);
+  }
+
+  return {
+    ok: true,
+    before,
+    after,
+    moved,
+    notes: sink.events.length,
+    pinned: device.pinned,
+  };
+});
+
+check('a pinch carries the device', grabbed.ok &&
+  Math.abs(grabbed.after.centre[0] - grabbed.moved[0]) < 1e-3,
+  grabbed.ok
+    ? `centre ${grabbed.before.centre.map((n) => n.toFixed(2))} -> ${grabbed.after.centre.map((n) => n.toFixed(2))}`
+    : grabbed.reason);
+if (grabbed.ok) {
+  check('the mesh went with it',
+    grabbed.after.mesh !== null &&
+      Math.abs(grabbed.after.mesh[0] - grabbed.before.mesh[0] - 0.25) < 1e-3,
+    `mesh x ${grabbed.before.mesh?.[0]?.toFixed(3)} -> ${grabbed.after.mesh?.[0]?.toFixed(3)}`);
+  // The one that would have caught a drifted detector.
+  check('and the pads answer where they are now drawn', grabbed.notes > 0,
+    `${grabbed.notes} note(s) from a poke at the new position`);
+}
+
+/*
  * The hand mesh loads from this origin and binds to the standard's joints.
  *
  * There is no XR device here, so the runtime is faked — but everything that is

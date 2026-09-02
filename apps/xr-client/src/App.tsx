@@ -124,8 +124,12 @@ export function App(): React.ReactElement {
 
   useEffect(() => {
     engine.onDevicesChanged = () => setDevices([...engine.launchpads]);
+    // A grab changes what the roster should say about a device without changing
+    // which devices exist, so it publishes a fresh snapshot too.
+    engine.onGrabChanged = () => setDevices([...engine.launchpads]);
     return () => {
       engine.onDevicesChanged = null;
+      engine.onGrabChanged = null;
     };
   }, [engine]);
 
@@ -436,6 +440,7 @@ export function App(): React.ReactElement {
         devices={devices}
         onAddDevice={(model) => engine.addDevice(model)}
         onRemoveDevice={(id) => engine.removeDevice(id)}
+        onPinDevice={(id, pinned) => engine.pinDevice(id, pinned)}
         onPair={(code) => void handlePair(code)}
         pairingBusy={pairingBusy}
         pairingNote={pairingNote}

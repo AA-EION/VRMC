@@ -178,8 +178,7 @@ export function Scene({
           key={device.deviceId}
           layout={device.layout}
           leds={device.leds}
-          position={device.transform.origin}
-          quaternion={device.transform.quaternion}
+          device={device}
         />
       ))}
 

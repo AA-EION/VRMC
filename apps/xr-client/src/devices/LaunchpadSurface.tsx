@@ -5,6 +5,7 @@ import { useFrame } from '@react-three/fiber';
 import {
   DoubleSide,
   ExtrudeGeometry,
+  type Group,
   InstancedMesh,
   Matrix4,
   MeshStandardMaterial,
@@ -14,6 +15,7 @@ import {
 } from 'three';
 import type { LaunchpadLayout } from '@vrmc/devices';
 import type { LedState } from './LedState.js';
+import type { LaunchpadInstance } from './LaunchpadInstance.js';
 
 /**
  * Build a rounded-square pad, extruded to a shallow depth.
@@ -51,9 +53,15 @@ function roundedPadGeometry(size: number, radiusFraction: number, depth: number)
 export interface LaunchpadSurfaceProps {
   layout: LaunchpadLayout;
   leds: LedState;
-  /** World position of the surface's local origin (its bottom-left corner). */
-  position: [number, number, number];
-  quaternion: [number, number, number, number];
+  /**
+   * The device itself, so the mesh can follow a pose that moves.
+   *
+   * The transform is read in the frame loop rather than taken as props,
+   * because a held device's pose changes ninety times a second and routing
+   * that through React would put a component render on the same frame as note
+   * dispatch. It is the same reason the knobs are driven this way.
+   */
+  device: LaunchpadInstance;
 }
 
 /**
@@ -66,10 +74,10 @@ export interface LaunchpadSurfaceProps {
 export function LaunchpadSurface({
   layout,
   leds,
-  position,
-  quaternion,
+  device,
 }: LaunchpadSurfaceProps): React.ReactElement {
   const meshRef = useRef<InstancedMesh>(null);
+  const groupRef = useRef<Group>(null);
   const spec = layout.spec;
 
   const geometry = useMemo(
@@ -148,6 +156,16 @@ export function LaunchpadSurface({
 
   useFrame((state, delta) => {
     leds.update(delta, state.clock.elapsedTime);
+
+    // Follow the pose. Written every frame rather than on change: a held device
+    // moves continuously, and comparing first would cost more than the six
+    // writes it saves.
+    const group = groupRef.current;
+    if (group !== null) {
+      const { origin, quaternion } = device.transform;
+      group.position.set(origin[0], origin[1], origin[2]);
+      group.quaternion.set(quaternion[0], quaternion[1], quaternion[2], quaternion[3]);
+    }
   });
 
   const margin = 0.008;
@@ -156,7 +174,7 @@ export function LaunchpadSurface({
   const logo = layout.logoPosition();
 
   return (
-    <group position={position} quaternion={quaternion}>
+    <group ref={groupRef}>
       {/* The chassis. Slightly translucent so the desk shows through and the
           device sits in the room rather than on top of it. */}
       <mesh position={[layout.width / 2, layout.height / 2, -0.005]} material={bodyMaterial}>

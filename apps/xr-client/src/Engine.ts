@@ -9,8 +9,15 @@ import {
   type SurfaceTransform,
   type ZoneLocator,
 } from '@vrmc/layout';
-import { FingerFrame, KnobControl, PokeDetector, type ControlSink } from '@vrmc/interaction';
-import { DeviceId, EventType, VelocityCurve } from '@vrmc/protocol';
+import {
+  FingerFrame,
+  Grabbable,
+  KnobControl,
+  PokeDetector,
+  type ControlSink,
+  type GrabSink,
+} from '@vrmc/interaction';
+import { DeviceId, EventType, PlacementFlags, VelocityCurve } from '@vrmc/protocol';
 import { DeviceModel, type DeviceSpec } from '@vrmc/devices';
 import { FIRST_DYNAMIC_DEVICE_ID, MAX_DEVICE_ID, type DeviceStateEntry } from '@vrmc/protocol';
 import { ClickSynth } from './audio/ClickSynth.js';
@@ -88,6 +95,15 @@ export class Engine {
   drawHands = false;
   readonly fingers = new FingerFrame();
   readonly knobs = new KnobControl();
+  /**
+   * Picking devices up and putting them down.
+   *
+   * Only emulated hardware is registered. The pad grid, the keyboard and the
+   * knobs are one piece of built-in furniture — they are what the app *is* —
+   * and a keyboard that can be dragged out of reach is one you then have to go
+   * and find.
+   */
+  readonly grabs = new Grabbable();
   readonly instruments: Instrument[];
   /**
    * World positions of the knobs, kept so the renderer draws them exactly where
@@ -104,6 +120,15 @@ export class Engine {
 
   /** Fires when a device is added or removed, so React can re-render the list. */
   onDevicesChanged: (() => void) | null = null;
+
+  /**
+   * Fires when a device is picked up or put down, so the view can show it.
+   *
+   * Not fired per frame while a device is moving: the mesh follows the pose
+   * directly in the frame loop, and a React render on that path would put a
+   * component tree rebuild on the same frame as note dispatch.
+   */
+  onGrabChanged: (() => void) | null = null;
 
   /**
    * The in-session pairing keypad.
@@ -134,8 +159,45 @@ export class Engine {
   /** Whether the pairing keypad is currently shown and taking input. */
   keypadVisible = false;
 
+  /**
+   * Where a grab's output goes.
+   *
+   * Bound once. `onMove` fires every frame a device is held, so it must not
+   * allocate and must not touch the network — it moves the pose and nothing
+   * else. The bridge is told once, on release, because a hand carrying an
+   * instrument produces a new pose ninety times a second and exactly one of
+   * them is worth sending.
+   *
+   * Public so the render test can drive a grab through the same path a hand
+   * does. A test that passed its own sink would exercise `Grabbable` and prove
+   * nothing about whether a move reaches the mesh and the detector.
+   */
+  readonly grabSink: GrabSink;
+
   constructor() {
     this.link = new BridgeLink();
+
+    this.grabSink = {
+      onGrab: () => this.onGrabChanged?.(),
+      onMove: (id, centre, yawDeg) => {
+        const device = this.launchpads.find((d) => d.deviceId === id);
+        if (device === undefined) return;
+        device.setPose({
+          centre: [centre[0], centre[1], centre[2]],
+          tiltDeg: device.pose.tiltDeg,
+          yawDeg,
+        });
+        // Moved by hand, so it is no longer sitting on whatever real surface it
+        // was dropped onto — see the anchor path. Saying so here keeps the
+        // roster honest about which poses were resolved and which were placed.
+        device.anchored = false;
+      },
+      onRelease: (id) => {
+        const device = this.launchpads.find((d) => d.deviceId === id);
+        if (device !== undefined) this.link.sendDevicePose(device.placement());
+        this.onGrabChanged?.();
+      },
+    };
 
     this.instruments = [
       this.buildInstrument(
@@ -202,9 +264,27 @@ export class Engine {
     const instance = createLaunchpad(deviceId, model, this.nextPose(), this.link);
     if (instance === null) return null;
     this.launchpads.push(instance);
+    this.registerGrab(instance);
     this.link.requestDeviceAdd(deviceId, model);
     this.onDevicesChanged?.();
     return instance;
+  }
+
+  /**
+   * Pin or unpin a device.
+   *
+   * Pinning while a hand is on it takes effect on this frame — `Grabbable`
+   * drops a target that becomes pinned — because pinning is usually what
+   * somebody reaches for *while* a device is drifting.
+   */
+  pinDevice(deviceId: number, pinned: boolean): boolean {
+    const device = this.launchpads.find((d) => d.deviceId === deviceId);
+    if (device === undefined) return false;
+    device.pinned = pinned;
+    this.syncGrabTarget(device);
+    this.link.sendDevicePose(device.placement());
+    this.onGrabChanged?.();
+    return true;
   }
 
   /** Remove a device, releasing what it held and closing its ports. */
@@ -212,6 +292,7 @@ export class Engine {
     const at = this.launchpads.findIndex((d) => d.deviceId === deviceId);
     if (at < 0) return false;
     const [instance] = this.launchpads.splice(at, 1);
+    this.grabs.remove(deviceId, this.grabSink);
     // Release before the ports close, or the notes are stranded in the DAW.
     instance?.releaseAll();
     this.link.requestDeviceRemove(deviceId);
@@ -247,6 +328,7 @@ export class Engine {
         device.detail = entry.detail;
         changed = true;
       }
+      if (this.adoptPlacement(device, entry.placement)) changed = true;
     }
     if (changed) this.onDevicesChanged?.();
   }
@@ -262,8 +344,79 @@ export class Engine {
     const instance = createLaunchpad(deviceId, model, this.nextPose(), this.link);
     if (instance === null) return undefined;
     this.launchpads.push(instance);
+    this.registerGrab(instance);
     if (deviceId >= this.nextDeviceId) this.nextDeviceId = deviceId + 1;
     return instance;
+  }
+
+  /**
+   * Put a device where the bridge says it was left.
+   *
+   * A null placement means nobody has ever moved it, which is a real answer
+   * rather than a missing one — the device stays at its default pose instead of
+   * being dragged to the origin. And a device currently in somebody's hand is
+   * left alone: a roster push arriving mid-grab must not yank the instrument
+   * out from under them.
+   */
+  private adoptPlacement(
+    device: LaunchpadInstance,
+    placement: DeviceStateEntry['placement'],
+  ): boolean {
+    if (placement === null) return false;
+    if (this.grabs.isHeld(device.deviceId)) return false;
+
+    const pinned = (placement.flags & PlacementFlags.PINNED) !== 0;
+    const anchored = (placement.flags & PlacementFlags.ANCHORED) !== 0;
+    const same =
+      device.placed &&
+      device.pinned === pinned &&
+      device.pose.centre[0] === placement.centre[0] &&
+      device.pose.centre[1] === placement.centre[1] &&
+      device.pose.centre[2] === placement.centre[2] &&
+      (device.pose.yawDeg ?? 0) === placement.yawDeg &&
+      device.pose.tiltDeg === placement.tiltDeg;
+    if (same) return false;
+
+    device.setPose({
+      centre: [placement.centre[0], placement.centre[1], placement.centre[2]],
+      yawDeg: placement.yawDeg,
+      tiltDeg: placement.tiltDeg,
+    });
+    device.pinned = pinned;
+    device.anchored = anchored;
+    this.syncGrabTarget(device);
+    return true;
+  }
+
+  /** Make a device grabbable, and keep the target pointing at its pose. */
+  private registerGrab(device: LaunchpadInstance): void {
+    this.grabs.add({
+      id: device.deviceId,
+      // The array the grab writes into is the device's own pose array, so a
+      // move needs no copy back — `setPose` in the sink reads exactly what the
+      // grab just wrote.
+      centre: [device.pose.centre[0], device.pose.centre[1], device.pose.centre[2]],
+      yawDeg: device.pose.yawDeg ?? 0,
+      // Half the diagonal, plus a little: a pinch anywhere on or just off the
+      // device takes hold of it, and nothing further away does.
+      reach: Math.hypot(device.layout.width, device.layout.height) / 2 + 0.04,
+      pinned: device.pinned,
+    });
+  }
+
+  /**
+   * Push a device's pose back into its grab target after something else moved
+   * it — a restored layout, a roster push, an anchor resolving.
+   *
+   * Rebuilt rather than mutated in place: the target list is small and this
+   * runs at human speed, and a stale centre is a device that jumps the next
+   * time somebody pinches near where it used to be. Only ever called for a
+   * device no hand is holding, so the release the removal would announce
+   * cannot fire.
+   */
+  private syncGrabTarget(device: LaunchpadInstance): void {
+    this.grabs.remove(device.deviceId, this.grabSink);
+    this.registerGrab(device);
   }
 
   /**
@@ -317,6 +470,9 @@ export class Engine {
         device.detector.update(this.fingers, device);
       }
       this.knobs.update(this.fingers, this.knobSink);
+      // After the detectors, so a frame that both plays a pad and moves a
+      // device resolves the note against the pose it was struck at.
+      this.grabs.update(this.fingers, this.grabSink);
       // Only while it is on screen. A detector running against a panel nobody
       // can see would still consume every fingertip and could still fire.
       if (this.keypadVisible) this.keypad?.update(this.fingers, dt);
