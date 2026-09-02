@@ -117,7 +117,17 @@ const built = await run('wix', [
 ]);
 
 if (built === null) {
-  console.warn('The MSI did not build; the zip from the packaging step still works.');
-  process.exit(0);
+  /*
+   * A failed build is a failure.
+   *
+   * This exited 0 with a reassuring line about the zip still working, so the
+   * release job's build step went green and the *collect* step three minutes
+   * later failed with "the MSI was not produced" — a message about a missing
+   * file, pointing nowhere near the wix error that explained it. The same
+   * shape of mistake had already cost this repo a build that shipped with no
+   * MIDI while every check passed.
+   */
+  console.error('The MSI did not build. See the wix output above.');
+  process.exit(1);
 }
 console.log(`  -> ${output}`);

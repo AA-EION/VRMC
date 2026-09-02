@@ -146,9 +146,16 @@ jobs:
       - name: Build the MSI
         if: runner.os == 'Windows'
         run: |
-          dotnet tool install --global wix --version 5.*
-          wix extension add -g WixToolset.UI.wixext
-          wix extension add -g WixToolset.Util.wixext
+          # Extension versions pinned to the CLI's.
+          #
+          # Unpinned, `wix extension add` fetched the 7.0.0 extensions against a
+          # 5.0.2 CLI. That is not an install failure — it warns "could not find
+          # expected package root folder wixext5" and carries on — and the real
+          # error arrives later as WIX0144, saying the extension could not be
+          # found at all, which reads like it was never installed.
+          dotnet tool install --global wix --version 5.0.2
+          wix extension add -g WixToolset.UI.wixext/5.0.2
+          wix extension add -g WixToolset.Util.wixext/5.0.2
           node build/installer/build.mjs
         working-directory: apps/desktop-bridge
 
