@@ -16,6 +16,7 @@ import {
 import { PairingError, resolvePairingCode } from './net/pairing.js';
 import { rtcTransport, webSocketTransport } from './net/Transport.js';
 import { KeypadController } from './ui/KeypadController.js';
+import { preloadHands } from './xr/Hands.js';
 
 /**
  * Remember the pairing code between visits.
@@ -186,12 +187,20 @@ export function App(): React.ReactElement {
       renderer.xr.setReferenceSpaceType('local-floor');
       await renderer.xr.setSession(session);
 
+      // Both hand files, now rather than when the room is first entered: a
+      // hand that arrives three frames after you look for it is a hand you
+      // noticed arriving.
+      preloadHands();
+
       setSessionActive(true);
       setPassthrough(blending || isBlending(session));
       setError('');
       engine.onSessionStart(session);
 
-      const onInputSourcesChange = (): void => engine.tracker.syncInputSources(session);
+      const onInputSourcesChange = (): void => {
+        engine.tracker.syncInputSources(session);
+        engine.skeleton.syncInputSources(session);
+      };
       session.addEventListener('inputsourceschange', onInputSourcesChange);
 
       session.addEventListener(

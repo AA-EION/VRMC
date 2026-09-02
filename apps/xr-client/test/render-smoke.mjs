@@ -27,6 +27,8 @@ const TYPES = {
   '.js': 'text/javascript',
   '.css': 'text/css',
   '.map': 'application/json',
+  '.glb': 'model/gltf-binary',
+  '.svg': 'image/svg+xml',
 };
 
 function serve() {
@@ -885,6 +887,124 @@ const inBox = await page.evaluate(
 check('the instruments are still drawn inside the full-VR room',
   keyBox !== null && inBox.bright > inBox.area * 0.25,
   `${inBox.bright} near-white px in the keyboard's ${inBox.area}px box`);
+
+/*
+ * The hand mesh loads from this origin and binds to the standard's joints.
+ *
+ * There is no XR device here, so the runtime is faked — but everything that is
+ * ours is real: the vendored glb is fetched over HTTP exactly as the headset
+ * would fetch it, SkeletonUtils clones it, and each of the twenty-five bones is
+ * looked up *by the name the standard gives its joint*. That last part is the
+ * whole binding and the one thing that could silently rot: swap the asset for a
+ * differently-rigged hand and every bone lookup returns undefined, the hand
+ * renders in its bind pose, and nothing else in this suite would notice.
+ */
+const HAND_JOINT_NAMES = [
+  'wrist',
+  'thumb-metacarpal', 'thumb-phalanx-proximal', 'thumb-phalanx-distal', 'thumb-tip',
+  'index-finger-metacarpal', 'index-finger-phalanx-proximal',
+  'index-finger-phalanx-intermediate', 'index-finger-phalanx-distal', 'index-finger-tip',
+  'middle-finger-metacarpal', 'middle-finger-phalanx-proximal',
+  'middle-finger-phalanx-intermediate', 'middle-finger-phalanx-distal', 'middle-finger-tip',
+  'ring-finger-metacarpal', 'ring-finger-phalanx-proximal',
+  'ring-finger-phalanx-intermediate', 'ring-finger-phalanx-distal', 'ring-finger-tip',
+  'pinky-finger-metacarpal', 'pinky-finger-phalanx-proximal',
+  'pinky-finger-phalanx-intermediate', 'pinky-finger-phalanx-distal', 'pinky-finger-tip',
+];
+
+const hands = await page.evaluate(async (JOINTS) => {
+  const h = window.__vrmc;
+  const engine = h?.engine;
+  if (!engine?.skeleton) return { ok: false, reason: 'no skeleton on the engine' };
+
+  const hand = () => new Map(JOINTS.map((name) => [name, { name }]));
+  engine.skeleton.syncInputSources({
+    inputSources: [
+      { handedness: 'left', hand: hand() },
+      { handedness: 'right', hand: hand() },
+    ],
+  });
+
+  // A pose per joint, distinguishable so the bind can be checked for having
+  // actually happened rather than for merely not throwing.
+  const frame = {
+    fillPoses(spaces, base, out) {
+      let j = 0;
+      for (const space of spaces) {
+        void space;
+        for (let k = 0; k < 16; k++) out[j * 16 + k] = k % 5 === 0 ? 1 : 0;
+        // Translation lives in elements 12..14 of a column-major 4x4.
+        out[j * 16 + 12] = j * 0.01;
+        out[j * 16 + 13] = 1.2;
+        out[j * 16 + 14] = -0.4;
+        j++;
+      }
+      return true;
+    },
+  };
+
+  const countSkinned = () => {
+    let n = 0;
+    h.scene.traverse((o) => {
+      if (o.isSkinnedMesh) n++;
+    });
+    return n;
+  };
+
+  // Wait for both glb files to land and the rigs to mount.
+  for (let i = 0; i < 600; i++) {
+    engine.skeleton.update(frame, {});
+    if (countSkinned() >= 2) break;
+    await new Promise((r) => requestAnimationFrame(r));
+  }
+  // A few more frames so the bind runs against a mounted rig.
+  for (let i = 0; i < 5; i++) {
+    engine.skeleton.update(frame, {});
+    await new Promise((r) => requestAnimationFrame(r));
+  }
+
+  let skinned = 0;
+  let visible = 0;
+  let placed = 0;
+  const missing = [];
+  h.scene.traverse((o) => {
+    if (!o.isSkinnedMesh) return;
+    skinned++;
+    // Walk up to whatever node actually carries the named bones.
+    let root = o;
+    while (root.parent && !JOINTS.some((n) => root.getObjectByName(n))) root = root.parent;
+    for (const name of JOINTS) {
+      const bone = root.getObjectByName(name);
+      if (!bone) missing.push(name);
+      // The bind writes the joint matrix into the bone's own elements, so a
+      // bound bone carries the translation the fake frame put there.
+      else if (Math.abs(bone.matrix.elements[13] - 1.2) < 1e-6) placed++;
+    }
+    if (o.visible) visible++;
+  });
+
+  return {
+    ok: true,
+    skinned,
+    visible,
+    missingCount: missing.length,
+    missing: missing.slice(0, 3),
+    placed,
+    bound: engine.skeleton.hands.length,
+  };
+}, HAND_JOINT_NAMES);
+
+check('both hand meshes load from this origin', hands.ok && hands.skinned === 2,
+  hands.ok ? `${hands.skinned} skinned meshes, ${hands.bound} hands bound` : hands.reason);
+if (hands.ok && hands.skinned === 2) {
+  // 25 joints x 2 hands. A rig whose bones are named anything else fails here
+  // and nowhere else in this suite.
+  check('every joint the standard names is present in the asset', hands.missingCount === 0,
+    hands.missingCount === 0 ? '50/50 bones found' : `missing ${hands.missing.join(', ')}`);
+  check('the runtime pose reaches the bones', hands.placed === 50,
+    `${hands.placed}/50 bones carry the frame's own translation`);
+  check('a tracked hand is drawn', hands.visible === 2, `${hands.visible} visible`);
+}
 
 await page.evaluate(() => {
   [...document.querySelectorAll('.segmented button')]

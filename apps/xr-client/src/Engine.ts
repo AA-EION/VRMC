@@ -24,6 +24,7 @@ import {
   type SurfaceTheme,
 } from './devices/InstrumentSurface.js';
 import { HandTracker } from './xr/handTracking.js';
+import { HandSkeleton } from './xr/HandSkeleton.js';
 import { KeypadController } from './ui/KeypadController.js';
 
 /** Everything needed to render and drive one instrument. */
@@ -62,6 +63,24 @@ export class Engine {
   readonly link: BridgeLink;
   readonly synth = new ClickSynth();
   readonly tracker = new HandTracker();
+  /**
+   * The full twenty-five-joint skeleton, for drawing hands.
+   *
+   * Separate from `tracker`, and only advanced while something is actually
+   * drawing them — see `drawHands`. The tip path above runs every frame because
+   * notes depend on it; this one is a rendering cost and is not paid by a
+   * player who never leaves passthrough.
+   */
+  readonly skeleton = new HandSkeleton();
+
+  /**
+   * Whether the hand mesh is on screen.
+   *
+   * Set by the app from the room mode. Guarding the skeleton on it is what
+   * keeps twenty extra joints per hand off the frame of somebody working in
+   * passthrough, where their real hands are already visible and better.
+   */
+  drawHands = false;
   readonly fingers = new FingerFrame();
   readonly knobs = new KnobControl();
   readonly instruments: Instrument[];
@@ -281,6 +300,9 @@ export class Engine {
     if (xrFrame !== undefined && space !== null) {
       this.fingers.beginFrame(performance.now(), dt);
       this.tracker.update(xrFrame, space, this.fingers);
+      // After the tips, and only when something draws them. The two readers are
+      // independent: a failure to fill the skeleton cannot affect a note.
+      if (this.drawHands) this.skeleton.update(xrFrame, space);
       for (const instrument of this.instruments) {
         instrument.detector.update(this.fingers, instrument.router);
       }
@@ -304,6 +326,7 @@ export class Engine {
   onSessionStart(session: XRSession): void {
     this.running = true;
     this.tracker.syncInputSources(session);
+    this.skeleton.syncInputSources(session);
     this.synth.start();
     this.synth.resume();
   }

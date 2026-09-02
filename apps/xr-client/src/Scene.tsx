@@ -7,6 +7,9 @@ import { LaunchpadSurface } from './devices/LaunchpadSurface.js';
 import type { LaunchpadInstance } from './devices/LaunchpadInstance.js';
 import type { Engine } from './Engine.js';
 import { Backdrop } from './xr/Backdrop.js';
+import { Hands } from './xr/Hands.js';
+import { INK } from './brand/tokens.js';
+import { currentTheme } from './brand/theme.js';
 import type { XrMode } from './xr/session.js';
 import { ConnectPanel } from './ui/ConnectPanel.js';
 import type { KeypadController } from './ui/KeypadController.js';
@@ -92,6 +95,12 @@ export function Scene({
     };
   }, [engine, scene, gl, camera]);
 
+  // Whether the skeleton is worth filling at all. Set outside the frame loop:
+  // it changes when somebody picks a room, which is human speed.
+  useEffect(() => {
+    engine.drawHands = mode === 'immersive';
+  }, [engine, mode]);
+
   useFrame((_state, delta, xrFrame) => {
     engine.update(xrFrame as XRFrame | undefined, gl.xr.getReferenceSpace(), delta);
   });
@@ -105,6 +114,21 @@ export function Scene({
         skipped vertex passes.
       */}
       <Backdrop immersive={mode === 'immersive'} />
+
+      {/*
+        Hands, in the full room only.
+
+        In passthrough they are already there — your own, through the cameras,
+        at no cost and with tracking nothing drawn could match. A model over
+        the top would be a worse copy of something already correct. In the
+        galaxy there is nothing to see, and a pad struck by an invisible finger
+        is a pad you have to aim at from memory.
+      */}
+      <Hands
+        skeleton={engine.skeleton}
+        visible={mode === 'immersive'}
+        colour={currentTheme() === 'dark' ? INK.bone : INK.sumi}
+      />
 
       {/*
         Lighting is deliberately soft and mostly ambient. In passthrough the

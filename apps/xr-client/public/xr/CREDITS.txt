@@ -1,0 +1,26 @@
+VRMC — vendored WebXR assets
+────────────────────────────────────────────────────────────────────────────
+
+hand-left.glb, hand-right.glb   ·   «generic-hand»
+  Author   The WebXR Input Profiles contributors
+  Source   https://github.com/immersive-web/webxr-input-profiles
+           @webxr-input-profiles/assets 1.0.20,
+           dist/profiles/generic-hand/{left,right}.glb
+  Licence  MIT — Copyright (c) 2019 Amazon
+
+  Vendored byte for byte, not converted. This is the reference hand every
+  WebXR runtime is measured against, and its skeleton is the one the standard
+  names — the same twenty-five joints `XRHand` iterates, in the same order,
+  under the same names, which is the whole of the binding in src/xr/Hands.tsx.
+
+  It is the same file three.js loads: XRHandMeshModel's own
+  DEFAULT_HAND_PROFILE_PATH points at
+  cdn.jsdelivr.net/npm/@webxr-input-profiles/assets@1.0/dist/profiles/generic-hand/.
+  It is here rather than on that CDN because nothing in this build is fetched
+  from a third party at runtime, least of all from inside somebody's headset
+  on a Wi-Fi link that is also carrying the MIDI — and because the packaged
+  path draws a hand at the origin until the file lands.
+
+  Reached this repository by way of EION Studios' own immersive room
+  (eion-studios-web, public/xr/), which vendored it first and for the same
+  reasons. Unmodified in both.
