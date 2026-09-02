@@ -15,9 +15,9 @@
  * `@yao-pkg/pkg` already ad-hoc signs the executable it produces, so the bridge
  * binary itself was fine. What was not signed was everything assembled around
  * it: the `@julusian/midi`, `koffi` and `node-datachannel` addons and the Swift
- * tray helper are all copied into `Contents/MacOS` *after* that, and the bundle
- * they sit in was never sealed. A bundle with unsigned nested code is a bundle
- * Gatekeeper cannot validate.
+ * tray helper are all copied in *after* that, and the bundle they sit in was
+ * never sealed. A bundle with unsigned nested code is a bundle Gatekeeper
+ * cannot validate.
  *
  * WHAT AD-HOC SIGNING DOES AND DOES NOT BUY
  * It is a signature with no identity behind it — `codesign --sign -`. It makes
@@ -66,11 +66,15 @@ const MACOS_DIR = 'Contents/MacOS/';
  * `Contents/MacOS` is executables *by definition of the bundle format*, which
  * is true of the directory itself and emphatically not of the tree beneath it.
  * The staged addons bring their own `node_modules` — tslib, node-addon-api,
- * detect-libc — and those are a few hundred `.js`, `.h`, `.gypi` and `.md`
- * files that this signed one by one before failing, because "starts with
- * Contents/MacOS/" does not mean "is a program". So: the directory, not the
- * subtree. The `.node` files staged in `prebuilds/` are still caught, by
- * extension, which is the honest reason to match on one.
+ * detect-libc — a few hundred `.js`, `.h`, `.gypi` and `.md` files that a rule
+ * of "starts with Contents/MacOS/" signed one by one before failing, because
+ * that prefix does not mean "is a program". So: the directory, not the subtree.
+ *
+ * That tree now lives in `Contents/Resources` where it belongs, and the rule
+ * still has to be the narrow one — `Contents/MacOS` holds two executables
+ * today and a helper dropped in beside them tomorrow should be signed, while
+ * anything that ever gets staged under it should not be. The addons are caught
+ * by extension wherever they are, which is the honest reason to match on one.
  *
  * And the main executable is excluded deliberately. `codesign` on the path of a
  * bundle's `CFBundleExecutable` does not sign that file — it signs the
@@ -91,9 +95,10 @@ export function isNestedCode(relativePath, mainExecutable = BUNDLE_EXECUTABLE) {
 /**
  * The order to sign in: nested code deepest-first, then the bundle itself.
  *
- * Deepest-first among the nested files too. Nothing here nests today — the
- * addons all sit flat in `Contents/MacOS` — but a framework or a helper app
- * would, and getting the general case right costs one comparator.
+ * Deepest-first among the nested files too. The addons do nest — they are
+ * staged under `Contents/Resources/node_modules`, several levels down — and a
+ * framework or a helper app would nest further still, so the general case is
+ * worth one comparator.
  *
  * @param entries relative paths inside the bundle, in any order
  * @param mainExecutable the bundle's CFBundleExecutable, which is *not* signed

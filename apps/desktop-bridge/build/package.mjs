@@ -260,10 +260,10 @@ async function copyDataChannel(target, destDir) {
   const wanted = DATACHANNEL_PACKAGE[`${target.platform}-${target.arch}`];
   if (wanted === undefined) return false;
 
-  const libDir = await resolvePackageDir('node-datachannel');
-  if (libDir === null) return false;
+  const pkgDir = await resolvePackageDir('node-datachannel');
+  if (pkgDir === null) return false;
 
-  const addonDir = await resolvePackageDir(wanted, join(libDir, 'package.json'));
+  const addonDir = await resolvePackageDir(wanted, join(pkgDir, 'package.json'));
   if (addonDir === null) {
     console.warn(`  ! ${wanted} is not installed; skipping the WebRTC addon`);
     return false;
@@ -272,16 +272,16 @@ async function copyDataChannel(target, destDir) {
   const modules = join(destDir, 'node_modules');
   await mkdir(modules, { recursive: true });
   for (const file of ['package.json', 'dist']) {
-    await cp(join(libDir, file), join(modules, 'node-datachannel', file), { recursive: true });
+    await cp(join(pkgDir, file), join(modules, 'node-datachannel', file), { recursive: true });
   }
   // Only this platform's addon: the other eight are a hundred megabytes of
   // binaries for machines that will never run this build.
   await cp(addonDir, join(modules, wanted), { recursive: true, filter: keepRuntimeFiles });
 
-  const manifest = JSON.parse(await readFile(join(libDir, 'package.json'), 'utf8'));
+  const manifest = JSON.parse(await readFile(join(pkgDir, 'package.json'), 'utf8'));
   const seen = new Set(['node-datachannel', wanted]);
   for (const dependency of Object.keys(manifest.dependencies ?? {})) {
-    await stageDependencies(dependency, join(libDir, 'package.json'), modules, seen);
+    await stageDependencies(dependency, join(pkgDir, 'package.json'), modules, seen);
   }
   return true;
 }
@@ -457,7 +457,30 @@ async function buildTarget(target) {
   const appDir =
     target.platform === 'darwin' ? join(stage, 'VRMC Bridge.app/Contents') : null;
   const exeDir = appDir === null ? stage : join(appDir, 'MacOS');
+
+  /*
+   * Where the staged addons go, which on macOS is NOT beside the executable.
+   *
+   * `Contents/MacOS` does not mean "next to the program" to macOS. It means
+   * executables, and `codesign` enforces that literally: sealing the bundle, it
+   * treats every file in there as a code object that must already carry its own
+   * signature. Stage `node_modules` in it and sealing fails with
+   *
+   *     VRMC Bridge.app: code object is not signed at all
+   *     In subcomponent: .../@julusian/midi/binding.gyp
+   *
+   * naming whichever ordinary text file it reached first. There is no way to
+   * satisfy that — `codesign` will not sign a .gyp — so the tree has to live
+   * somewhere the bundle format expects data. `Contents/Resources` is that
+   * place: its contents are sealed wholesale into CodeResources, and the .node
+   * binaries inside it still get their own signatures. It is where Electron
+   * puts unpacked native modules, for the same reason.
+   *
+   * Off macOS there is no bundle and everything sits beside the executable.
+   */
+  const libDir = appDir === null ? stage : join(appDir, 'Resources');
   await mkdir(exeDir, { recursive: true });
+  await mkdir(libDir, { recursive: true });
 
   console.log(`\n== ${target.slug} ==`);
   await exec(
@@ -477,9 +500,10 @@ async function buildTarget(target) {
     { cwd: root, maxBuffer: 32 * 1024 * 1024 },
   );
 
-  const hasMidi = await copyMidiPrebuild(target, exeDir);
-  const hasKoffi = await copyKoffi(target, exeDir);
-  const hasRtc = await copyDataChannel(target, exeDir);
+  const hasMidi = await copyMidiPrebuild(target, libDir);
+  const hasKoffi = await copyKoffi(target, libDir);
+  const hasRtc = await copyDataChannel(target, libDir);
+  // The tray helper is a real executable, so it does belong in Contents/MacOS.
   const hasTray = await copyTrayHelper(target, exeDir);
 
   /*

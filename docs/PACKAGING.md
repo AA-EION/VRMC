@@ -100,8 +100,8 @@ corrupt download, which is why it sends people looking for one.
 `@yao-pkg/pkg` already ad-hoc signs the executable it produces, so the bridge
 binary was never the problem. What was unsigned was everything assembled around
 it: the `@julusian/midi`, `koffi` and `node-datachannel` addons and the Swift
-tray helper are copied into `Contents/MacOS` afterwards, and the bundle they sit
-in was never sealed.
+tray helper are copied in afterwards, and the bundle they sit in was never
+sealed.
 
 `build/codesign.mjs` signs it inside-out — every nested binary first, the bundle
 last — because a signature seals what is beneath it and signing the bundle first
@@ -109,6 +109,23 @@ means the next nested signature silently invalidates it. `codesign` never
 complains about that order; only `--verify` does, which is why the release
 workflow verifies as a separate step and fails on it. `--deep` is deliberately
 not used to sign: Apple deprecated it, and it papers over exactly that question.
+
+**Where the addons live, and why it is not beside the executable.**
+`Contents/MacOS` does not mean "next to the program" to macOS. It means
+executables, and `codesign` enforces that literally: sealing the bundle, it
+treats every file in there as a code object that must already carry a
+signature. Staging `node_modules` in it fails the seal with *"code object is
+not signed at all — In subcomponent: …/@julusian/midi/binding.gyp"*, naming
+whichever ordinary text file it reached first, and there is no way to satisfy
+that because nothing will sign a `.gyp`.
+
+So the staged tree lives in `Contents/Resources`, whose contents are sealed
+wholesale into `CodeResources` while the `.node` binaries inside still get
+their own signatures — the same place Electron puts unpacked native modules,
+for the same reason. `Contents/MacOS` holds two things: the bridge and the tray
+helper. `stagedPaths` in `src/native.ts` is the other half of this and has its
+own tests, because getting it wrong produces a bridge that starts cleanly,
+shows a pairing code, and can open no MIDI port.
 
 **What ad-hoc buys, and what it does not.** It makes the code loadable and the
 bundle internally consistent, which turns "damaged" into the ordinary

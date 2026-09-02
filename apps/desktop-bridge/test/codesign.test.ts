@@ -25,34 +25,37 @@ import {
  * The `node_modules` entries are the point. An earlier fixture here was the
  * idealised bundle — a flat `Contents/MacOS` with four binaries in it — and it
  * passed every test below while the real thing failed on the runner, because
- * packaging stages the addons' own dependency trees underneath and those are
- * several hundred `.js`, `.h`, `.gypi` and `.md` files. A fixture that omits
- * the awkward half of the input tests the easy half of the code.
+ * packaging stages the addons' own dependency trees and those are several
+ * hundred `.js`, `.h`, `.gypi` and `.md` files. A fixture that omits the
+ * awkward half of the input tests the easy half of the code.
+ *
+ * `binding.gyp` is in here by name. It is the file `codesign` happened to
+ * reach first when it refused to seal the bundle, back when this tree was
+ * staged in `Contents/MacOS`.
  */
 const BUNDLE = [
   'Contents/Info.plist',
   'Contents/MacOS/vrmc-bridge',
   'Contents/MacOS/vrmc-tray',
-  'Contents/MacOS/midi.node',
-  'Contents/MacOS/node_datachannel.node',
-  'Contents/MacOS/koffi.node',
-  'Contents/MacOS/prebuilds/midi-darwin-arm64/node-napi-v7.node',
-  'Contents/MacOS/node_modules/tslib/tslib.js',
-  'Contents/MacOS/node_modules/tslib/README.md',
-  'Contents/MacOS/node_modules/node-addon-api/napi.h',
-  'Contents/MacOS/node_modules/node-addon-api/common.gypi',
-  'Contents/MacOS/node_modules/node-datachannel/package.json',
-  'Contents/MacOS/node_modules/detect-libc/LICENSE',
   'Contents/Resources/vrmc.icns',
+  'Contents/Resources/prebuilds/midi-darwin-arm64/node-napi-v7.node',
+  'Contents/Resources/node_modules/@julusian/midi/prebuilds/midi-darwin-arm64/node-napi-v7.node',
+  'Contents/Resources/node_modules/@julusian/midi/binding.gyp',
+  'Contents/Resources/node_modules/@node-datachannel/darwin-arm64/node_datachannel.node',
+  'Contents/Resources/node_modules/tslib/tslib.js',
+  'Contents/Resources/node_modules/tslib/README.md',
+  'Contents/Resources/node_modules/node-addon-api/napi.h',
+  'Contents/Resources/node_modules/node-addon-api/common.gypi',
+  'Contents/Resources/node_modules/node-datachannel/package.json',
+  'Contents/Resources/node_modules/detect-libc/LICENSE',
 ];
 
 /** Everything in BUNDLE that genuinely needs its own signature. */
 const SIGNABLE = [
   'Contents/MacOS/vrmc-tray',
-  'Contents/MacOS/midi.node',
-  'Contents/MacOS/node_datachannel.node',
-  'Contents/MacOS/koffi.node',
-  'Contents/MacOS/prebuilds/midi-darwin-arm64/node-napi-v7.node',
+  'Contents/Resources/prebuilds/midi-darwin-arm64/node-napi-v7.node',
+  'Contents/Resources/node_modules/@julusian/midi/prebuilds/midi-darwin-arm64/node-napi-v7.node',
+  'Contents/Resources/node_modules/@node-datachannel/darwin-arm64/node_datachannel.node',
 ];
 
 describe('what needs its own signature', () => {
@@ -60,18 +63,21 @@ describe('what needs its own signature', () => {
     // The addons are Mach-O code even though they are not executables, and an
     // unsigned one inside a quarantined bundle is a hard failure on Apple
     // Silicon rather than a warning.
-    expect(isNestedCode('Contents/MacOS/midi.node')).toBe(true);
+    expect(
+      isNestedCode('Contents/Resources/node_modules/@node-datachannel/darwin-arm64/node_datachannel.node'),
+    ).toBe(true);
     expect(isNestedCode('Contents/Frameworks/libthing.dylib')).toBe(true);
     expect(isNestedCode('Contents/MacOS/vrmc-tray')).toBe(true);
   });
 
-  it('signs an addon staged in a subdirectory', () => {
-    // The MIDI prebuild is copied to `prebuilds/<platform>/` rather than beside
-    // the executable, so a rule that only looked at Contents/MacOS directly
-    // would leave the one addon that opens MIDI ports unsigned.
-    expect(isNestedCode('Contents/MacOS/prebuilds/midi-darwin-arm64/node-napi-v7.node')).toBe(
-      true,
-    );
+  it('signs an addon wherever packaging staged it', () => {
+    // Every addon lives several levels down inside Contents/Resources, so the
+    // rule cannot be about location — matching Mach-O by extension is what
+    // catches them, and it is why the extension list is the primary rule
+    // rather than a convenience.
+    expect(
+      isNestedCode('Contents/Resources/prebuilds/midi-darwin-arm64/node-napi-v7.node'),
+    ).toBe(true);
   });
 
   it('leaves resources to the bundle seal', () => {
@@ -92,11 +98,14 @@ describe('what needs its own signature', () => {
      * under there, and a rule of "starts with Contents/MacOS/" signed every
      * README and header in them, one `codesign` process each, before failing.
      */
+    expect(isNestedCode('Contents/Resources/node_modules/tslib/README.md')).toBe(false);
+    expect(isNestedCode('Contents/Resources/node_modules/node-addon-api/napi.h')).toBe(false);
+    expect(isNestedCode('Contents/Resources/node_modules/@julusian/midi/binding.gyp')).toBe(false);
+    expect(isNestedCode('Contents/Resources/node_modules/tslib/tslib.js')).toBe(false);
+    // And the rule that caused it, spelled out: a staged tree under
+    // Contents/MacOS would be signed file by file, which is why nothing is
+    // staged there any more.
     expect(isNestedCode('Contents/MacOS/node_modules/tslib/README.md')).toBe(false);
-    expect(isNestedCode('Contents/MacOS/node_modules/node-addon-api/napi.h')).toBe(false);
-    expect(isNestedCode('Contents/MacOS/node_modules/node-addon-api/common.gypi')).toBe(false);
-    expect(isNestedCode('Contents/MacOS/node_modules/node-datachannel/package.json')).toBe(false);
-    expect(isNestedCode('Contents/MacOS/node_modules/tslib/tslib.js')).toBe(false);
   });
 
   it('leaves the main executable to the bundle', () => {
@@ -180,13 +189,13 @@ describe('what codesign will not look at', () => {
      */
     expect(
       unsignableEntries([
-        'Contents/MacOS/midi.node',
-        'Contents/MacOS/node_modules/@julusian/midi/node_modules/.bin/pkg-prebuilds-copy',
-        'Contents/MacOS/node_modules/@julusian/midi/node_modules/.tmp/scratch',
+        'Contents/MacOS/vrmc-tray',
+        'Contents/Resources/node_modules/@julusian/midi/node_modules/.bin/pkg-prebuilds-copy',
+        'Contents/Resources/node_modules/@julusian/midi/node_modules/.tmp/scratch',
       ]),
     ).toEqual([
-      'Contents/MacOS/node_modules/@julusian/midi/node_modules/.bin/pkg-prebuilds-copy',
-      'Contents/MacOS/node_modules/@julusian/midi/node_modules/.tmp/scratch',
+      'Contents/Resources/node_modules/@julusian/midi/node_modules/.bin/pkg-prebuilds-copy',
+      'Contents/Resources/node_modules/@julusian/midi/node_modules/.tmp/scratch',
     ]);
   });
 
@@ -197,7 +206,7 @@ describe('what codesign will not look at', () => {
   it('does not fire on a file that merely looks like one', () => {
     // The segment has to be the whole directory name — a package legitimately
     // called `dotbin` or a file named `x.bin` is not build tooling.
-    expect(unsignableEntries(['Contents/MacOS/node_modules/dotbin/index.js'])).toEqual([]);
+    expect(unsignableEntries(['Contents/Resources/node_modules/dotbin/index.js'])).toEqual([]);
     expect(unsignableEntries(['Contents/Resources/firmware.bin'])).toEqual([]);
   });
 });
