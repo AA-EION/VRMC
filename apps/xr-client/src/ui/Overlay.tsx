@@ -269,6 +269,13 @@ export function Overlay(props: OverlayProps): React.ReactElement {
           so your DAW discovers it the way it would a controller being plugged in. Removing it
           closes the port again.
         </p>
+        <p className="hint">
+          In the headset, pinch a device to move it and use both hands to turn it. “To surface”
+          drops it flat onto whatever is really underneath, so it sits on your desk rather than
+          floating at a guessed height. Pinning one makes your hands pass straight through — worth
+          doing before you play, since drumming on a pad grid means putting your fingers exactly
+          where a grab would look for them.
+        </p>
         <div className="row wrap">
           <button type="button" onClick={() => onAddDevice(DeviceModel.LAUNCHPAD_X)}>
             + Launchpad X

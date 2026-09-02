@@ -27,7 +27,7 @@ rather than by anything the app does.
 ```
 packages/protocol    Wire format. Zero-allocation writer/reader.
 packages/layout      Geometry: pad grids, piano keyboards, placement maths.
-packages/interaction Poke detection and pinch-grab. No dependencies at all.
+packages/interaction Poke detection, pinch-grab knobs, and moving devices.
 packages/devices     Launchpad emulation: identity, LED SysEx, colour palette.
 apps/xr-client       WebXR + R3F. Reads hands, draws instruments, sends packets.
 apps/desktop-bridge  Receives packets, manages virtual devices, emits MIDI.
@@ -38,6 +38,62 @@ fingertip-to-note state machine, the geometry, and the packet format — and all
 three are pure functions of numbers. Keeping them out of the app layers means
 they can be tested exhaustively at a terminal, which is the only practical way
 to iterate on behaviour that otherwise requires a headset on your face.
+
+## The room, and what is in it
+
+Three things share one `immersive-ar` session, and it is worth being explicit
+that they are rendering decisions rather than session ones.
+
+**Full VR is a backdrop, not a second session.** Passthrough is what shows
+through wherever the frame buffer is transparent, so drawing something opaque
+is all "going fully immersive" means. `xr/Backdrop.tsx` fades an opaque shell
+and EION Studios' galaxy in behind everything; nothing about the transport, the
+device roster or a sounding note notices, and the switch is a crossfade rather
+than a cut. `session.ts` documents the same fact from the other direction, as
+the warning it originally was.
+
+**The hands are one rig doing two jobs.** In the galaxy they are drawn; against
+passthrough they are drawn as depth with `colorWrite` off, so the compositor
+shows your real hands there and whatever is behind them is correctly hidden.
+That is Meta's own recommended route: their environment depth map has hands
+*removed* from it, because the depth sensor's resolution gives soft, wrong edges
+around fingers, and depth-based hand occlusion degrades further at exactly the
+range this instrument lives at. One rig rather than two, because a silhouette
+that is not exactly the drawn hand's shape shows a seam.
+
+**Focus mode is an annulus.** WebXR exposes no control over the compositor's
+exposure, so "dim the room" has one honest implementation: draw something dark
+over the parts you want quieter and leave a hole where you do not.
+
+Environment occlusion through `depth-sensing` is offered, opt-in and honestly
+labelled — three's occlusion pass blits the depth texture with screen UVs and so
+ignores the difference between the depth camera's field of view and the
+display's ([three.js#28877](https://github.com/mrdoob/three.js/issues/28877)).
+It is refused outright in the galaxy, and that is forced rather than advised:
+`WebXRManager.updateCamera` replaces `camera.far` with `depthSensing.depthFar`
+as soon as a depth texture exists, and Meta's Depth API reaches about five
+metres, which would clip a sky that starts at nineteen.
+
+## Where things are
+
+A device's pose is state, and state that only lives in the headset ends when the
+session does — so every sitting would start with everything back at its default
+placement. The bridge already outlives the headset and already pushes its roster
+on every connection, so that is where a placement lives; a side channel would be
+a second source of truth about the same device. See
+[the protocol](PROTOCOL.md#why-v3-exists).
+
+Orientation is yaw and tilt with no roll, all the way through: a rolled
+Launchpad is one you cannot play, and hand tracking will report thirty degrees
+of wrist roll nobody intended.
+
+One rule governs every surface here, and it is the one that costs the most when
+broken: **the transform the renderer draws at and the transform the detector
+inverts must come from the same place.** A discrepancy does not look broken —
+the pads simply trigger somewhere other than where they appear. It has been got
+wrong twice during this work, once in `localToWorld` (which shortcut the maths
+in a way only valid for tilt-only rotations) and once in the wrist console
+(which was placed by its centre and drawn from its corner).
 
 ## Emulating a Launchpad
 
@@ -229,6 +285,24 @@ evidence supports:
   see below — but nothing inside an XR session is: `immersive-ar` availability,
   the passthrough blend mode, `fillPoses` support and hand joint ordering have
   all been written against the specification and never against a real runtime.
+- **No occlusion has been seen.** The depth-only hand rig is the mechanism Meta
+  documents and it is the right one on paper; whether the silhouette reads
+  cleanly against passthrough at playing distance is a thing only a headset can
+  answer. The `depth-sensing` path is best-effort even where it works.
+- **No surface has been anchored.** `plane-detection`, `hit-test` and
+  `createAnchor` are all requested, handled and tested as arithmetic; none has
+  met a runtime. Whether a desk is found quickly enough that the two-and-a-half
+  second timeout is generous or stingy is the first thing to find out.
+- **The velocity fit has never met a hand.** The curve maths is exercised
+  thoroughly and the routine's own logic is tested, but the numbers a real
+  player produces for "soft" and "hard" are the input the whole thing is
+  calibrated against, and they are unknown.
+- **Clip labels are partial, and known to be.** The device shows the text its
+  DAW sends it, decoded from Novation's scroll-text SysEx — real, and for
+  Ableton that is mode and track names as views change. It is *not* per-clip
+  names above the pads they belong to, and nothing can be: a Launchpad's grid is
+  addressed as colours and the hardware protocol carries no message naming a
+  pad. Those names never leave the DAW.
 
 The tests cover what can be covered without hardware, which is most of the
 difficult logic and none of the platform integration.
@@ -236,7 +310,7 @@ difficult logic and none of the platform integration.
 ### What the headless render test does cover
 
 `apps/xr-client/test/render-smoke.mjs` loads the built app in Chromium with
-software WebGL and checks 35 properties of the running scene: that the React
+software WebGL and checks 58 properties of the running scene: that the React
 tree mounts with no uncaught exceptions, a WebGL 2 context is created, both
 instrument surfaces build as instanced meshes with all 41 zones, the frame loop
 advances, geometry rasterises, and both surfaces fall inside the preview
@@ -254,8 +328,26 @@ detection, routing, feedback and the GPU together — the pieces are unit-tested
 in `packages/interaction`, but the wiring between them exists only in the
 client.
 
-Seven real bugs came out of writing it, none of which any amount of type
-checking would have caught: the preview camera framed the instruments out of
+It also covers the parts added since: that the identity's token layer resolves
+and the mark takes `currentColor`; that the galaxy is built before it is asked
+for and the switch into it rebuilds nothing; that the instruments are still
+drawn *inside* the full-VR room; that both hand meshes load from this origin and
+every one of the standard's twenty-five joints is present in the asset by name;
+that the hands become depth-only occluders in passthrough and drawn ones in the
+galaxy without the rig being rebuilt; and that a grabbed device carries its
+detector with it, by poking the device at its new position and requiring a note.
+
+Several of those exist because the obvious version of the check did not
+discriminate. The full-VR one took three attempts: a tally of near-white pixels
+passes whether or not the instruments are buried, because the galaxy's own ink
+is Absolute White; the longest unbroken run passes too, because a white key is
+eighteen pixels wide and the only long run in the frame belonged to the shell
+doing the burying. Counting near-white inside the keyboard's *projected box*
+goes from 15 144 to 0 when the bug is reintroduced, which is the standard a
+regression test has to meet.
+
+Seven real bugs came out of writing the original, none of which any amount of
+type checking would have caught: the preview camera framed the instruments out of
 shot entirely; the label plane was occluded by the raised zone boxes; labels
 drew dark ink on the dark pad theme; `SurfaceHighlighter` faded held zones
 despite documenting that it did not; every Launchpad pad rendered washed white,
