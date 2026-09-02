@@ -7,10 +7,11 @@ makes it look like real hardware to your DAW.
 
 Virtual pads, keys and Launchpads sit on your real desk in full-colour
 passthrough. You play them with your hands — no controllers — and they arrive in
-Ableton, Logic, REAPER or Pro Tools as if they were plugged into USB. Spawn a
-Launchpad X in the headset and a correctly named MIDI port appears on the
-computer; remove it and the port disappears. The DAW lights its grid, and you
-see that in the headset.
+Ableton, Logic, REAPER or Pro Tools as if they were plugged into USB. A
+Launchpad X is open from the moment the bridge starts, so the DAW has hardware
+to recognise before anyone puts the headset on; spawn another in the headset
+and a correctly named MIDI port appears on the computer; remove it and the port
+disappears. The DAW lights its grid, and you see that in the headset.
 
 ```
   Quest 3                          Wi-Fi                    Desktop

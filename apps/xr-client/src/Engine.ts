@@ -168,6 +168,11 @@ export class Engine {
    * actually see it.
    */
   addDevice(model: string): LaunchpadInstance | null {
+    // Past anything already taken. The bridge opens a device of its own at
+    // startup and it holds the first dynamic id, so a headset that spawns one
+    // before the roster reaches it would otherwise ask for that same id and
+    // the bridge would treat the request as a duplicate and do nothing.
+    while (this.launchpads.some((d) => d.deviceId === this.nextDeviceId)) this.nextDeviceId++;
     if (this.nextDeviceId > MAX_DEVICE_ID) return null;
     const deviceId = this.nextDeviceId++;
     const instance = createLaunchpad(deviceId, model, this.nextPose(), this.link);
@@ -190,11 +195,29 @@ export class Engine {
     return true;
   }
 
+  /**
+   * Take the bridge's word for what exists.
+   *
+   * Mostly this is an update to devices this headset spawned. But the bridge
+   * opens a Launchpad of its own at startup — so the DAW has a control surface
+   * to bind before anyone puts the headset on — and that one arrives here as a
+   * device we have never seen. Adopting it is what puts a surface under the
+   * lights the DAW is already sending; without it those LEDs are addressed to
+   * nothing, and the user is looking at an empty room while Ableton believes a
+   * Launchpad is plugged in.
+   *
+   * Adoption is silent and idempotent: a reconnect replays the same roster,
+   * and the second pass finds the device already here.
+   */
   private applyRoster(roster: readonly DeviceStateEntry[]): void {
     let changed = false;
     for (const entry of roster) {
-      const device = this.launchpads.find((d) => d.deviceId === entry.deviceId);
-      if (device === undefined) continue;
+      let device = this.launchpads.find((d) => d.deviceId === entry.deviceId);
+      if (device === undefined) {
+        device = this.adopt(entry.deviceId, entry.model);
+        if (device === undefined) continue;
+        changed = true;
+      }
       if (device.status !== entry.status || device.detail !== entry.detail) {
         device.status = entry.status;
         device.detail = entry.detail;
@@ -202,6 +225,21 @@ export class Engine {
       }
     }
     if (changed) this.onDevicesChanged?.();
+  }
+
+  /**
+   * Build a surface for a device the bridge already has open.
+   *
+   * Unlike `addDevice` this asks the bridge for nothing: the ports exist, and
+   * a request to create them again would be answered as a no-op at best. It
+   * only claims the id, so a device spawned later here cannot collide with it.
+   */
+  private adopt(deviceId: number, model: string): LaunchpadInstance | undefined {
+    const instance = createLaunchpad(deviceId, model, this.nextPose(), this.link);
+    if (instance === null) return undefined;
+    this.launchpads.push(instance);
+    if (deviceId >= this.nextDeviceId) this.nextDeviceId = deviceId + 1;
+    return instance;
   }
 
   /**

@@ -12,6 +12,7 @@ import {
   DeviceId,
   DeviceStatus,
   EventType,
+  FIRST_DYNAMIC_DEVICE_ID,
   PacketKind,
   PacketReader,
   PacketWriter,
@@ -20,6 +21,7 @@ import {
   writeDeviceAdd,
   writeDeviceRemove,
 } from '@vrmc/protocol';
+import { DEFAULT_CONFIG, parseArgs } from '../src/config.js';
 import { Router } from '../src/core/Router.js';
 import { DeviceManager } from '../src/devices/DeviceManager.js';
 import { NullSink, NullSource, SimpleVirtualPort } from '../src/midi/MidiSink.js';
@@ -161,6 +163,70 @@ describe('creating and destroying emulated devices', () => {
     // A pad left held must be released while the port still exists, or the
     // note is stranded in the DAW with nothing left to turn it off.
     expect(ports.sent(daw)).toContainEqual([0x90, 11, 0]);
+  });
+});
+
+describe('what a DAW finds without anyone putting the headset on', () => {
+  /*
+   * The complaint this answers: "Ableton shows it as VRMC".
+   *
+   * It did, and that was all it could do. A plain port carries notes but
+   * matches no control-surface script, so Ableton listed it as a nameless
+   * keyboard — no session grid, no lights, nothing to bind — and the only way
+   * to get a real device was to spawn one from inside the headset, which is
+   * not a place anyone looks when the problem appears in a DAW on a desk.
+   */
+  it('opens hardware the DAW can recognise, before any headset connects', async () => {
+    const ports = new FakePorts();
+    const devices = makeManager(ports);
+
+    await devices.add(DeviceId.PADS, 'VRMC');
+    await devices.add(FIRST_DYNAMIC_DEVICE_ID, DEFAULT_CONFIG.startupDevice);
+
+    // Both ports of the real thing, spelled the way a script matches them.
+    expect(ports.opened).toContain('Launchpad X LPX DAW');
+    expect(ports.opened).toContain('Launchpad X LPX MIDI');
+    // And the plain surface is still there for the keys, pads and knobs.
+    expect(ports.opened).toContain('VRMC');
+  });
+
+  it('answers a Device Inquiry on the startup device, which is how a script confirms', async () => {
+    const ports = new FakePorts();
+    const devices = makeManager(ports);
+    await devices.add(FIRST_DYNAMIC_DEVICE_ID, DEFAULT_CONFIG.startupDevice);
+
+    // The universal inquiry every DAW sends before it trusts a port name.
+    devices.injectHostMessage(
+      FIRST_DYNAMIC_DEVICE_ID,
+      LAUNCHPAD_X.dawPortIndex,
+      new Uint8Array([0xf0, 0x7e, 0x7f, 0x06, 0x01, 0xf7]),
+    );
+
+    const replies = ports.sent('Launchpad X LPX DAW').filter((m) => m[0] === 0xf0);
+    expect(replies.length).toBeGreaterThan(0);
+    // Family code is what selects the script; a wrong one binds nothing.
+    expect(replies[0]).toEqual(expect.arrayContaining([...LAUNCHPAD_X.familyCode]));
+  });
+
+  it('does not route the plain surfaces through the emulator', async () => {
+    const ports = new FakePorts();
+    const devices = makeManager(ports);
+    await devices.add(DeviceId.PADS, 'VRMC');
+    devices.alias(DeviceId.KEYS, DeviceId.PADS);
+    await devices.add(FIRST_DYNAMIC_DEVICE_ID, DEFAULT_CONFIG.startupDevice);
+
+    // Middle C from the headset's keyboard. A Launchpad reads data1 as an XY
+    // index, so had these shared a device this would have lit a pad instead of
+    // playing a note.
+    devices.handleEvent(DeviceId.KEYS, EventType.NOTE_ON, 0, 60, 100, 0);
+
+    expect(ports.sent('VRMC')).toContainEqual([0x90, 60, 100]);
+    expect(ports.sent('Launchpad X LPX DAW')).toHaveLength(0);
+  });
+
+  it('can be turned off for someone who only wants the plain port', () => {
+    expect(parseArgs(['--device', 'none'])).toMatchObject({ startupDevice: 'none' });
+    expect(() => parseArgs(['--device', 'mpc'])).toThrow(/launchpad/);
   });
 });
 

@@ -1,3 +1,4 @@
+import { DeviceModel, HARDWARE_MODELS } from '@vrmc/devices';
 import { DEFAULT_UDP_PORT, DEFAULT_WS_PORT } from '@vrmc/protocol';
 import { WINDOWS_LOOPBACK_PATTERN } from './midi/openPort.js';
 
@@ -48,6 +49,21 @@ export interface BridgeConfig {
    * when a host expects a different spelling than the default.
    */
   portNameTemplate: string;
+  /**
+   * Emulated hardware to open at startup, or `none` for just the plain port.
+   *
+   * The plain port is honest but anonymous: a DAW sees "VRMC", has no script
+   * that matches it, and treats it as a nameless keyboard. Nothing lights up,
+   * no session grid appears, and the answer — "spawn a Launchpad from inside
+   * the headset" — is not something a user finds by looking at Ableton.
+   *
+   * So a Launchpad X is open before anyone puts the headset on. It is emulated
+   * completely enough for Ableton to bind its own control-surface script:
+   * matching port names, a Device Inquiry reply carrying the family code, and
+   * the LED SysEx the script drives. The headset adopts it from the roster and
+   * draws it, so the lights the DAW sends have somewhere to land.
+   */
+  startupDevice: string;
 }
 
 export const DEFAULT_CONFIG: BridgeConfig = {
@@ -68,6 +84,7 @@ export const DEFAULT_CONFIG: BridgeConfig = {
   pairingService: 'https://vrmc.eionstudios.com',
   enableRtc: true,
   enableTray: true,
+  startupDevice: DeviceModel.LAUNCHPAD_X,
 };
 
 export const USAGE = `
@@ -91,6 +108,10 @@ Usage: vrmc-bridge [options]
   --loopback <regex>   Windows: pattern for the fallback port
   --port-template <s>  Naming for emulated device ports
                        (default: "{device} {port}", e.g. "Launchpad X LPX DAW")
+  --device <model>     Emulated hardware to open at startup: ${HARDWARE_MODELS.join(
+    ', ',
+  )},
+                       or "none" (default: ${DEFAULT_CONFIG.startupDevice})
   --stats <seconds>    Stats interval, 0 to disable (default: 10)
   --list-ports         List MIDI outputs and exit
   --check              Verify the native libraries load, then exit
@@ -183,6 +204,16 @@ export function parseArgs(argv: readonly string[]): BridgeConfig | 'help' {
           throw new ArgError('--port-template must contain {port}, or both ports collide');
         }
         config.portNameTemplate = template;
+        break;
+      }
+      case '--device': {
+        const model = requireValue(arg, argv[++i]);
+        if (model !== 'none' && !HARDWARE_MODELS.includes(model as DeviceModel)) {
+          throw new ArgError(
+            `--device must be one of ${HARDWARE_MODELS.join(', ')}, or "none"`,
+          );
+        }
+        config.startupDevice = model;
         break;
       }
       case '--stats': {

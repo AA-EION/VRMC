@@ -14,9 +14,19 @@ system-wide the moment it opens. Run:
 pnpm bridge
 ```
 
-A port named **VRMC** appears immediately. Because CoreMIDI publishes it
-system-wide, DAWs that rescan MIDI devices while running will see it without a
-restart. Where to enable it:
+Three ports appear immediately: **VRMC**, and the two of an emulated Launchpad
+X — **Launchpad X LPX MIDI** and **Launchpad X LPX DAW**. Because CoreMIDI
+publishes them system-wide, DAWs that rescan MIDI devices while running will
+see them without a restart.
+
+The two are for different things. VRMC is a plain instrument port carrying the
+keys, pads and knobs; the Launchpad pair is hardware a DAW can identify, so
+Ableton loads its own Launchpad X control surface and drives the LEDs. A plain
+port cannot do that — no script matches the name "VRMC", so it is listed as a
+nameless keyboard and nothing lights up. Pass `--device none` if you want only
+the plain port, or `--device launchpad-pro-mk3` for the larger surface.
+
+Where to enable the plain port:
 
 | DAW | Where to enable it |
 |---|---|

@@ -1,6 +1,11 @@
 #!/usr/bin/env node
 import { networkInterfaces } from 'node:os';
-import { DeviceId, DeviceStatus, isPrivateAddress } from '@vrmc/protocol';
+import {
+  DeviceId,
+  DeviceStatus,
+  FIRST_DYNAMIC_DEVICE_ID,
+  isPrivateAddress,
+} from '@vrmc/protocol';
 import { ArgError, parseArgs, USAGE, type BridgeConfig } from './config.js';
 import { Router } from './core/Router.js';
 import { checkNativeModules, formatChecks } from './core/selfCheck.js';
@@ -117,9 +122,61 @@ async function main(): Promise<void> {
   devices.alias(DeviceId.KEYS, DeviceId.PADS);
   devices.alias(DeviceId.KNOBS, DeviceId.PADS);
 
+  /*
+   * And one piece of emulated hardware, open before anyone puts the headset on.
+   *
+   * The port above is anonymous. A DAW has no script that matches "VRMC", so
+   * it appears as a nameless keyboard: no session grid, no lights, nothing to
+   * bind. The device below is a Launchpad X, emulated closely enough that
+   * Ableton loads its own control-surface script — the port names match, the
+   * Device Inquiry reply carries the family code the script checks for, and
+   * the LED SysEx it sends is understood.
+   *
+   * Not an alias of the surfaces above: those send plain note numbers, while a
+   * Launchpad's controls are XY indices through the emulator, and routing one
+   * into the other would light the wrong pads. It is a separate device, which
+   * is what it is on a desk too.
+   *
+   * It keeps the first dynamic id, so the roster the headset receives is
+   * indistinguishable from one it spawned itself, and the headset draws it.
+   */
+  if (config.startupDevice !== 'none') {
+    await devices.add(FIRST_DYNAMIC_DEVICE_ID, config.startupDevice);
+  }
+
+  /*
+   * Bring a headset that has just arrived up to date.
+   *
+   * The roster alone is not enough now that the bridge opens a device of its
+   * own at startup. Ableton has been lighting that Launchpad since it loaded
+   * its script — a session view, a clip playing, a track armed — and it will
+   * not redraw those LEDs just because a headset appeared. Without replaying
+   * them the user puts the headset on and finds a dark grid under a device the
+   * DAW believes is fully lit, and it stays dark until something happens to
+   * change a clip.
+   *
+   * Only emulated hardware has LEDs to replay; the plain surfaces have none,
+   * and `forEachLed` returns nothing for them.
+   */
+  const resyncHeadset = (): void => {
+    const bus = broadcast;
+    if (bus === null) return;
+    bus.sendRoster(devices.roster());
+    for (const entry of devices.roster()) {
+      devices.forEachLed(entry.deviceId, (ledIndex, r, g, b, blink) => {
+        bus.queueLed(entry.deviceId, ledIndex, r, g, b, blink);
+      });
+    }
+  };
+
   const router = new Router(devices, {
     onPanic: (released) => log(`panic: released ${released} note(s)`),
-    onHello: (name) => log(`client identified as "${name}"`),
+    onHello: (name) => {
+      log(`client identified as "${name}"`);
+      // The client saying hello is the only signal a WebSocket connection
+      // gives that it is ready to be told anything.
+      resyncHeadset();
+    },
     onBye: () => log('client said goodbye'),
     onRosterChange: () => broadcast?.sendRoster(devices.roster()),
     onPong: () => broadcast?.notePong(),
@@ -168,8 +225,9 @@ async function main(): Promise<void> {
     ? new RtcTransport(router, {
         onLog: log,
         // A headset that has just arrived has no idea what devices exist, and
-        // it is the roster that tells it what to draw.
-        onPeerChange: () => bus.sendRoster(devices.roster()),
+        // it is the roster that tells it what to draw — then the LEDs already
+        // on them.
+        onPeerChange: () => resyncHeadset(),
       })
     : null;
   if (rtc !== null) bus.add(rtc);
