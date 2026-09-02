@@ -9,7 +9,7 @@ import { DeviceManager } from '../src/devices/DeviceManager.js';
 import { NullSink, NullSource, SimpleVirtualPort } from '../src/midi/MidiSink.js';
 import { Broadcaster } from '../src/net/Broadcaster.js';
 import { WsServer } from '../src/net/WsServer.js';
-import type { DashboardStatus } from '../src/net/dashboard.js';
+import { dashboardHtml, type DashboardStatus } from '../src/net/dashboard.js';
 
 const cleanups: Array<() => Promise<void> | void> = [];
 afterEach(async () => {
@@ -117,6 +117,40 @@ describe('dashboard', () => {
   it('404s an unknown path rather than serving the page', async () => {
     const { port } = await serve();
     expect((await fetch(`http://127.0.0.1:${port}/nope`)).status).toBe(404);
+  });
+
+  /*
+   * The page's own script has to parse.
+   *
+   * This is not a hypothetical. The script lives inside a template literal, so
+   * every backslash in it is consumed by the literal and never reaches the
+   * browser: a scheme-stripping regex written `/^https?:\/\//` was served as
+   * `/^https?:///`, which is a syntax error. The whole script was discarded,
+   * the page rendered its static shell and then sat there — no version, no
+   * pairing code, no devices — while `/api/status` answered perfectly. Every
+   * test above passed throughout, because each one asked the server a
+   * question and none of them asked the browser.
+   */
+  it('serves a script the browser can parse', async () => {
+    const { port } = await serve();
+    const body = await (await fetch(`http://127.0.0.1:${port}/`)).text();
+    const script = body.slice(
+      body.indexOf('<script>') + '<script>'.length,
+      body.lastIndexOf('</script>'),
+    );
+    expect(script.length).toBeGreaterThan(500);
+    // Compiles it without running it: a SyntaxError throws here, and nothing
+    // in the body is evaluated.
+    expect(() => new Function(script)).not.toThrow();
+  });
+
+  it('keeps backslashes out of the inline script, which cannot carry them', () => {
+    const html = dashboardHtml();
+    const script = html.slice(
+      html.indexOf('<script>') + '<script>'.length,
+      html.lastIndexOf('</script>'),
+    );
+    expect(script).not.toContain('\\');
   });
 });
 

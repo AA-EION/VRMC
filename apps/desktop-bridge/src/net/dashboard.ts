@@ -77,6 +77,13 @@ export function dashboardHtml(): string {
 <meta charset="utf-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1" />
 <title>VRMC Bridge</title>
+<!--
+  Inline, so the browser never asks for /favicon.ico. The bridge has no
+  business serving static files, and the 404 it would answer with shows up as
+  a red line in the console — the first thing anyone looking for a real
+  problem here would find, and a dead end.
+-->
+<link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='3.6' fill='%230a0c12'/><g fill='%2363e0ff'><rect x='3' y='3' width='4' height='4' rx='1'/><rect x='9' y='3' width='4' height='4' rx='1'/><rect x='3' y='9' width='4' height='4' rx='1'/><rect x='9' y='9' width='4' height='4' rx='1'/></g></svg>" />
 <style>
   :root {
     color-scheme: dark;
@@ -194,6 +201,25 @@ export function dashboardHtml(): string {
 const $ = (id) => document.getElementById(id);
 const STATUS = { 0: 'opening', 1: 'ready', 2: 'failed' };
 
+/*
+ * The site as a user would say it aloud: "vrmc.eionstudios.com".
+ *
+ * URL rather than a regex, and not only because it is clearer. This whole
+ * script is written inside a template literal, where a backslash is an escape
+ * belonging to the literal and never reaches the browser — so a regex that
+ * escaped the slashes of a scheme arrived with them bare, which is a syntax
+ * error, which discarded every line below it. The page rendered its shell and
+ * then sat there empty while the server answered perfectly. Nothing in this
+ * script may contain a backslash; a test enforces it.
+ */
+function hostOf(url) {
+  try {
+    return new URL(url).host;
+  } catch {
+    return '';
+  }
+}
+
 function ago(ms) {
   if (ms === null) return 'never';
   if (ms < 1500) return 'just now';
@@ -223,7 +249,7 @@ async function refresh() {
   $('pin').textContent = s.packetsIn + ' pkt / ' + s.eventsIn + ' ev';
   $('pout').textContent = s.packetsOut + ' pkt / ' + s.ledsOut + ' led';
 
-  const site = (s.siteUrl || '').replace(/^https?:\/\//, '');
+  const site = hostOf(s.siteUrl || '');
   $('siteUrl').textContent = site || 'the VRMC site';
   $('pairCode').textContent = s.pairingCode || 'off';
   $('pairState').textContent = !s.pairingCode
