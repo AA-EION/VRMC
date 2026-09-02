@@ -35,8 +35,15 @@ async function run(command, args, options = {}) {
     });
     return `${stdout}${stderr}`;
   } catch (err) {
+    // The last 40 lines, not the last 4.
+    //
+    // Four was enough for a linker error and useless for a compiler one: a
+    // swiftc diagnostic ends with the source line, a caret and a doc link, so
+    // the tail showed the code and the URL while the sentence saying what was
+    // wrong scrolled off. A release failed on that, and the log said only
+    // which two lines were involved.
     const detail = err?.stderr || err?.stdout || err?.message || String(err);
-    console.warn(`  ! ${command} failed: ${String(detail).trim().split('\n').slice(-4).join('\n')}`);
+    console.warn(`  ! ${command} failed:\n${String(detail).trim().split('\n').slice(-40).join('\n')}`);
     return null;
   }
 }

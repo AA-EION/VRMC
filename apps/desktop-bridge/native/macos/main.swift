@@ -255,10 +255,26 @@ if arguments.first == "--login-item" {
     exit(result["error"] == nil ? 0 : 1)
 }
 
-let app = NSApplication.shared
-// .accessory is the tray-only policy: a status item, no Dock tile, no menu bar
-// menus, and no window that could steal focus from the DAW.
-app.setActivationPolicy(.accessory)
-let delegate = TrayDelegate()
-app.delegate = delegate
-app.run()
+/*
+ * Inside `assumeIsolated`, because top-level code is not main-actor isolated.
+ *
+ * It reads as though it must be — this is the main thread, before anything
+ * else exists — but the compiler does not know that, and under the Swift 6
+ * language mode Xcode 26 defaults to, every line below is a main-actor call
+ * from nowhere. `assumeIsolated` states the thing that is true: this runs on
+ * the main thread, so it is the main actor.
+ *
+ * `delegate` is held here rather than in a global on purpose. NSApplication
+ * does not retain its delegate, and `app.run()` does not return until the
+ * helper is quitting, so this scope is exactly as long as the delegate needs
+ * to live.
+ */
+MainActor.assumeIsolated {
+    let app = NSApplication.shared
+    // .accessory is the tray-only policy: a status item, no Dock tile, no menu
+    // bar menus, and no window that could steal focus from the DAW.
+    app.setActivationPolicy(.accessory)
+    let delegate = TrayDelegate()
+    app.delegate = delegate
+    app.run()
+}
