@@ -1,4 +1,4 @@
-import { useEffect, useRef } from 'react';
+import { useEffect, useMemo, useRef } from 'react';
 import { useFrame, useThree } from '@react-three/fiber';
 import { Vector3 } from 'three';
 import type { Camera, Group, Scene as ThreeScene, WebGLRenderer } from 'three';
@@ -96,6 +96,8 @@ export function Scene({
   onDepthState,
 }: SceneProps): React.ReactElement {
   const gl = useThree((state) => state.gl);
+  /** Scratch for the head position. One Vector3 for the session, not per frame. */
+  const headPosition = useMemo(() => new Vector3(), []);
   const scene = useThree((state) => state.scene);
   const camera = useThree((state) => state.camera);
 
@@ -106,7 +108,11 @@ export function Scene({
     };
   }, [engine, scene, gl, camera]);
 
-  useFrame((_state, delta, xrFrame) => {
+  useFrame((state, delta, xrFrame) => {
+    // The head, before the frame that uses it. Dropping a device onto the desk
+    // turns it to face the player, and «the player» is this.
+    state.camera.getWorldPosition(headPosition);
+    engine.setViewer(headPosition.x, headPosition.y, headPosition.z);
     engine.update(xrFrame as XRFrame | undefined, gl.xr.getReferenceSpace(), delta);
   });
 

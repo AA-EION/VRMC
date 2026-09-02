@@ -25,6 +25,7 @@ export interface OverlayProps {
   onAddDevice: (model: string) => void;
   onRemoveDevice: (deviceId: number) => void;
   onPinDevice: (deviceId: number, pinned: boolean) => void;
+  onDropDevice: (deviceId: number) => void;
   layouts: LayoutState;
   onSaveLayout: (name: string) => void;
   onApplyLayout: (name: string) => void;
@@ -92,6 +93,7 @@ export function Overlay(props: OverlayProps): React.ReactElement {
     onAddDevice,
     onRemoveDevice,
     onPinDevice,
+    onDropDevice,
     layouts,
     onSaveLayout,
     onApplyLayout,
@@ -298,6 +300,18 @@ export function Overlay(props: OverlayProps): React.ReactElement {
                       ? device.detail
                       : 'opening ports…'}
                 </span>
+                <button
+                  type="button"
+                  onClick={() => onDropDevice(device.deviceId)}
+                  disabled={!sessionActive}
+                  title={
+                    sessionActive
+                      ? 'Rest it on whatever is really underneath it.'
+                      : 'Only in the headset — it needs to see your room.'
+                  }
+                >
+                  {device.anchored ? 'On a surface' : 'To surface'}
+                </button>
                 <button
                   type="button"
                   aria-pressed={device.pinned}

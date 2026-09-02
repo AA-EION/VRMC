@@ -40,6 +40,7 @@ import {
 } from './devices/InstrumentSurface.js';
 import { HandTracker } from './xr/handTracking.js';
 import { HandSkeleton } from './xr/HandSkeleton.js';
+import { SurfaceAnchor } from './xr/SurfaceAnchor.js';
 import { KeypadController } from './ui/KeypadController.js';
 
 /** Everything needed to render and drive one instrument. */
@@ -61,6 +62,16 @@ export interface Instrument {
  */
 const KEYS_POSE: SurfacePose = { centre: [0, 0.76, -0.36], tiltDeg: 74 };
 const PADS_POSE: SurfacePose = { centre: [0, 0.92, -0.58], tiltDeg: 42 };
+
+/**
+ * How long a drop waits for the runtime to find something, in ms.
+ *
+ * A question about the interface rather than about tracking: somebody who has
+ * pressed a button needs an answer within a couple of seconds, and a plane can
+ * take longer than that to appear. Timing out with a sentence beats waiting
+ * silently for one.
+ */
+const DROP_TIMEOUT_MS = 2500;
 
 /** CC numbers the four knobs send, matching a Launchkey's default map. */
 const KNOB_CCS = [21, 22, 23, 24] as const;
@@ -112,6 +123,24 @@ export class Engine {
    * and find.
    */
   readonly grabs = new Grabbable();
+
+  /** Putting devices down on real surfaces, and keeping them there. */
+  readonly surfaces = new SurfaceAnchor();
+
+  /**
+   * Told when a device could not be put down, and why.
+   *
+   * A drop that finds nothing has to say so. Silence reads as a broken button,
+   * and the honest answer — «this headset has not found a surface under it
+   * yet» — is one somebody can act on by looking at their desk.
+   */
+  onAnchorFailed: ((deviceId: number, reason: string) => void) | null = null;
+
+  /** Viewer position this frame, for turning a dropped device to face them. */
+  private readonly viewer: [number, number, number] = [0, 1.6, 0];
+
+  /** When the oldest outstanding drop request was made, on the frame clock. */
+  private dropRequestedAt = 0;
   readonly instruments: Instrument[];
   /**
    * World positions of the knobs, kept so the renderer draws them exactly where
@@ -267,6 +296,17 @@ export class Engine {
 
     this.link.onDevices = (roster) => this.applyRoster(roster);
     this.link.onLayouts = (state) => this.receiveLayouts(state);
+
+    this.surfaces.onPlaced = ({ deviceId, pose, anchored }) => {
+      const device = this.launchpads.find((d) => d.deviceId === deviceId);
+      if (device === undefined) return;
+      device.setPose(pose);
+      device.anchored = anchored;
+      this.syncGrabTarget(device);
+      this.link.sendDevicePose(device.placement());
+      this.onGrabChanged?.();
+    };
+    this.surfaces.onFailed = (deviceId, reason) => this.onAnchorFailed?.(deviceId, reason);
   }
 
   /**
@@ -311,12 +351,43 @@ export class Engine {
     return true;
   }
 
+  /**
+   * Put a device down on whatever is really under it.
+   *
+   * Answers on a later frame, once the runtime has a surface to offer — or
+   * gives up after `DROP_TIMEOUT_MS` and says so, rather than leaving a button
+   * that appears to have done nothing.
+   */
+  dropToSurface(deviceId: number): boolean {
+    const device = this.launchpads.find((d) => d.deviceId === deviceId);
+    if (device === undefined) return false;
+    this.surfaces.request(deviceId, device.pose);
+    if (this.dropRequestedAt === 0) this.dropRequestedAt = performance.now();
+    return true;
+  }
+
+  /**
+   * Where the player's head is, for turning a dropped device to face them.
+   *
+   * Written by the view each frame rather than read from a camera here: the
+   * engine deliberately knows nothing about three, and this is three numbers.
+   */
+  setViewer(x: number, y: number, z: number): void {
+    this.viewer[0] = x;
+    this.viewer[1] = y;
+    this.viewer[2] = z;
+  }
+
   /** Remove a device, releasing what it held and closing its ports. */
   removeDevice(deviceId: number): boolean {
     const at = this.launchpads.findIndex((d) => d.deviceId === deviceId);
     if (at < 0) return false;
     const [instance] = this.launchpads.splice(at, 1);
     this.grabs.remove(deviceId, this.grabSink);
+    // Drop the anchor too. A runtime keeps a small, fixed number of them, and
+    // one held for a device that no longer exists is one the next device
+    // cannot have.
+    this.surfaces.forget(deviceId);
     // Release before the ports close, or the notes are stranded in the DAW.
     instance?.releaseAll();
     this.link.requestDeviceRemove(deviceId);
@@ -588,6 +659,16 @@ export class Engine {
       // After the detectors, so a frame that both plays a pad and moves a
       // device resolves the note against the pose it was struck at.
       this.grabs.update(this.fingers, this.grabSink);
+
+      // Surfaces last: a drop resolved this frame should use the pose the grab
+      // just settled on, not the one it started from.
+      this.surfaces.update(xrFrame, space, this.viewer, (id) => this.grabs.isHeld(id));
+      if (this.dropRequestedAt > 0 && performance.now() - this.dropRequestedAt > DROP_TIMEOUT_MS) {
+        this.dropRequestedAt = 0;
+        this.surfaces.timeOut(
+          'Could not find a surface underneath. Look around the desk for a moment so the headset can map it, then try again.',
+        );
+      }
       // Only while it is on screen. A detector running against a panel nobody
       // can see would still consume every fingertip and could still fire.
       if (this.keypadVisible) this.keypad?.update(this.fingers, dt);
@@ -601,6 +682,7 @@ export class Engine {
   /** Called when the session starts. */
   onSessionStart(session: XRSession): void {
     this.running = true;
+    this.surfaces.reset();
     this.tracker.syncInputSources(session);
     this.skeleton.syncInputSources(session);
     this.drawHands = true;

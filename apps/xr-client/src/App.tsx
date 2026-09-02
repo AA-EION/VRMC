@@ -130,10 +130,15 @@ export function App(): React.ReactElement {
     // which devices exist, so it publishes a fresh snapshot too.
     engine.onGrabChanged = () => setDevices([...engine.launchpads]);
     engine.onLayoutsChanged = () => setLayouts(engine.layouts);
+    // A drop that finds nothing has to say so: silence reads as a broken
+    // button, and «look around your desk for a moment» is something a person
+    // can actually act on.
+    engine.onAnchorFailed = (_deviceId, reason) => setError(reason);
     return () => {
       engine.onDevicesChanged = null;
       engine.onGrabChanged = null;
       engine.onLayoutsChanged = null;
+      engine.onAnchorFailed = null;
     };
   }, [engine]);
 
@@ -219,6 +224,19 @@ export function App(): React.ReactElement {
       setPassthrough(blending || isBlending(session));
       setError('');
       engine.onSessionStart(session);
+
+      /*
+       * The viewer space a hit test is cast from.
+       *
+       * Asked for once, here, because it is the session's to give and the
+       * engine deliberately knows nothing about XR plumbing. A runtime that
+       * refuses it leaves plane detection as the only route to a surface,
+       * which is a degradation rather than a failure.
+       */
+      void session
+        .requestReferenceSpace('viewer')
+        .then((viewerSpace) => engine.surfaces.ensureHitTest(session, viewerSpace))
+        .catch(() => {});
 
       const onInputSourcesChange = (): void => {
         engine.tracker.syncInputSources(session);
@@ -445,6 +463,7 @@ export function App(): React.ReactElement {
         onAddDevice={(model) => engine.addDevice(model)}
         onRemoveDevice={(id) => engine.removeDevice(id)}
         onPinDevice={(id, pinned) => engine.pinDevice(id, pinned)}
+        onDropDevice={(id) => engine.dropToSurface(id)}
         layouts={layouts}
         onSaveLayout={(name) => engine.saveLayout(name)}
         onApplyLayout={(name) => engine.applyLayout(name)}

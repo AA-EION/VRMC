@@ -498,9 +498,22 @@ button.on:hover:not(:disabled) {
   border-color: var(--ink-2);
 }
 
-/* The roster gained a pin control, so its rows are four columns now. */
+/* The roster gained a surface control and a pin, so its rows are five columns.
+   On a narrow viewport they wrap rather than squeezing the port names, which
+   are what tells you the DAW can actually see the device. */
 .devices li {
-  grid-template-columns: 1fr auto auto auto;
+  grid-template-columns: 1fr auto auto auto auto;
+}
+
+@media (max-width: 34rem) {
+  .devices li {
+    grid-template-columns: 1fr auto;
+  }
+
+  .devices li > span:nth-child(2) {
+    grid-column: 1 / -1;
+    max-width: none;
+  }
 }
 
 /* ---- A switch, set as a line of text -------------------------------------
