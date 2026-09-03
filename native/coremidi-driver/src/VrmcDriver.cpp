@@ -91,10 +91,19 @@ HRESULT QueryInterface(void *instance, REFIID iid, LPVOID *ppv) {
   CFUUIDRef requested = CFUUIDCreateFromUUIDBytes(NULL, iid);
   VrmcDriver *driver = reinterpret_cast<VrmcDriver *>(instance);
 
-  // The version 2 interface only. A version 1 server would be macOS 10.0-era;
-  // refusing it is honest, where claiming it and then making version 2 calls
-  // would not be.
-  const bool wanted = CFEqual(requested, kMIDIDriverInterface2ID) ||
+  /*
+   * Version 2 or version 3, not version 1.
+   *
+   * Version 3 (macOS 12 and later) is the one MIDIServer asks for first on any
+   * machine this targets: it carries MIDI through MIDIEventList rather than the
+   * deprecated MIDIPacketList. Accepting both costs one extra entry point and
+   * means the driver still works if the server falls back.
+   *
+   * Version 1 is refused. It would be a macOS 10.0-era server, and claiming it
+   * while making version 2 calls in Start() would be a lie with a crash in it.
+   */
+  const bool wanted = CFEqual(requested, kMIDIDriverInterface3ID) ||
+                      CFEqual(requested, kMIDIDriverInterface2ID) ||
                       CFEqual(requested, IUnknownUUID);
   CFRelease(requested);
 
@@ -200,12 +209,32 @@ OSStatus Send(MIDIDriverRef, const MIDIPacketList *, void *, void *) {
   return noErr;
 }
 
+/* The version 3 form of Send, taking a MIDIEventList. Discarded likewise. */
+OSStatus SendPackets(MIDIDriverRef, const MIDIEventList *, void *, void *) {
+  return noErr;
+}
+
 OSStatus EnableSource(MIDIDriverRef, MIDIEndpointRef, Boolean) { return noErr; }
 OSStatus Flush(MIDIDriverRef, MIDIEndpointRef, void *, void *) { return noErr; }
 OSStatus Monitor(MIDIDriverRef, MIDIEndpointRef, const MIDIPacketList *) {
   return noErr;
 }
+OSStatus MonitorEvents(MIDIDriverRef, MIDIEndpointRef, const MIDIEventList *) {
+  return noErr;
+}
 
+/*
+ * Every field, positionally, with no gaps.
+ *
+ * Deliberately not a designated or partial initializer, and built with
+ * -Wmissing-field-initializers under -Werror: Apple has grown this table
+ * before — SendPackets and MonitorEvents arrived with the version 3 interface
+ * in macOS 12, and building against a 10.11 header left both slots null. A
+ * null the server calls is a crash inside MIDIServer, which takes MIDI down
+ * for every application on the machine. Failing the build is the better half
+ * of that trade, so if this stops compiling against a future SDK the fix is to
+ * implement the new entry point, not to silence the warning.
+ */
 MIDIDriverInterface kInterface = {
     NULL,  // _reserved, from IUNKNOWN_C_GUTS
     QueryInterface,
@@ -219,6 +248,8 @@ MIDIDriverInterface kInterface = {
     EnableSource,
     Flush,
     Monitor,
+    SendPackets,
+    MonitorEvents,
 };
 
 }  // namespace

@@ -34,6 +34,10 @@ exists and we have spent days rather than weeks establishing that.
 native/coremidi-driver/build.sh
 ```
 
+It builds as a **version 3** driver (`kMIDIDriverInterface3ID`, macOS 12 and
+later), which is the interface MIDIServer asks for first on 26, while still
+answering for version 2 if the server falls back.
+
 Produces `native/coremidi-driver/build/VRMC.plugin`, universal, ad-hoc signed.
 CI builds it on every push, so a compile error shows up without a Mac.
 
