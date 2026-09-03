@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
-import { describe, it, expect, afterAll, afterEach, vi } from 'vitest';
-import { PeerConnection, cleanup as rtcCleanup } from 'node-datachannel';
-import { DeviceModel, LAUNCHPAD_X } from '@vrmc/devices';
+import { describe, it, expect, afterAll, afterEach, vi } from "vitest";
+import { PeerConnection } from "node-datachannel";
+import { DeviceModel, LAUNCHPAD_X } from "@vrmc/devices";
 import {
   EventType,
   PacketKind,
@@ -10,14 +10,18 @@ import {
   generatePairingCode,
   readLedUpdate,
   writeDeviceAdd,
-} from '@vrmc/protocol';
-import { WebServer } from '@vrmc/web';
-import { Router } from '../src/core/Router.js';
-import { DeviceManager } from '../src/devices/DeviceManager.js';
-import { NullSink, NullSource, SimpleVirtualPort } from '../src/midi/MidiSink.js';
-import { Broadcaster } from '../src/net/Broadcaster.js';
-import { RtcTransport } from '../src/net/RtcTransport.js';
-import { SignalClient } from '../src/net/SignalClient.js';
+} from "@vrmc/protocol";
+import { WebServer } from "@vrmc/web";
+import { Router } from "../src/core/Router.js";
+import { DeviceManager } from "../src/devices/DeviceManager.js";
+import {
+  NullSink,
+  NullSource,
+  SimpleVirtualPort,
+} from "../src/midi/MidiSink.js";
+import { Broadcaster } from "../src/net/Broadcaster.js";
+import { RtcTransport } from "../src/net/RtcTransport.js";
+import { SignalClient } from "../src/net/SignalClient.js";
 
 /**
  * The whole zero-configuration path, end to end.
@@ -47,7 +51,11 @@ class FakePorts {
     this.sinks.set(name, sink);
     this.sources.set(name, source);
     this.opened.push(name);
-    return { port: new SimpleVirtualPort(name, sink, source), ok: true, notes: [] };
+    return {
+      port: new SimpleVirtualPort(name, sink, source),
+      ok: true,
+      notes: [],
+    };
   };
 
   sent(name: string): number[][] {
@@ -77,12 +85,14 @@ async function pairedBridge(): Promise<{
   bus: Broadcaster;
   rtc: RtcTransport;
 }> {
-  const code = generatePairingCode(() => new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]));
+  const code = generatePairingCode(
+    () => new Uint8Array([1, 2, 3, 4, 5, 6, 7, 8]),
+  );
 
   const web = new WebServer({
     port: nextPort++,
-    host: '127.0.0.1',
-    staticDir: new URL('.', import.meta.url).pathname,
+    host: "127.0.0.1",
+    staticDir: new URL(".", import.meta.url).pathname,
   });
   const bound = await web.listen();
   const serviceUrl = `http://127.0.0.1:${bound}`;
@@ -91,14 +101,14 @@ async function pairedBridge(): Promise<{
   // The bridge has to be registered before it may signal — the endpoint is
   // keyed on a claimed code, not on any string a caller invents.
   const registered = await fetch(`${serviceUrl}/api/pair`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    method: "POST",
+    headers: { "content-type": "application/json" },
     body: JSON.stringify({
       code,
-      addresses: ['192.168.1.50'],
+      addresses: ["192.168.1.50"],
       port: 7401,
-      label: 'Test Studio Mac',
-      version: 'test',
+      label: "Test Studio Mac",
+      version: "test",
     }),
   });
   expect(registered.status).toBe(200);
@@ -114,7 +124,7 @@ async function pairedBridge(): Promise<{
     {
       noMidi: false,
       loopbackPattern: /never/,
-      portNameTemplate: '{device} {port}',
+      portNameTemplate: "{device} {port}",
       openPort: ports.open,
     },
   );
@@ -123,7 +133,10 @@ async function pairedBridge(): Promise<{
   const broadcaster = new Broadcaster(router.stats);
   bus = broadcaster;
 
-  const rtc = new RtcTransport(router, { onLog: () => {}, onPeerChange: () => {} });
+  const rtc = new RtcTransport(router, {
+    onLog: () => {},
+    onPeerChange: () => {},
+  });
   broadcaster.add(rtc);
   expect(await rtc.load()).toBe(true);
 
@@ -168,7 +181,10 @@ interface FakeHeadset {
  * So the retry lives here, in the stand-in headset, rather than being worked
  * around in code that would carry it forever for no one's benefit.
  */
-async function connectHeadset(serviceUrl: string, code: string): Promise<FakeHeadset> {
+async function connectHeadset(
+  serviceUrl: string,
+  code: string,
+): Promise<FakeHeadset> {
   let lastError: unknown;
   // Bounded by the signalling service's own cap of four handshakes per code.
   for (let attempt = 1; attempt <= 3; attempt++) {
@@ -187,19 +203,22 @@ async function attemptHandshake(
   sessionId: string,
 ): Promise<FakeHeadset> {
   const pc = new PeerConnection(sessionId, { iceServers: [] });
-  const channel = pc.createDataChannel('vrmc', {
+  const channel = pc.createDataChannel("vrmc", {
     ordered: false,
     maxRetransmits: 0,
   });
   const received: Uint8Array[] = [];
   const inbound = new PacketReader();
   channel.onMessage((msg) => {
-    if (typeof msg === 'string') return;
+    if (typeof msg === "string") return;
     const bytes = new Uint8Array(msg);
     received.push(bytes);
     // Answer the bridge's latency probe, as the real client does. Without it
     // the desktop audit could never prove the return path works.
-    if (inbound.read(bytes, null) === 0 && inbound.header.kind === PacketKind.PING) {
+    if (
+      inbound.read(bytes, null) === 0 &&
+      inbound.header.kind === PacketKind.PING
+    ) {
       const w = new PacketWriter();
       w.begin(PacketKind.PONG);
       channel.sendMessageBinary(Buffer.from(w.finish(inbound.header.tClient)));
@@ -224,7 +243,7 @@ async function attemptHandshake(
    */
   const offer = await vi.waitFor(
     () => {
-      expect(pc.gatheringState()).toBe('complete');
+      expect(pc.gatheringState()).toBe("complete");
       const local = pc.localDescription();
       expect(local).not.toBeNull();
       return local!.sdp;
@@ -237,24 +256,24 @@ async function attemptHandshake(
   expect(offer).toMatch(/a=fingerprint:sha-256/);
 
   const posted = await fetch(`${serviceUrl}/api/signal/${code}`, {
-    method: 'POST',
-    headers: { 'content-type': 'application/json' },
+    method: "POST",
+    headers: { "content-type": "application/json" },
     body: JSON.stringify({ sessionId, offer }),
   });
   expect(posted.status).toBe(202);
 
-  let answer = '';
+  let answer = "";
   const deadline = Date.now() + 20_000;
-  while (answer === '' && Date.now() < deadline) {
+  while (answer === "" && Date.now() < deadline) {
     const res = await fetch(`${serviceUrl}/api/signal/${code}/${sessionId}`);
     if (res.status === 204) continue;
     expect(res.status).toBe(200);
     answer = ((await res.json()) as { answer: string }).answer;
   }
-  expect(answer).not.toBe('');
+  expect(answer).not.toBe("");
 
   try {
-    pc.setRemoteDescription(answer, 'answer');
+    pc.setRemoteDescription(answer, "answer");
     await opened;
   } catch (err) {
     pc.close();
@@ -280,15 +299,19 @@ function frame(kind: number, fill: (w: PacketWriter) => void): Uint8Array {
   return w.finish(performance.now()).slice();
 }
 
-describe('connecting with nothing but a pairing code', () => {
-  it('carries a note into the DAW and LED changes back out', async () => {
+describe("connecting with nothing but a pairing code", () => {
+  it("carries a note into the DAW and LED changes back out", async () => {
     const { code, serviceUrl, ports, devices, bus } = await pairedBridge();
     const headset = await connectHeadset(serviceUrl, code);
 
     // 1. The headset asks for a Launchpad, and real MIDI ports appear.
-    headset.send(frame(PacketKind.DEVICE_ADD, (w) => writeDeviceAdd(w, 30, DeviceModel.LAUNCHPAD_X)));
+    headset.send(
+      frame(PacketKind.DEVICE_ADD, (w) =>
+        writeDeviceAdd(w, 30, DeviceModel.LAUNCHPAD_X),
+      ),
+    );
     await vi.waitFor(() => expect(devices.count).toBe(1), { timeout: 5000 });
-    expect(ports.opened).toContain('Launchpad X LPX (DAW)');
+    expect(ports.opened).toContain("Launchpad X LPX (DAW)");
 
     // 2. A pad is struck in the headset, and the DAW sees the note the real
     //    hardware would have sent: bottom-left pad is XY index 11.
@@ -298,12 +321,19 @@ describe('connecting with nothing but a pairing code', () => {
       }),
     );
     await vi.waitFor(
-      () => expect(ports.sent('Launchpad X LPX (DAW)')).toContainEqual([0x90, 11, 100]),
+      () =>
+        expect(ports.sent("Launchpad X LPX (DAW)")).toContainEqual([
+          0x90, 11, 100,
+        ]),
       { timeout: 5000 },
     );
 
     // 3. The DAW lights that pad, and the change reaches the headset.
-    devices.injectHostMessage(30, LAUNCHPAD_X.dawPortIndex, Uint8Array.of(0x90, 11, 5));
+    devices.injectHostMessage(
+      30,
+      LAUNCHPAD_X.dawPortIndex,
+      Uint8Array.of(0x90, 11, 5),
+    );
 
     const reader = new PacketReader();
     /** Every LED write the headset has been told about so far. */
@@ -323,11 +353,15 @@ describe('connecting with nothing but a pairing code', () => {
     expect(rtt).toBeGreaterThanOrEqual(0);
   }, 40_000);
 
-  it('releases sounding notes when the headset vanishes', async () => {
+  it("releases sounding notes when the headset vanishes", async () => {
     const { code, serviceUrl, ports, devices } = await pairedBridge();
     const headset = await connectHeadset(serviceUrl, code);
 
-    headset.send(frame(PacketKind.DEVICE_ADD, (w) => writeDeviceAdd(w, 31, DeviceModel.LAUNCHPAD_X)));
+    headset.send(
+      frame(PacketKind.DEVICE_ADD, (w) =>
+        writeDeviceAdd(w, 31, DeviceModel.LAUNCHPAD_X),
+      ),
+    );
     await vi.waitFor(() => expect(devices.count).toBe(1), { timeout: 5000 });
 
     headset.send(
@@ -335,10 +369,13 @@ describe('connecting with nothing but a pairing code', () => {
         w.pushEvent(EventType.NOTE_ON, 0, 12, 90, 0, 31, 0, 0);
       }),
     );
-    const out = 'Launchpad X LPX (DAW)';
-    await vi.waitFor(() => expect(ports.sent(out)).toContainEqual([0x90, 12, 90]), {
-      timeout: 5000,
-    });
+    const out = "Launchpad X LPX (DAW)";
+    await vi.waitFor(
+      () => expect(ports.sent(out)).toContainEqual([0x90, 12, 90]),
+      {
+        timeout: 5000,
+      },
+    );
 
     // A headset that loses power sends no Note Off. If the bridge did not
     // release on disconnect, that voice would sound until the DAW restarted.
@@ -348,26 +385,63 @@ describe('connecting with nothing but a pairing code', () => {
     // workspace that has taken longer than five seconds — a scheduling
     // artefact, not a slow release, so the cure is patience rather than a
     // weaker assertion.
-    await vi.waitFor(() => expect(ports.sent(out)).toContainEqual([0x90, 12, 0]), {
-      timeout: 20_000,
-    });
+    await vi.waitFor(
+      () => expect(ports.sent(out)).toContainEqual([0x90, 12, 0]),
+      {
+        timeout: 20_000,
+      },
+    );
   }, 40_000);
 
-  it('refuses to broker a handshake for a code no bridge has claimed', async () => {
+  it("refuses to broker a handshake for a code no bridge has claimed", async () => {
     const { serviceUrl } = await pairedBridge();
     // Otherwise the signalling endpoint would be an open message queue keyed
     // by any string a caller cared to invent.
     const res = await fetch(`${serviceUrl}/api/signal/WXYZ23`, {
-      method: 'POST',
-      headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ sessionId: 'x', offer: 'v=0' }),
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ sessionId: "x", offer: "v=0" }),
     });
     expect(res.status).toBe(404);
   }, 20_000);
 });
 
-// Tears down libdatachannel's threads once, at the end. Doing it between tests
-// would pull the library out from under the next one's peer connections.
-afterAll(() => {
-  rtcCleanup();
-});
+/*
+ * Tears down libdatachannel's threads once, at the end. Doing it between tests
+ * would pull the library out from under the next one's peer connections.
+ *
+ * The wait afterwards is not padding. `cleanup()` is declared `void` and
+ * returns before the library's threads have actually finished, so a runtime
+ * that exits immediately after it can be torn down mid-join — which surfaces
+ * as `The futex facility returned an unexpected error code` and a tinypool
+ * "Worker exited unexpectedly", with every test in the file already passed.
+ * That failed CI once on a diff that touched none of this, and the message
+ * names tinypool rather than the addon, so it costs a while to place.
+ *
+ * A hundred milliseconds is enough for the join and is paid once per run. The
+ * other half of the mitigation is in vitest.config.ts, which runs this package
+ * in forked processes so teardown is a process exit rather than a worker
+ * thread ending.
+ */
+/*
+ * No global teardown, deliberately — and this file used to call
+ * `cleanup()` here.
+ *
+ * That call is what crashed the run. It is libdatachannel's process-wide
+ * teardown, and it returns before its threads have actually finished, so the
+ * process could exit mid-join: `The futex facility returned an unexpected
+ * error code`, then tinypool reporting "Worker exited unexpectedly" — with
+ * every test in this file already passed and the exit status still 1. The
+ * message names tinypool rather than the addon, and lands on whichever file
+ * happened to be finishing, so it reads as an unrelated infrastructure fault.
+ * It failed CI once on a diff that touched none of this.
+ *
+ * Measured rather than guessed, twenty runs each on one machine: with the call,
+ * 1/20 failed; without it, 0/20, and no run so much as mentioned the crash.
+ *
+ * Nothing leaks by omitting it. `RtcTransport.close()` already reaches the same
+ * conclusion for the same reason and says so — the process exits right after,
+ * which is when the library's threads go away regardless. vitest.config.ts is
+ * the other half: forked processes mean teardown *is* a process exit.
+ */
+afterAll(() => {});
