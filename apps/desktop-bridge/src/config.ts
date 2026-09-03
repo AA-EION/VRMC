@@ -13,6 +13,14 @@ export interface BridgeConfig {
   listPorts: boolean;
   /** Verify the native addons load, print the result, and exit. */
   check: boolean;
+  /**
+   * Install or remove the CoreMIDI driver, then exit.
+   *
+   * `user` installs into ~/Library/Audio/MIDI Drivers and asks for nothing;
+   * `system` installs into /Library and costs one administrator password. See
+   * src/midi/driverInstall.ts for why that cannot be Touch ID.
+   */
+  driverAction: 'none' | 'install-user' | 'install-system' | 'uninstall';
   /** Seconds between stats lines. 0 disables them. */
   statsInterval: number;
   tlsCert?: string;
@@ -84,6 +92,7 @@ export const DEFAULT_CONFIG: BridgeConfig = {
   noMidi: false,
   listPorts: false,
   check: false,
+  driverAction: 'none',
   statsInterval: 10,
   loopbackPattern: WINDOWS_LOOPBACK_PATTERN,
   portNameTemplate: '{device} {port}',
@@ -135,6 +144,14 @@ Usage: vrmc-bridge [options]
   --stats <seconds>    Stats interval, 0 to disable (default: 10)
   --list-ports         List MIDI outputs and exit
   --check              Verify the native libraries load, then exit
+  --install-driver     Install the CoreMIDI driver for this user and exit, so
+                       an emulated Launchpad appears as one device with its
+                       ports rather than as separate devices. No password.
+  --install-driver-system
+                       The same, for every user on this Mac. Asks once for an
+                       administrator password (macOS gives third-party apps no
+                       way to offer Touch ID here).
+  --uninstall-driver   Remove the driver installed for this user and exit
   --help               Show this message
 
 A headset running the hosted client connects over a WebRTC data channel: read
@@ -207,6 +224,15 @@ export function parseArgs(argv: readonly string[]): BridgeConfig | 'help' {
         break;
       case '--check':
         config.check = true;
+        break;
+      case '--install-driver':
+        config.driverAction = 'install-user';
+        break;
+      case '--install-driver-system':
+        config.driverAction = 'install-system';
+        break;
+      case '--uninstall-driver':
+        config.driverAction = 'uninstall';
         break;
       case '--tls-cert':
         config.tlsCert = requireValue(arg, argv[++i]);

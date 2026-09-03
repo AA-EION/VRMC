@@ -53,6 +53,37 @@ const CODE_EXTENSIONS = ['.node', '.dylib', '.so'];
 const MACOS_DIR = 'Contents/MacOS/';
 
 /**
+ * Directory suffixes that make a directory a bundle rather than a folder.
+ *
+ * A nested bundle is signed *as a bundle* — one `codesign` call on the
+ * directory — and never file by file. Signing the Mach-O inside one is the
+ * same trap as signing the app's own CFBundleExecutable: `codesign` redirects
+ * to the enclosing bundle, so it silently signs the plugin instead of the file
+ * and leaves the plugin's own resources unsealed.
+ */
+const NESTED_BUNDLE_EXTENSIONS = ['.plugin', '.framework', '.bundle', '.app'];
+
+/**
+ * The nested bundle a path lives inside, or null if it is not in one.
+ *
+ * The *outermost* one wins. A framework inside a plugin is sealed by the
+ * plugin's signature, so the plugin is the thing to sign; descending would
+ * sign the inner one after the outer and invalidate the outer.
+ */
+export function nestedBundleOf(relativePath) {
+  const parts = relativePath.split('/');
+  // Stop before the last element: that is the file itself, and a *file* named
+  // `x.app` is not a bundle.
+  for (let i = 0; i < parts.length - 1; i++) {
+    const lower = parts[i].toLowerCase();
+    if (NESTED_BUNDLE_EXTENSIONS.some((ext) => lower.endsWith(ext))) {
+      return parts.slice(0, i + 1).join('/');
+    }
+  }
+  return null;
+}
+
+/**
  * Is this path something `codesign` has to sign in its own right?
  *
  * Nested code is anything loadable: the addons wherever they were staged, any
@@ -106,8 +137,25 @@ export function isNestedCode(relativePath, mainExecutable = BUNDLE_EXECUTABLE) {
  * @returns relative paths to sign, then `''` standing for the bundle root
  */
 export function signingPlan(entries, mainExecutable = BUNDLE_EXECUTABLE) {
-  const nested = entries
-    .filter((entry) => isNestedCode(entry, mainExecutable))
+  /*
+   * Collapse anything inside a nested bundle onto the bundle itself.
+   *
+   * The walk that produces `entries` lists files, never directories, so a
+   * staged `VRMC.plugin` arrives as its contents and nothing else — and none of
+   * those contents matches `isNestedCode`: the driver's Mach-O has no
+   * extension and is in the *plugin's* Contents/MacOS, not the app's. Left
+   * alone the plugin would be signed by nothing, and an app bundle containing
+   * unsigned nested code is the "damaged and can't be opened" dialog this file
+   * exists to prevent.
+   */
+  const targets = new Set();
+  for (const entry of entries) {
+    const bundle = nestedBundleOf(entry);
+    if (bundle !== null) targets.add(bundle);
+    else if (isNestedCode(entry, mainExecutable)) targets.add(entry);
+  }
+
+  const nested = [...targets]
     .sort((a, b) => {
       const byDepth = depthOf(b) - depthOf(a);
       // Depth first, then name — so the plan is stable and a diff of it is

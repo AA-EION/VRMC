@@ -3,6 +3,7 @@ import { describe, it, expect } from 'vitest';
 // @ts-expect-error -- plain JS build tooling, deliberately untyped.
 import {
   isNestedCode,
+  nestedBundleOf,
   signBundle,
   signingPlan,
   unsignableEntries,
@@ -48,11 +49,17 @@ const BUNDLE = [
   'Contents/Resources/node_modules/node-addon-api/common.gypi',
   'Contents/Resources/node_modules/node-datachannel/package.json',
   'Contents/Resources/node_modules/detect-libc/LICENSE',
+  // The CoreMIDI driver, staged so the app can install it. A bundle inside a
+  // bundle, and the first thing here that is not a lone Mach-O file.
+  'Contents/Resources/VRMC.plugin/Contents/Info.plist',
+  'Contents/Resources/VRMC.plugin/Contents/MacOS/VRMC',
+  'Contents/Resources/VRMC.plugin/Contents/_CodeSignature/CodeResources',
 ];
 
 /** Everything in BUNDLE that genuinely needs its own signature. */
 const SIGNABLE = [
   'Contents/MacOS/vrmc-tray',
+  'Contents/Resources/VRMC.plugin',
   'Contents/Resources/prebuilds/midi-darwin-arm64/node-napi-v7.node',
   'Contents/Resources/node_modules/@julusian/midi/prebuilds/midi-darwin-arm64/node-napi-v7.node',
   'Contents/Resources/node_modules/@node-datachannel/darwin-arm64/node_datachannel.node',
@@ -294,5 +301,61 @@ describe('the codesign invocation', () => {
       '--verbose=2',
       '/tmp/app.app',
     ]);
+  });
+});
+
+
+/**
+ * A bundle staged inside the bundle.
+ *
+ * The driver ships as `VRMC.plugin` in `Contents/Resources` so the app can
+ * install it without downloading anything. That makes it the first nested
+ * *bundle* here, and nested bundles do not behave like the loose `.node` files
+ * around them: none of a plugin's contents matches `isNestedCode` — the driver
+ * binary has no extension, and it is in the plugin's `Contents/MacOS`, not the
+ * app's — so before this rule existed the plugin would have been signed by
+ * nothing at all. An app containing unsigned nested code is the "damaged and
+ * can't be opened" dialog, which is the failure this whole file exists to
+ * prevent and which has shipped twice.
+ */
+describe('a bundle nested in the bundle', () => {
+  it('signs the plugin once, as a bundle', () => {
+    const plan = signingPlan(BUNDLE);
+    expect(plan).toContain('Contents/Resources/VRMC.plugin');
+    expect(plan.filter((p: string) => p.includes('VRMC.plugin'))).toHaveLength(1);
+  });
+
+  it('never signs a file inside it', () => {
+    /*
+     * `codesign` on a path inside a bundle redirects to the enclosing bundle —
+     * the same documented shortcut that makes signing the app's own
+     * CFBundleExecutable sign the app. So signing the plugin's Mach-O would
+     * silently sign the plugin a second time, out of order, after its
+     * resources had already been sealed.
+     */
+    for (const entry of signingPlan(BUNDLE)) {
+      expect(entry.startsWith('Contents/Resources/VRMC.plugin/')).toBe(false);
+    }
+  });
+
+  it('signs it before the app that contains it', () => {
+    const plan = signingPlan(BUNDLE);
+    expect(plan.indexOf('Contents/Resources/VRMC.plugin')).toBeLessThan(
+      plan.indexOf(''),
+    );
+  });
+
+  it('takes the outermost bundle when they nest', () => {
+    // A framework inside the plugin is sealed by the plugin's own signature.
+    // Signing the inner one after the outer would invalidate the outer.
+    expect(
+      nestedBundleOf('Contents/Resources/VRMC.plugin/Contents/Frameworks/A.framework/A'),
+    ).toBe('Contents/Resources/VRMC.plugin');
+  });
+
+  it('does not treat a plain file as a bundle because of its name', () => {
+    // `notes.app` as a *file* is a file. Only a directory component counts.
+    expect(nestedBundleOf('Contents/Resources/notes.app')).toBe(null);
+    expect(nestedBundleOf('Contents/Resources/readme.md')).toBe(null);
   });
 });

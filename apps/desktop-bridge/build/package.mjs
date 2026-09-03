@@ -309,6 +309,28 @@ async function copyTrayHelper(target, destDir) {
 }
 
 /**
+ * Copy the CoreMIDI driver, so the app can install it without a download.
+ *
+ * macOS only, and optional: `native/coremidi-driver/build.sh` has to have run,
+ * which it does on the macOS runner and not on a Linux one. A build without it
+ * works in every respect except that `--install-driver` has nothing to
+ * install, and says so.
+ *
+ * Into `Contents/Resources` rather than beside the executable, for the same
+ * reason as the addons — `Contents/MacOS` means executables by the bundle
+ * format's definition. Being a bundle in its own right it is signed as one
+ * (see build/codesign.mjs), and it keeps that signature when it is copied out
+ * to `~/Library/Audio/MIDI Drivers`, which is what MIDIServer checks.
+ */
+async function copyCoreMidiDriver(target, destDir) {
+  if (target.platform !== 'darwin') return false;
+  const built = join(root, 'native/coremidi-driver/build/VRMC.plugin');
+  if (!existsSync(built)) return false;
+  await cp(built, join(destDir, 'VRMC.plugin'), { recursive: true });
+  return true;
+}
+
+/**
  * Copy koffi, the FFI used to reach the Windows teVirtualMIDI driver.
  *
  * Windows-only: on macOS and Linux the MIDI addon talks to CoreMIDI and ALSA
@@ -508,6 +530,7 @@ async function buildTarget(target) {
   const hasRtc = await copyDataChannel(target, libDir);
   // The tray helper is a real executable, so it does belong in Contents/MacOS.
   const hasTray = await copyTrayHelper(target, exeDir);
+  const hasDriver = await copyCoreMidiDriver(target, libDir);
 
   /*
    * Refuse to produce a build that cannot work.

@@ -33,6 +33,11 @@ import {
 } from "./devices/DeviceManager.js";
 import { PresenceGate } from "./core/PresenceGate.js";
 import { listPorts } from "./midi/openPort.js";
+import {
+  bundledDriver,
+  installDriver,
+  uninstallDriver,
+} from "./midi/driverInstall.js";
 import { Broadcaster } from "./net/Broadcaster.js";
 import { RtcTransport } from "./net/RtcTransport.js";
 import { SignalClient } from "./net/SignalClient.js";
@@ -107,6 +112,46 @@ async function main(): Promise<void> {
       );
     }
     process.exit(ok ? 0 : 1);
+  }
+
+  /*
+   * Install or remove the driver, then exit.
+   *
+   * Ahead of anything that opens ports, for the same reason `--check` is: this
+   * is about the machine's MIDI setup rather than about running a session, and
+   * MIDIServer is restarted as part of it.
+   */
+  if (config.driverAction !== "none") {
+    const result =
+      config.driverAction === "uninstall"
+        ? await uninstallDriver({ scope: "user" })
+        : await (async () => {
+            const source = await bundledDriver();
+            if (source === null) {
+              return {
+                ok: false,
+                scope: "user" as const,
+                path: "",
+                notes: [
+                  "this build has no CoreMIDI driver bundled with it",
+                  "builds that do carry it as VRMC.plugin in the app's Resources",
+                ],
+              };
+            }
+            return installDriver({
+              source,
+              scope:
+                config.driverAction === "install-system" ? "system" : "user",
+            });
+          })();
+
+    process.stdout.write(
+      `${result.ok ? "ok" : "failed"}  ${result.path || "CoreMIDI driver"}
+`,
+    );
+    for (const note of result.notes) process.stdout.write(`  ${note}
+`);
+    process.exit(result.ok ? 0 : 1);
   }
 
   if (config.listPorts) {

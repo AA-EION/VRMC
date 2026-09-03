@@ -66,8 +66,39 @@ jobs:
           call "%VSPATH%\VC\Auxiliary\Build\vcvars64.bat" || exit /b 1
           node native/build.mjs || exit /b 1
 
+      # The CoreMIDI driver, so the app can install it without a download.
+      #
+      # Before packaging, because packaging stages whatever is in the driver's
+      # build directory — and after the tray helper for no reason but reading
+      # order. macOS only: a CoreMIDI driver plugin has no meaning elsewhere,
+      # and `copyCoreMidiDriver` skips a build that has none rather than
+      # failing.
+      - name: Build the CoreMIDI driver
+        if: runner.os == 'macOS'
+        run: native/coremidi-driver/build.sh
+
       - run: node build/package.mjs ${{ matrix.target }}
         working-directory: apps/desktop-bridge
+
+      # The driver has to be *in* the app for --install-driver to have anything
+      # to install, and it has to carry its own signature once it is there:
+      # what MIDIServer checks is the plugin, not the app it came out of. A
+      # missing or unsigned one is a silent failure at install time, on the
+      # user's machine, which is the worst place to find it.
+      - name: The driver must be bundled and signed
+        if: runner.os == 'macOS'
+        run: |
+          set -euo pipefail
+          APP=$(find apps/desktop-bridge/build/dist -maxdepth 2 -name 'VRMC Bridge.app' | sed -n 1p)
+          test -n "$APP" || { echo "no .app was assembled"; exit 1; }
+          PLUGIN="$APP/Contents/Resources/VRMC.plugin"
+          test -d "$PLUGIN" || { echo "the driver was not staged into the app"; exit 1; }
+          # Its own signature, checked on its own. The app's signature seals it
+          # in place, but what MIDIServer validates once it has been copied to
+          # ~/Library/Audio/MIDI Drivers is the plugin standing alone.
+          codesign --verify --strict --verbose=2 "$PLUGIN"
+          nm -gU "$PLUGIN/Contents/MacOS/VRMC" | grep -q VrmcDriverFactory
+          echo "bundled and signed: $PLUGIN"
 
       # Fail loudly if the icon did not make it into the build. A bridge with
       # no tray icon still carries MIDI, so nothing else here would notice —
