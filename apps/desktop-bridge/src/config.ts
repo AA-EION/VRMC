@@ -151,7 +151,10 @@ Usage: vrmc-bridge [options]
                        The same, for every user on this Mac. Asks once for an
                        administrator password (macOS gives third-party apps no
                        way to offer Touch ID here).
-  --uninstall-driver   Remove the driver installed for this user and exit
+  --uninstall-driver   Remove the driver and the device it registered, then
+                       exit. Clears both locations, so a copy in /Library
+                       cannot put the device back; asks for a password only
+                       if there is one there.
   --help               Show this message
 
 A headset running the hosted client connects over a WebRTC data channel: read

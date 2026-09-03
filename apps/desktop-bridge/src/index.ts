@@ -124,7 +124,7 @@ async function main(): Promise<void> {
   if (config.driverAction !== "none") {
     const result =
       config.driverAction === "uninstall"
-        ? await uninstallDriver({ scope: "user" })
+        ? await uninstallDriver()
         : await (async () => {
             const source = await bundledDriver();
             if (source === null) {

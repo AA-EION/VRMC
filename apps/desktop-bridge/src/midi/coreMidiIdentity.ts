@@ -109,6 +109,9 @@ interface KoffiLike {
 interface Bound {
   setStringProperty(object: number, property: unknown, value: unknown): number;
   getStringProperty(object: number, property: unknown, out: unknown): number;
+  deviceCount(): number;
+  device(index: number): number;
+  removeDevice(device: number): number;
   sourceCount(): number;
   source(index: number): number;
   destinationCount(): number;
@@ -126,6 +129,7 @@ interface Bound {
     manufacturer: unknown;
     model: unknown;
     displayName: unknown;
+    driverOwner: unknown;
   };
   koffi: KoffiLike;
 }
@@ -186,6 +190,17 @@ function bind(): Bound | null {
         "void *",
         "void **",
       ]) as Bound["getStringProperty"],
+      deviceCount: midi.func(
+        "MIDIGetNumberOfDevices",
+        "ulong",
+        [],
+      ) as Bound["deviceCount"],
+      device: midi.func("MIDIGetDevice", "uint32", [
+        "ulong",
+      ]) as Bound["device"],
+      removeDevice: midi.func("MIDISetupRemoveDevice", "int32", [
+        "uint32",
+      ]) as Bound["removeDevice"],
       sourceCount: midi.func(
         "MIDIGetNumberOfSources",
         "ulong",
@@ -219,6 +234,7 @@ function bind(): Bound | null {
         manufacturer: constant("kMIDIPropertyManufacturer"),
         model: constant("kMIDIPropertyModel"),
         displayName: constant("kMIDIPropertyDisplayName"),
+        driverOwner: constant("kMIDIPropertyDriverOwner"),
       },
       koffi,
     };
@@ -376,5 +392,83 @@ export function readIdentity(name: string): EndpointFacts | null {
   } catch (err) {
     lastError = err instanceof Error ? err.message : String(err);
     return null;
+  }
+}
+
+/**
+ * The CFBundleIdentifier of our CoreMIDI driver.
+ *
+ * `kMIDIPropertyDriverOwner` carries the owning driver's name, and MIDIServer
+ * uses the plugin's bundle identifier for it. It must match Info.plist in
+ * native/coremidi-driver.
+ */
+export const DRIVER_BUNDLE_ID = "studios.eion.vrmc.midi.driver";
+
+/**
+ * Remove devices our driver left behind in the MIDI setup.
+ *
+ * WHY UNINSTALLING THE PLUGIN IS NOT ENOUGH
+ * `MIDISetupAddDevice` writes the device into the *persisted* MIDI setup, not
+ * into a list that lives as long as the driver. Delete the plugin and the
+ * device stays — offline, unowned, and still listed in Audio MIDI Setup and in
+ * every DAW's port menu. Nothing ever collects it, because from CoreMIDI's
+ * point of view it is a device whose driver is merely absent, which is exactly
+ * the state a real interface is in when it is unplugged.
+ *
+ * WHY THIS IS ALLOWED FROM HERE
+ * `MIDISetupAddDevice` is drivers-only — *"Only MIDI drivers may make this
+ * call"* — but its counterpart is not. `MIDISetupRemoveDevice` is documented
+ * as something that *"should only be called from a studio configuration
+ * editor, to remove a device which is offline and which the user has specified
+ * as being permanently missing"*, which is precisely what uninstalling is: the
+ * user has said this device is not coming back. It is the same call Audio MIDI
+ * Setup's own Remove button makes.
+ *
+ * The same paragraph warns drivers off using it for a device that is merely
+ * absent — *"drivers should set the device's kMIDIPropertyOffline to 1 so that
+ * if the device reappears later, none of its properties are lost"*. That is
+ * the running case, and is why the driver marks itself present rather than
+ * adding and removing itself as the bridge comes and goes.
+ *
+ * MATCHED ON THE DRIVER, NOT THE NAME
+ * `kMIDIPropertyDriverOwner` and nothing else. Matching "Launchpad Pro MK3"
+ * would also match a real Launchpad Pro MK3 — and removing a device belonging
+ * to somebody's actual hardware, from the setup where its configuration and
+ * naming live, is a far worse bug than the one being fixed. A device our
+ * driver did not create cannot carry our bundle id.
+ *
+ * @returns how many were removed, or -1 if CoreMIDI could not be reached
+ */
+export function removeDriverDevices(
+  driverId: string = DRIVER_BUNDLE_ID,
+): number {
+  const b = bind();
+  if (b === null) return -1;
+  try {
+    /*
+     * Collected before removing any, then removed.
+     *
+     * `MIDIGetDevice` is an index into a list that this loop is about to
+     * mutate, so removing as we walk would renumber everything after the
+     * current position and skip the device that slid into it.
+     */
+    const ours: number[] = [];
+    const total = b.deviceCount();
+    for (let i = 0; i < total; i++) {
+      const device = b.device(i);
+      if (device === 0) continue;
+      if (readProperty(b, device, b.property.driverOwner) === driverId) {
+        ours.push(device);
+      }
+    }
+
+    let removed = 0;
+    for (const device of ours) {
+      if (b.removeDevice(device) === 0) removed++;
+    }
+    return removed;
+  } catch (err) {
+    lastError = err instanceof Error ? err.message : String(err);
+    return -1;
   }
 }

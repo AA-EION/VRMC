@@ -101,13 +101,36 @@ spctl --assess --type install --verbose "/Library/Audio/MIDI Drivers/VRMC.plugin
 ## Uninstall
 
 ```sh
+"/Applications/VRMC Bridge.app/Contents/MacOS/vrmc-bridge" --uninstall-driver
+```
+
+This is the one to use, because **deleting the plugin is not enough**.
+`MIDISetupAddDevice` writes into the *persisted* MIDI setup, so the device
+survives its driver: it stays listed in Audio MIDI Setup and in every DAW's
+port menu, offline and unowned. Nothing collects it, because from CoreMIDI's
+side that is exactly what an unplugged interface looks like.
+
+`--uninstall-driver` deletes the plugin from **both** locations — a copy left
+in the other one is loaded just the same and puts the device straight back —
+restarts MIDIServer so the driver is no longer resident, and only then calls
+`MIDISetupRemoveDevice`. That order matters: remove the device while the driver
+is still loaded and the next `Start()` recreates it.
+
+The device is matched by `kMIDIPropertyDriverOwner` against this driver's
+bundle identifier, never by name. "Launchpad Pro MK3" would also match a *real*
+Launchpad Pro MK3, and removing that from the setup — where its configuration
+and port naming live — would be a worse bug than the leftover.
+
+By hand, if you have no app to hand:
+
+```sh
+rm -rf ~/"Library/Audio/MIDI Drivers/VRMC.plugin"
 sudo rm -rf "/Library/Audio/MIDI Drivers/VRMC.plugin"
 sudo killall MIDIServer 2>/dev/null || true
 ```
 
-The device may linger in MIDI Studio afterwards as an offline device, because
-MIDIServer persists a driver's devices in the MIDI setup. *MIDI Studio* →
-*Configuration* → *Remove* clears it.
+then remove the leftover device in *Audio MIDI Setup* → *MIDI Studio* → select
+it → **Remove**. That button makes the same `MIDISetupRemoveDevice` call.
 
 ## What it deliberately does not do
 

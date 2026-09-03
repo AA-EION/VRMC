@@ -54,6 +54,7 @@ import { access, cp, mkdir, rm } from "node:fs/promises";
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { promisify } from "node:util";
+import { removeDriverDevices } from "./coreMidiIdentity.js";
 
 const run = promisify(execFile);
 
@@ -304,46 +305,83 @@ export async function installDriver(options: {
   return { ok: true, scope, path: join(dir, DRIVER_BUNDLE), notes };
 }
 
-/** Remove the driver from wherever it was installed. */
+/**
+ * Remove the driver from *both* locations, and then the device it left behind.
+ *
+ * Both, rather than the one scope asked for. A copy left in the other location
+ * is loaded by MIDIServer just the same, and it puts the device straight back
+ * — so an uninstall that cleared only one would report success and change
+ * nothing visible. The system copy is only touched if there is one, so the
+ * common case still costs no password.
+ */
 export async function uninstallDriver(options: {
-  scope?: DriverScope;
   osascript?: (script: string) => Promise<void>;
-}): Promise<InstallResult> {
-  const scope = options.scope ?? "user";
-  const dir = DRIVER_DIRS[scope];
-  const target = join(dir, DRIVER_BUNDLE);
+} = {}): Promise<InstallResult> {
+  const scopes = await driverScopes();
+  const target = join(DRIVER_DIRS.user, DRIVER_BUNDLE);
+  const notes: string[] = [];
 
   try {
-    if (scope === "user") {
-      await rm(target, { recursive: true, force: true });
-    } else {
+    // Always, whether or not it was listed: `rm -rf` on a path that is not
+    // there is a no-op, and it costs nothing to be sure.
+    await rm(join(DRIVER_DIRS.user, DRIVER_BUNDLE), {
+      recursive: true,
+      force: true,
+    });
+    if (scopes.includes("user")) notes.push("removed the copy for this user");
+
+    if (scopes.includes("system")) {
       const exec =
         options.osascript ??
         (async (s: string) => {
           await run("osascript", ["-e", s]);
         });
       await exec(
-        `do shell script "rm -rf ${shellQuoteForAppleScript(target)}"` +
-          ` with administrator privileges`,
+        `do shell script "rm -rf ${shellQuoteForAppleScript(
+          join(DRIVER_DIRS.system, DRIVER_BUNDLE),
+        )}" with administrator privileges`,
       );
+      notes.push("removed the copy installed for every user");
     }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
-    return { ok: false, scope, path: target, notes: [message] };
+    const cancelled = /User cancell?ed|-128/.test(message);
+    return {
+      ok: false,
+      scope: "system",
+      path: target,
+      notes: [cancelled ? "cancelled at the password prompt" : message],
+    };
   }
 
+  /*
+   * Order matters, and getting it wrong makes the uninstall look like it
+   * worked and then undo itself.
+   *
+   * The plugin is deleted first, then MIDIServer is restarted so the driver is
+   * no longer loaded, and only then is the device taken out of the setup.
+   * Removing the device while the driver is still resident just means the next
+   * `Start()` puts it straight back.
+   */
   await reloadMidiServer();
-  return {
-    ok: true,
-    scope,
-    path: target,
-    notes: [
-      "removed",
-      // Worth saying: the device outliving its driver looks like the uninstall
-      // failing, and it is not.
-      "the device may linger in Audio MIDI Setup as offline until it is removed there",
-    ],
-  };
+
+  const removed = removeDriverDevices();
+  if (removed > 0) {
+    notes.push(
+      `removed ${removed} device${removed === 1 ? "" : "s"} from the MIDI setup`,
+    );
+  } else if (removed === 0) {
+    notes.push("no device of ours was left in the MIDI setup");
+  } else {
+    // Only reachable when CoreMIDI could not be reached at all — koffi
+    // missing, or not macOS. Worth saying, because the leftover is visible.
+    notes.push(
+      "could not reach CoreMIDI to clear the device; if a Launchpad Pro MK3" +
+        " is still listed in Audio MIDI Setup, remove it there",
+    );
+  }
+
+  return { ok: true, scope: "user", path: target, notes };
 }
 
 /** Where the driver is installed, if anywhere. */

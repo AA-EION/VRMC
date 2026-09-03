@@ -1,12 +1,14 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import { describe, it, expect } from "vitest";
 import { homedir } from "node:os";
+import { readFile } from "node:fs/promises";
 import {
   DRIVER_DIRS,
   driverSourcePaths,
   installScript,
   shellQuoteForAppleScript,
 } from "../src/midi/driverInstall.js";
+import { DRIVER_BUNDLE_ID } from "../src/midi/coreMidiIdentity.js";
 
 /**
  * Installing the CoreMIDI driver.
@@ -221,5 +223,47 @@ describe("the script that runs as root", () => {
       expect(script).not.toContain(` ${bare} `);
     }
     expect(script).toContain("'/Library/Audio/MIDI Drivers'");
+  });
+});
+
+
+/**
+ * Clearing the device the driver leaves behind.
+ *
+ * `MIDISetupAddDevice` writes into the *persisted* MIDI setup, so deleting the
+ * plugin leaves the device listed — offline and unowned, but still in every
+ * DAW's port menu, because from CoreMIDI's side that is indistinguishable from
+ * an interface being unplugged.
+ *
+ * The removal itself is a koffi call into CoreMIDI and cannot run here. What
+ * can be checked is the identifier it matches on, which is the part with a
+ * blast radius.
+ */
+describe("what the uninstall matches on", () => {
+  it("uses the driver's bundle id, which only our device can carry", () => {
+    /*
+     * Not the device name. "Launchpad Pro MK3" would also match a *real*
+     * Launchpad Pro MK3, and removing that from the MIDI setup — where its
+     * configuration, its port naming and its position in the studio live — is
+     * a far worse bug than the leftover being fixed. `kMIDIPropertyDriverOwner`
+     * is set by the owning driver, so a device ours did not create cannot
+     * carry it.
+     */
+    expect(DRIVER_BUNDLE_ID).toBe("studios.eion.vrmc.midi.driver");
+    expect(DRIVER_BUNDLE_ID).not.toMatch(/launchpad/i);
+  });
+
+  it("matches the CFBundleIdentifier the driver actually ships with", async () => {
+    // The two live in different languages in different directories, and a
+    // rename on one side would silently stop the uninstall matching anything —
+    // which looks exactly like there being nothing to remove.
+    const plist = await readFile(
+      new URL("../../../native/coremidi-driver/Info.plist", import.meta.url),
+      "utf8",
+    );
+    const match = /<key>CFBundleIdentifier<\/key>\s*<string>([^<]+)<\/string>/.exec(
+      plist,
+    );
+    expect(match?.[1]).toBe(DRIVER_BUNDLE_ID);
   });
 });
