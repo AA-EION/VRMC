@@ -143,15 +143,50 @@ ULONG Release(void *instance) {
 // ---------------------------------------------------------------------------
 
 /*
+ * Say the device is here.
+ *
+ * Without this it is *offline*: Audio MIDI Setup draws it greyed with
+ * "Device is online" unchecked, and a host is entitled to skip an offline
+ * device's endpoints entirely — which looks exactly like the driver having
+ * loaded and done nothing useful. The header is explicit about whose job this
+ * is: "1 = device is offline (is temporarily absent), 0 = present. Set by the
+ * owning driver, on the device".
+ *
+ * On the device alone, because the same paragraph says the property "is
+ * inherited from the device by its entities and endpoints" — setting it on
+ * each of the three entities as well would be six redundant calls that could
+ * disagree with each other.
+ *
+ * This is what a driver would toggle when its hardware is unplugged. Here the
+ * device is emulated, so it is present from the moment the driver loads and
+ * there is nothing that would ever make it absent — Stop() deliberately does
+ * not set it back, because Stop() runs whenever MIDIServer goes idle.
+ */
+void markPresent(MIDIDeviceRef device) {
+  if (device == 0) return;
+  MIDIObjectSetIntegerProperty(device, kMIDIPropertyOffline, 0);
+}
+
+/*
  * Build the device, if the server is not already holding one for us.
  *
  * MIDIServer persists a driver's devices in the MIDI setup across restarts and
  * hands them back in `devList`, so creating unconditionally would add a second
  * Launchpad on every launch. Finding one there means it is already built and
- * already in the setup, and there is nothing to do.
+ * already in the setup — but not that there is nothing to do: it still has to
+ * be marked present, or it comes back from the persisted setup offline.
  */
 OSStatus Start(MIDIDriverRef driver, MIDIDeviceListRef devList) {
-  if (MIDIDeviceListGetNumberOfDevices(devList) > 0) return noErr;
+  const ItemCount existing = MIDIDeviceListGetNumberOfDevices(devList);
+  if (existing > 0) {
+    // Already built, on a previous run, and handed back from the persisted
+    // setup. Nothing to create — but it still has to be marked present, see
+    // `markPresent`.
+    for (ItemCount i = 0; i < existing; i++) {
+      markPresent(MIDIDeviceListGetDevice(devList, i));
+    }
+    return noErr;
+  }
 
   MIDIDeviceRef device = 0;
   OSStatus err =
@@ -174,8 +209,13 @@ OSStatus Start(MIDIDriverRef driver, MIDIDeviceListRef devList) {
   }
 
   err = MIDISetupAddDevice(device);
-  if (err != noErr) MIDIDeviceDispose(device);
-  return err;
+  if (err != noErr) {
+    MIDIDeviceDispose(device);
+    return err;
+  }
+
+  markPresent(device);
+  return noErr;
 }
 
 /*
