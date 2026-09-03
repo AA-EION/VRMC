@@ -36,6 +36,15 @@ import { signBundle, unsignableEntries, verifyBundle } from './codesign.mjs';
 const exec = promisify(execCb);
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
+/*
+ * The workspace root, two levels above this package.
+ *
+ * `root` is `apps/desktop-bridge`, not the repository — which reads as the
+ * repository right up until something outside the package is wanted. The
+ * CoreMIDI driver lives in `native/coremidi-driver` at the top level, and
+ * resolving it against `root` looked entirely correct and found nothing.
+ */
+const repoRoot = join(root, '..', '..');
 const outRoot = join(root, 'build/dist');
 
 const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
@@ -324,8 +333,18 @@ async function copyTrayHelper(target, destDir) {
  */
 async function copyCoreMidiDriver(target, destDir) {
   if (target.platform !== 'darwin') return false;
-  const built = join(root, 'native/coremidi-driver/build/VRMC.plugin');
-  if (!existsSync(built)) return false;
+  const built = join(repoRoot, 'native/coremidi-driver/build/VRMC.plugin');
+  if (!existsSync(built)) {
+    // Loudly, because the silent version of this shipped: packaging said
+    // nothing, signing had nothing to sign, and the first thing to notice was
+    // a release step three minutes later. A macOS build without it is still a
+    // working bridge, just one whose --install-driver has nothing to install.
+    console.warn(
+      `  ! no CoreMIDI driver at ${built}\n` +
+        '    run native/coremidi-driver/build.sh first; --install-driver will do nothing',
+    );
+    return false;
+  }
   await cp(built, join(destDir, 'VRMC.plugin'), { recursive: true });
   return true;
 }
@@ -531,6 +550,7 @@ async function buildTarget(target) {
   // The tray helper is a real executable, so it does belong in Contents/MacOS.
   const hasTray = await copyTrayHelper(target, exeDir);
   const hasDriver = await copyCoreMidiDriver(target, libDir);
+  if (hasDriver) console.log('  staged the CoreMIDI driver');
 
   /*
    * Refuse to produce a build that cannot work.
