@@ -30,14 +30,23 @@ every session. Either way its two ports are named as the hardware names them:
 
 | Model | Ports, in the order the host enumerates them |
 |---|---|
-| Launchpad X | `LPX (DAW)`, `LPX (MIDI)` |
-| Launchpad Pro MK3 | `PRO MK3 (DAW)`, `PRO MK3 (MIDI)` |
+| Launchpad X | `LPX DAW`, `LPX MIDI` |
+| Launchpad Pro MK3 | `LPProMK3 DAW`, `LPProMK3 MIDI` |
 
-DAW first: on a real Launchpad the two ports are cables on one USB endpoint
-pair, and the DAW jack is cable 0. The names and the order are both taken from
+DAW first: Live's own `Launchpad_X` script asks for two ports in and two out
+with `SCRIPT` on the first pair and `REMOTE` on the second.
+
+These were `LPX (DAW)` and `PRO MK3 (DAW)` for a while, taken from
 [CoreFW](https://github.com/anthonyhfm/launchpad-core-firmware)'s USB
-descriptor, because a DAW decides what a port is by its name — these are
-functional strings, not cosmetic ones.
+descriptor. That was the wrong source: CoreFW is community firmware naming its
+own ports, and it parenthesises where Novation does not. The names above are
+Novation's, from their Ableton setup guides for the two models.
+
+The Pro MK3 has a third port on real hardware, `LPProMK3 DIN`, sitting between
+the other two — Live's `Launchpad_Pro_MK3` script asks for three in and three
+out, `REMOTE` first, nothing on the second, `SCRIPT` third. It is not created
+here: it exists to reach the DIN sockets on the back panel, and there is no
+back panel.
 
 Each endpoint also carries the hardware's identity — manufacturer
 `Focusrite - Novation`, model `Launchpad X` — set through CoreMIDI directly,
@@ -51,8 +60,8 @@ settable. It is derived, *"by combining the device and endpoint names"*, and
 writing to it returns `paramErr`. That is fine, because the derived value is
 already the one we want: a virtual endpoint has no device to combine with, so
 its display name is simply its own name, and the name it is created under is
-already `Launchpad X LPX (DAW)`. This is why the endpoint keeps the combined
-name rather than being renamed to the bare `LPX (DAW)` the hardware reports —
+already `Launchpad X LPX DAW`. This is why the endpoint keeps the combined
+name rather than being renamed to the bare `LPX DAW` the hardware reports —
 the bare name would lose the device context a host has no other way to
 recover, and two emulated Launchpads would become indistinguishable.
 

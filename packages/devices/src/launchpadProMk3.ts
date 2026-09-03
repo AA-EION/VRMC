@@ -35,10 +35,18 @@ export const LAUNCHPAD_PRO_MK3: DeviceSpec = {
   firmwareVersion: [0x09, 0x09, 0x09],
   manufacturer: 'Focusrite - Novation',
 
-  // DAW first, then MIDI — the cable order in CoreFW's descriptor, same as
-  // every other model. The Pro MK3 presents a third port carrying DIN output,
-  // which a virtual device cannot usefully emulate, so two are created.
-  portNames: ['PRO MK3 (DAW)', 'PRO MK3 (MIDI)'],
+  // The names a stock Launchpad Pro MK3 puts on the bus. These were
+  // `PRO MK3 (DAW)` / `PRO MK3 (MIDI)`, taken from CoreFW, which is community
+  // firmware and names its ports its own way; Novation's hardware calls them
+  // `LPProMK3 DAW` and `LPProMK3 MIDI`.
+  //
+  // The real device presents a third, `LPProMK3 DIN`, between them: Live's
+  // Launchpad_Pro_MK3 script asks for three ports in and three out, with
+  // REMOTE on the first, nothing on the second and SCRIPT on the third. Only
+  // two are created here because the DIN port exists to reach the sockets on
+  // the back panel and there are none, so `dawPortIndex` is 0 rather than the
+  // hardware's 2.
+  portNames: ['LPProMK3 DAW', 'LPProMK3 MIDI'],
   dawPortIndex: 0,
 
   controls: [

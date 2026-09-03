@@ -311,7 +311,7 @@ describe("connecting with nothing but a pairing code", () => {
       ),
     );
     await vi.waitFor(() => expect(devices.count).toBe(1), { timeout: 5000 });
-    expect(ports.opened).toContain("Launchpad X LPX (DAW)");
+    expect(ports.opened).toContain("Launchpad X LPX DAW");
 
     // 2. A pad is struck in the headset, and the DAW sees the note the real
     //    hardware would have sent: bottom-left pad is XY index 11.
@@ -322,7 +322,7 @@ describe("connecting with nothing but a pairing code", () => {
     );
     await vi.waitFor(
       () =>
-        expect(ports.sent("Launchpad X LPX (DAW)")).toContainEqual([
+        expect(ports.sent("Launchpad X LPX DAW")).toContainEqual([
           0x90, 11, 100,
         ]),
       { timeout: 5000 },
@@ -369,7 +369,7 @@ describe("connecting with nothing but a pairing code", () => {
         w.pushEvent(EventType.NOTE_ON, 0, 12, 90, 0, 31, 0, 0);
       }),
     );
-    const out = "Launchpad X LPX (DAW)";
+    const out = "Launchpad X LPX DAW";
     await vi.waitFor(
       () => expect(ports.sent(out)).toContainEqual([0x90, 12, 90]),
       {

@@ -203,7 +203,7 @@ export class DeviceManager {
      * What each endpoint should tell a host about itself.
      *
      * Manufacturer and model only. An earlier version also renamed the
-     * endpoint to the bare "LPX (DAW)" and wrote the combined string to
+     * endpoint to the bare "LPX DAW" and wrote the combined string to
      * `displayName` — which CoreMIDI refused, because the display name is
      * derived rather than stored, and which was unnecessary anyway: a virtual
      * endpoint has no device to combine with, so its display name *is* its own

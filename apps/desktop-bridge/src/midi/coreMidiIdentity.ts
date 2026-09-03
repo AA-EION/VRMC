@@ -62,7 +62,7 @@ import { requireNative } from "../native.js";
  * That same sentence says the display name is already correct without us. A
  * virtual endpoint has no device to combine with, so the combination
  * degenerates to the endpoint's own name — which packaging already sets to
- * "Launchpad X LPX (DAW)". The value we were trying to write was the value it
+ * "Launchpad X LPX DAW". The value we were trying to write was the value it
  * already had.
  */
 export interface EndpointIdentity {
@@ -283,7 +283,7 @@ function* endpoints(b: Bound): Generator<number> {
  * By name because that is the only handle RtMidi gives us — it creates the
  * endpoint and keeps the `MIDIEndpointRef` to itself. Names are unique at this
  * point precisely because the manager creates them pre-combined
- * ("Launchpad X LPX (DAW)"); the bare name is set afterwards, by which time we
+ * ("Launchpad X LPX DAW"); the bare name is set afterwards, by which time we
  * no longer need to find it.
  */
 function findEndpoints(b: Bound, name: string): number[] {

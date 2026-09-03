@@ -143,43 +143,65 @@ describe.each([
  * The assertion above is true of any two-port spec and stayed green for the
  * whole time the order was backwards, which is the useful lesson: a test that
  * only restates the code's own shape cannot catch the code being wrong about
- * the world. These name the firmware's answer.
+ * the world. These name the hardware's answer.
  *
- * Source: CoreFW's USB descriptor
- * (https://github.com/anthonyhfm/launchpad-core-firmware), src/sys/driver/
- * common/usb/descriptors.rs — embedded IN jack 1 is cable 0 and takes string
- * index 4, which every per-model usb.rs sets to the DAW name; jack 2 is cable
- * 1 and takes string index 5, the MIDI name.
+ * These once cited CoreFW's USB descriptor, and CoreFW parenthesises: `LPX
+ * (DAW)`. That is community firmware naming its own ports, not the strings a
+ * stock Launchpad puts on the bus, and the difference reached the user as
+ * `Launchpad Pro MK3 PRO MK3 (DAW)` in Ableton's port list. The sources now
+ * are Novation's own Ableton setup guides for the two models — which name
+ * `LPX DAW`, `LPX MIDI`, `LPProMK3 DAW`, `LPProMK3 MIDI` — and Live's
+ * `get_capabilities()` for port order: Launchpad_X lists SCRIPT on the first
+ * in/out pair and REMOTE on the second, so the DAW port is first.
  */
 describe('the ports, as the hardware presents them', () => {
   const models = Object.entries(DEVICE_SPECS);
 
-  it.each(models)('%s puts the DAW port on cable 0', (_model, spec) => {
+  it.each(models)('%s puts the DAW port first', (_model, spec) => {
     // Not `dawPortIndex < length` — the actual claim is that it is *first*,
-    // because a host enumerates ports by cable index and the DAW jack is
-    // cable 0 on every model in the firmware.
+    // which is what Live's Launchpad_X capabilities say and what the two-port
+    // spec here relies on.
     expect(spec.dawPortIndex).toBe(0);
     expect(spec.portNames[0]).toContain('DAW');
     expect(spec.portNames[1]).toContain('MIDI');
   });
 
-  it.each(models)('%s names its ports the way the descriptor does', (_model, spec) => {
-    // `PREFIX (DAW)` / `PREFIX (MIDI)` — parenthesised, with one shared
-    // prefix. A DAW decides what a port is by its name, so a drifting style
-    // here is a control surface that stops binding.
+  it.each(models)('%s names its ports the way the hardware does', (_model, spec) => {
+    // `<prefix> DAW` / `<prefix> MIDI`: one shared prefix, a space, no
+    // brackets. The bracketed form is CoreFW's, and a port named in a style no
+    // Launchpad uses is one a host has no reason to treat as a Launchpad.
     for (const name of spec.portNames) {
-      expect(name).toMatch(/^[A-Z0-9 ]+ \((?:DAW|MIDI)\)$/);
+      expect(name).toMatch(/^[A-Za-z0-9]+ (?:DAW|MIDI)$/);
     }
-    const prefixes = new Set(spec.portNames.map((n) => n.split(' (')[0]));
+    const prefixes = new Set(spec.portNames.map((n) => n.split(' ')[0]));
     expect(prefixes.size).toBe(1);
   });
 
-  it('matches the firmware model for model', () => {
-    // Transcribed from each src/sys/driver/<model>/usb.rs. Spelled out rather
-    // than derived so that changing a spec cannot quietly change the
-    // expectation with it.
-    expect(LAUNCHPAD_X.portNames).toEqual(['LPX (DAW)', 'LPX (MIDI)']);
-    expect(LAUNCHPAD_PRO_MK3.portNames).toEqual(['PRO MK3 (DAW)', 'PRO MK3 (MIDI)']);
+  it('matches the hardware model for model', () => {
+    // From Novation's setup guides for each model. Spelled out rather than
+    // derived so that changing a spec cannot quietly change the expectation
+    // with it.
+    expect(LAUNCHPAD_X.portNames).toEqual(['LPX DAW', 'LPX MIDI']);
+    expect(LAUNCHPAD_PRO_MK3.portNames).toEqual(['LPProMK3 DAW', 'LPProMK3 MIDI']);
+  });
+
+  it('replies to a device inquiry with the bytes Live compares against', () => {
+    /*
+     * Live's IdentifiableControlSurface takes `midi_bytes[5:12]` from the
+     * identity reply and compares it, as a whole, against
+     * NOVATION_MANUFACTURER_ID + model_family_code + DEVICE_FAMILY_MEMBER_CODE
+     * — `00 20 29` + the family code + `00 00`. Anything else and it logs
+     * "MIDI device responded with wrong product id" and never binds.
+     *
+     * This is the one part of looking like a Launchpad that a virtual port can
+     * actually satisfy, so it is worth pinning to the byte.
+     */
+    for (const spec of Object.values(DEVICE_SPECS)) {
+      const reply = buildInquiryReply(spec);
+      expect([...reply.slice(5, 12)]).toEqual([
+        0x00, 0x20, 0x29, spec.familyCode[0], spec.familyCode[1], 0x00, 0x00,
+      ]);
+    }
   });
 });
 
