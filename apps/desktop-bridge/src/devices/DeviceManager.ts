@@ -5,7 +5,7 @@ import {
   specFor,
   type DeviceSpec,
   type EmulatorObserver,
-} from '@vrmc/devices';
+} from "@vrmc/devices";
 import {
   DeviceStatus,
   EventType,
@@ -13,15 +13,26 @@ import {
   statusForEventType,
   type DevicePlacement,
   type DeviceStateEntry,
-} from '@vrmc/protocol';
-import { NoteTracker } from '../midi/NoteTracker.js';
-import type { VirtualPort } from '../midi/MidiSink.js';
-import { openBidirectionalPort, type PortOptions, type PortResult } from '../midi/openPort.js';
+} from "@vrmc/protocol";
+import { NoteTracker } from "../midi/NoteTracker.js";
+import type { VirtualPort } from "../midi/MidiSink.js";
+import {
+  openBidirectionalPort,
+  type PortOptions,
+  type PortResult,
+} from "../midi/openPort.js";
 
 /** What the manager reports upward, to be relayed to the headset. */
 export interface DeviceEvents {
   /** An emulated device's LED changed. Channels are 6-bit. */
-  onLed(deviceId: number, ledIndex: number, r: number, g: number, b: number, blink: number): void;
+  onLed(
+    deviceId: number,
+    ledIndex: number,
+    r: number,
+    g: number,
+    b: number,
+    blink: number,
+  ): void;
   /** A device sent SysEx that the headset may want (rare; mostly diagnostics). */
   onSysEx?(deviceId: number, bytes: Uint8Array): void;
   /** The host sent a device text to display. */
@@ -80,7 +91,7 @@ export interface DeviceManagerOptions {
   placementOf?: (deviceId: number) => DevicePlacement | null;
 }
 
-export const DEFAULT_PORT_NAME_TEMPLATE = '{device} {port}';
+export const DEFAULT_PORT_NAME_TEMPLATE = "{device} {port}";
 
 /**
  * Creates and destroys virtual MIDI devices on demand.
@@ -178,33 +189,34 @@ export class DeviceManager {
       emulator: null,
       notes: new NoteTracker(),
       status: DeviceStatus.PENDING,
-      detail: '',
+      detail: "",
     };
     this.devices.set(deviceId, instance);
     this.events.onRosterChange();
 
     const portNames =
-      spec === null ? [model] : spec.portNames.map((p: string) => this.portName(spec, p));
+      spec === null
+        ? [model]
+        : spec.portNames.map((p: string) => this.portName(spec, p));
 
     /*
      * What each endpoint should tell a host about itself.
      *
-     * The endpoint is *created* under the combined name, because that is
-     * unique across several emulated devices and is the only handle CoreMIDI
-     * can be searched by afterwards. Its own name is then set to the bare one
-     * the hardware reports — "LPX (DAW)" — with the combined string moved to
-     * `displayName`, which is where Apple says the device-plus-endpoint name
-     * belongs and what a well-behaved host actually shows.
+     * Manufacturer and model only. An earlier version also renamed the
+     * endpoint to the bare "LPX (DAW)" and wrote the combined string to
+     * `displayName` — which CoreMIDI refused, because the display name is
+     * derived rather than stored, and which was unnecessary anyway: a virtual
+     * endpoint has no device to combine with, so its display name *is* its own
+     * name, and the name it is created with here is already the combined one.
      *
      * Null for a device with no spec: the plain surfaces are not pretending to
-     * be hardware and should not claim a manufacturer.
+     * be hardware, and a port that advertises itself as Novation while
+     * behaving as a nameless keyboard is worse than one that claims nothing.
      */
     const identities =
       spec === null
         ? portNames.map(() => null)
-        : spec.portNames.map((bare: string, i: number) => ({
-            name: bare,
-            displayName: portNames[i] ?? bare,
+        : portNames.map(() => ({
             manufacturer: spec.manufacturer,
             model: spec.displayName,
           }));
@@ -218,7 +230,8 @@ export class DeviceManager {
         noMidi: this.options.noMidi,
         loopbackPattern: this.options.loopbackPattern,
       } satisfies PortOptions);
-      for (const note of result.notes) this.events.onLog(`[device ${deviceId}] ${note}`);
+      for (const note of result.notes)
+        this.events.onLog(`[device ${deviceId}] ${note}`);
       if (result.ok) {
         instance.ports.push(result.port);
         opened.push(result.port.name);
@@ -230,18 +243,22 @@ export class DeviceManager {
     }
 
     if (spec !== null) {
-      instance.dawPort = instance.ports[spec.dawPortIndex] ?? instance.ports[0] ?? null;
+      instance.dawPort =
+        instance.ports[spec.dawPortIndex] ?? instance.ports[0] ?? null;
       instance.emulator = this.buildEmulator(instance, spec);
       this.wireInputs(instance, spec);
     } else {
       instance.dawPort = instance.ports[0] ?? null;
     }
 
-    instance.status = failures.length === portNames.length ? DeviceStatus.FAILED : DeviceStatus.READY;
+    instance.status =
+      failures.length === portNames.length
+        ? DeviceStatus.FAILED
+        : DeviceStatus.READY;
     instance.detail =
       instance.status === DeviceStatus.READY
-        ? opened.join(', ')
-        : `could not open ${failures.join(', ')}`;
+        ? opened.join(", ")
+        : `could not open ${failures.join(", ")}`;
     this.events.onRosterChange();
   }
 
@@ -341,12 +358,24 @@ export class DeviceManager {
       return;
     }
     if (type === EventType.PITCH_BEND) {
-      port.sink.send(MidiStatus.PITCH_BEND | ch, value14 & 0x7f, (value14 >> 7) & 0x7f);
+      port.sink.send(
+        MidiStatus.PITCH_BEND | ch,
+        value14 & 0x7f,
+        (value14 >> 7) & 0x7f,
+      );
       return;
     }
     if (type === EventType.CONTROL_CHANGE_14) {
-      port.sink.send(MidiStatus.CONTROL_CHANGE | ch, data1, (value14 >> 7) & 0x7f);
-      port.sink.send(MidiStatus.CONTROL_CHANGE | ch, (data1 + 32) & 0x7f, value14 & 0x7f);
+      port.sink.send(
+        MidiStatus.CONTROL_CHANGE | ch,
+        data1,
+        (value14 >> 7) & 0x7f,
+      );
+      port.sink.send(
+        MidiStatus.CONTROL_CHANGE | ch,
+        (data1 + 32) & 0x7f,
+        value14 & 0x7f,
+      );
       return;
     }
     const status = statusForEventType(type);
@@ -370,7 +399,11 @@ export class DeviceManager {
   }
 
   /** Feed a message to a device as if the host had sent it. For tests. */
-  injectHostMessage(deviceId: number, portIndex: number, bytes: Uint8Array): boolean {
+  injectHostMessage(
+    deviceId: number,
+    portIndex: number,
+    bytes: Uint8Array,
+  ): boolean {
     const instance = this.devices.get(this.resolve(deviceId));
     const source = instance?.ports[portIndex]?.source;
     if (source?.onMessage == null) return false;
@@ -381,7 +414,13 @@ export class DeviceManager {
   /** Every LED of a device, for a full resync after a headset reconnect. */
   forEachLed(
     deviceId: number,
-    visit: (ledIndex: number, r: number, g: number, b: number, blink: number) => void,
+    visit: (
+      ledIndex: number,
+      r: number,
+      g: number,
+      b: number,
+      blink: number,
+    ) => void,
   ): void {
     const instance = this.devices.get(this.resolve(deviceId));
     const emulator = instance?.emulator;
@@ -390,11 +429,20 @@ export class DeviceManager {
     const scratch = new Uint8Array(3);
     for (const control of spec.controls) {
       emulator.readLed(control.index, scratch, 0);
-      visit(control.index, scratch[0]!, scratch[1]!, scratch[2]!, emulator.blinkOf(control.index));
+      visit(
+        control.index,
+        scratch[0]!,
+        scratch[1]!,
+        scratch[2]!,
+        emulator.blinkOf(control.index),
+      );
     }
   }
 
-  private buildEmulator(instance: DeviceInstance, spec: DeviceSpec): LaunchpadEmulator {
+  private buildEmulator(
+    instance: DeviceInstance,
+    spec: DeviceSpec,
+  ): LaunchpadEmulator {
     const observer: EmulatorObserver = {
       onLed: (ledIndex, r, g, b, blink) => {
         this.events.onLed(instance.id, ledIndex, r, g, b, blink);
@@ -410,8 +458,10 @@ export class DeviceManager {
           // Track notes so a disconnect can release them.
           const status = bytes[0]! & 0xf0;
           if (status === 0x90) {
-            if (bytes[2] === 0) instance.notes.onNoteOff(bytes[0]! & 0x0f, bytes[1]!);
-            else instance.notes.onNoteOn(bytes[0]! & 0x0f, bytes[1]!, bytes[2]!);
+            if (bytes[2] === 0)
+              instance.notes.onNoteOff(bytes[0]! & 0x0f, bytes[1]!);
+            else
+              instance.notes.onNoteOn(bytes[0]! & 0x0f, bytes[1]!, bytes[2]!);
           }
           port.sink.send(bytes[0]!, bytes[1]!, bytes[2]!);
         }
@@ -419,7 +469,7 @@ export class DeviceManager {
       onText: (text) => this.events.onText?.(instance.id, text),
       onModeChange: (mode) => {
         this.events.onLog(
-          `[device ${instance.id}] ${spec.displayName} entered ${mode === 1 ? 'Programmer' : 'Live'} mode`,
+          `[device ${instance.id}] ${spec.displayName} entered ${mode === 1 ? "Programmer" : "Live"} mode`,
         );
       },
     };
@@ -445,8 +495,8 @@ export class DeviceManager {
 
   private portName(spec: DeviceSpec, portName: string): string {
     return this.options.portNameTemplate
-      .replace('{device}', spec.displayName)
-      .replace('{port}', portName)
-      .replace('{model}', spec.model);
+      .replace("{device}", spec.displayName)
+      .replace("{port}", portName)
+      .replace("{model}", spec.model);
   }
 }

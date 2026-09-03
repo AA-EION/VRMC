@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-import { requireNative } from '../native.js';
+import { requireNative } from "../native.js";
 
 /**
  * Giving a virtual endpoint the identity the hardware has.
@@ -17,14 +17,18 @@ import { requireNative } from '../native.js';
  * install and a different product.
  *
  * WHAT IT CAN DO, AND WHY IT IS WORTH DOING
- * The same headers say, for manufacturer, model and (since CoreMIDI 1.3)
- * display name: "Creators of virtual endpoints may set this property on their
- * endpoints." Those are exactly the fields a host reads to decide what to call
- * a port and who made it. Setting them means a MIDI monitor, an Audio MIDI
- * Setup inspector and any host that surfaces manufacturer or model see
- * "Focusrite - Novation" and "Launchpad X" rather than nothing — and the
- * display string becomes the one the real device produces rather than one we
- * happened to name the endpoint.
+ * The same headers say, for manufacturer and model and for nothing else useful
+ * here: "Creators of virtual endpoints may set this property on their
+ * endpoints." So a MIDI monitor, an Audio MIDI Setup inspector and any host
+ * that surfaces those fields see "Focusrite - Novation" and "Launchpad X"
+ * rather than nothing.
+ *
+ * This comment used to include display name in that list, on the strength of a
+ * summary rather than the header itself. It is not settable — it is derived
+ * from the device and endpoint names — and writing to it returns paramErr,
+ * which took a macOS runner to discover because nothing here can execute
+ * CoreMIDI. See `EndpointIdentity` for why the derived value was already the
+ * one we wanted.
  *
  * HOW IT TALKS TO CoreMIDI
  * Through koffi, the same FFI the Windows backend uses for teVirtualMIDI, so
@@ -40,29 +44,55 @@ import { requireNative } from '../native.js';
  * a missing koffi or an OS that moved a symbol must not stop MIDI working.
  */
 
-/** What a host should be told about an endpoint. */
+/**
+ * What a host may be told about an endpoint.
+ *
+ * Two fields, because two is what CoreMIDI permits. The header grants exactly
+ * this much to an application: "Creators of virtual endpoints may set this
+ * property on their endpoints" appears on `kMIDIPropertyManufacturer` and
+ * `kMIDIPropertyModel`, and on nothing else useful here.
+ *
+ * `kMIDIPropertyDisplayName` is deliberately absent. It looked like the field
+ * that mattered — it is the one hosts show — but it is *derived*: "the
+ * Apple-recommended user-visible name for an endpoint, by combining the device
+ * and endpoint names". Writing to it returns paramErr (OSStatus -50), which is
+ * how this was found, on a macOS runner, on the first build that ever executed
+ * this code.
+ *
+ * That same sentence says the display name is already correct without us. A
+ * virtual endpoint has no device to combine with, so the combination
+ * degenerates to the endpoint's own name — which packaging already sets to
+ * "Launchpad X LPX (DAW)". The value we were trying to write was the value it
+ * already had.
+ */
 export interface EndpointIdentity {
-  /** The Apple-recommended user-visible name: device and endpoint combined. */
-  displayName: string;
   /** The USB manufacturer string, e.g. "Focusrite - Novation". */
   manufacturer: string;
   /** The USB product string, e.g. "Launchpad X". */
   model: string;
-  /**
-   * The endpoint's own name, if it should differ from the one it was created
-   * with. Real hardware names the endpoint "LPX (DAW)" and lets the host
-   * prepend the device; we create it pre-combined so it is unique among
-   * several emulated devices, then set the bare name here so anything reading
-   * `kMIDIPropertyName` sees what the hardware reports.
-   */
-  name?: string;
+}
+
+/**
+ * What a host can actually see on an endpoint.
+ *
+ * Deliberately wider than `EndpointIdentity`: the display name and the
+ * endpoint's own name are readable but not writable, and reading them is how
+ * the self-check confirms the derived display name came out right without us
+ * touching it.
+ */
+export interface EndpointFacts {
+  name: string;
+  displayName: string;
+  manufacturer: string;
+  model: string;
 }
 
 /** CFStringEncoding for UTF-8. */
 const K_CF_STRING_ENCODING_UTF8 = 0x0800_0100;
 
-const CORE_MIDI = '/System/Library/Frameworks/CoreMIDI.framework/CoreMIDI';
-const CORE_FOUNDATION = '/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation';
+const CORE_MIDI = "/System/Library/Frameworks/CoreMIDI.framework/CoreMIDI";
+const CORE_FOUNDATION =
+  "/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation";
 
 /** The slice of koffi used here, declared structurally so this typechecks
  * without the optional dependency installed. */
@@ -84,7 +114,12 @@ interface Bound {
   destinationCount(): number;
   destination(index: number): number;
   cfStringCreate(alloc: unknown, cstr: Buffer, encoding: number): unknown;
-  cfStringGetCString(str: unknown, buffer: Buffer, size: number, encoding: number): boolean;
+  cfStringGetCString(
+    str: unknown,
+    buffer: Buffer,
+    size: number,
+    encoding: number,
+  ): boolean;
   cfRelease(cf: unknown): void;
   property: {
     name: unknown;
@@ -96,7 +131,7 @@ interface Bound {
 }
 
 /** Why the last attempt failed, if it did. Read for reporting. */
-let lastError = '';
+let lastError = "";
 
 export function coreMidiIdentityError(): string {
   return lastError;
@@ -115,13 +150,13 @@ function bind(): Bound | null {
   if (bound !== undefined) return bound;
   bound = null;
 
-  if (process.platform !== 'darwin') {
-    lastError = 'not macOS';
+  if (process.platform !== "darwin") {
+    lastError = "not macOS";
     return null;
   }
 
   try {
-    const koffi = requireNative<KoffiLike>('koffi');
+    const koffi = requireNative<KoffiLike>("koffi");
     const midi = koffi.load(CORE_MIDI);
     const cf = koffi.load(CORE_FOUNDATION);
 
@@ -132,7 +167,7 @@ function bind(): Bound | null {
      */
     const constant = (name: string): unknown => {
       const address = midi.symbol(name);
-      const value = koffi.decode(address, 'void *');
+      const value = koffi.decode(address, "void *");
       if (value === null || value === undefined) {
         throw new Error(`CoreMIDI exports no ${name}`);
       }
@@ -141,45 +176,53 @@ function bind(): Bound | null {
 
     bound = {
       // ItemCount is unsigned long; MIDIObjectRef and MIDIEndpointRef are UInt32.
-      setStringProperty: midi.func('MIDIObjectSetStringProperty', 'int32', [
-        'uint32',
-        'void *',
-        'void *',
-      ]) as Bound['setStringProperty'],
-      getStringProperty: midi.func('MIDIObjectGetStringProperty', 'int32', [
-        'uint32',
-        'void *',
-        'void **',
-      ]) as Bound['getStringProperty'],
-      sourceCount: midi.func('MIDIGetNumberOfSources', 'ulong', []) as Bound['sourceCount'],
-      source: midi.func('MIDIGetSource', 'uint32', ['ulong']) as Bound['source'],
-      destinationCount: midi.func(
-        'MIDIGetNumberOfDestinations',
-        'ulong',
+      setStringProperty: midi.func("MIDIObjectSetStringProperty", "int32", [
+        "uint32",
+        "void *",
+        "void *",
+      ]) as Bound["setStringProperty"],
+      getStringProperty: midi.func("MIDIObjectGetStringProperty", "int32", [
+        "uint32",
+        "void *",
+        "void **",
+      ]) as Bound["getStringProperty"],
+      sourceCount: midi.func(
+        "MIDIGetNumberOfSources",
+        "ulong",
         [],
-      ) as Bound['destinationCount'],
-      destination: midi.func('MIDIGetDestination', 'uint32', ['ulong']) as Bound['destination'],
-      cfStringCreate: cf.func('CFStringCreateWithCString', 'void *', [
-        'void *',
-        'char *',
-        'uint32',
-      ]) as Bound['cfStringCreate'],
-      cfStringGetCString: cf.func('CFStringGetCString', 'bool', [
-        'void *',
-        'char *',
-        'long',
-        'uint32',
-      ]) as Bound['cfStringGetCString'],
-      cfRelease: cf.func('CFRelease', 'void', ['void *']) as Bound['cfRelease'],
+      ) as Bound["sourceCount"],
+      source: midi.func("MIDIGetSource", "uint32", [
+        "ulong",
+      ]) as Bound["source"],
+      destinationCount: midi.func(
+        "MIDIGetNumberOfDestinations",
+        "ulong",
+        [],
+      ) as Bound["destinationCount"],
+      destination: midi.func("MIDIGetDestination", "uint32", [
+        "ulong",
+      ]) as Bound["destination"],
+      cfStringCreate: cf.func("CFStringCreateWithCString", "void *", [
+        "void *",
+        "char *",
+        "uint32",
+      ]) as Bound["cfStringCreate"],
+      cfStringGetCString: cf.func("CFStringGetCString", "bool", [
+        "void *",
+        "char *",
+        "long",
+        "uint32",
+      ]) as Bound["cfStringGetCString"],
+      cfRelease: cf.func("CFRelease", "void", ["void *"]) as Bound["cfRelease"],
       property: {
-        name: constant('kMIDIPropertyName'),
-        manufacturer: constant('kMIDIPropertyManufacturer'),
-        model: constant('kMIDIPropertyModel'),
-        displayName: constant('kMIDIPropertyDisplayName'),
+        name: constant("kMIDIPropertyName"),
+        manufacturer: constant("kMIDIPropertyManufacturer"),
+        model: constant("kMIDIPropertyModel"),
+        displayName: constant("kMIDIPropertyDisplayName"),
       },
       koffi,
     };
-    lastError = '';
+    lastError = "";
   } catch (err) {
     lastError = err instanceof Error ? err.message : String(err);
     bound = null;
@@ -189,24 +232,33 @@ function bind(): Bound | null {
 
 /** A CFString holding `value`, which the caller must release. */
 function cfString(b: Bound, value: string): unknown {
-  const buffer = Buffer.from(value + '\0', 'utf8');
+  const buffer = Buffer.from(value + "\0", "utf8");
   const str = b.cfStringCreate(null, buffer, K_CF_STRING_ENCODING_UTF8);
-  if (str === null || str === undefined) throw new Error(`could not make a CFString for ${value}`);
+  if (str === null || str === undefined)
+    throw new Error(`could not make a CFString for ${value}`);
   return str;
 }
 
 /** Read one string property, or '' when it has none. */
 function readProperty(b: Bound, endpoint: number, property: unknown): string {
-  const out = b.koffi.alloc('void *', 1);
-  if (b.getStringProperty(endpoint, property, out) !== 0) return '';
-  const str = b.koffi.decode(out, 'void *');
-  if (str === null || str === undefined) return '';
+  const out = b.koffi.alloc("void *", 1);
+  if (b.getStringProperty(endpoint, property, out) !== 0) return "";
+  const str = b.koffi.decode(out, "void *");
+  if (str === null || str === undefined) return "";
   try {
     // 512 is generous: these are port names, not documents.
     const buffer = Buffer.alloc(512);
-    if (!b.cfStringGetCString(str, buffer, buffer.length, K_CF_STRING_ENCODING_UTF8)) return '';
+    if (
+      !b.cfStringGetCString(
+        str,
+        buffer,
+        buffer.length,
+        K_CF_STRING_ENCODING_UTF8,
+      )
+    )
+      return "";
     const end = buffer.indexOf(0);
-    return buffer.toString('utf8', 0, end === -1 ? buffer.length : end);
+    return buffer.toString("utf8", 0, end === -1 ? buffer.length : end);
   } finally {
     // MIDIObjectGetStringProperty gives the caller a reference to release.
     b.cfRelease(str);
@@ -241,7 +293,10 @@ function findEndpoint(b: Bound, name: string): number | null {
  * Returns whether every property was set. Best-effort by design: a false here
  * means a port with less metadata, never a port that does not work.
  */
-export function stampIdentity(createdAs: string, identity: EndpointIdentity): boolean {
+export function stampIdentity(
+  createdAs: string,
+  identity: EndpointIdentity,
+): boolean {
   const b = bind();
   if (b === null) return false;
 
@@ -252,28 +307,36 @@ export function stampIdentity(createdAs: string, identity: EndpointIdentity): bo
       return false;
     }
 
-    // Display name first, and the endpoint's own name last: renaming it is
-    // what makes it unfindable, so nothing that needs the old name may follow.
-    const ordered: [unknown, string][] = [
-      [b.property.displayName, identity.displayName],
-      [b.property.manufacturer, identity.manufacturer],
-      [b.property.model, identity.model],
+    /*
+     * Each property on its own, and a refusal does not abandon the rest.
+     *
+     * The first version stopped at the first non-zero status, so when
+     * CoreMIDI refused the derived display name the endpoint ended up with no
+     * manufacturer and no model either — one wrong field cost all of them. It
+     * also reported "refused a property" without saying which, which is a
+     * sentence that describes the symptom and hides the cause.
+     */
+    const writes: [string, unknown, string][] = [
+      ["manufacturer", b.property.manufacturer, identity.manufacturer],
+      ["model", b.property.model, identity.model],
     ];
-    if (identity.name !== undefined) ordered.push([b.property.name, identity.name]);
 
-    for (const [property, value] of ordered) {
+    const refused: string[] = [];
+    for (const [label, property, value] of writes) {
       const str = cfString(b, value);
       try {
         const status = b.setStringProperty(endpoint, property, str);
-        if (status !== 0) {
-          lastError = `CoreMIDI refused a property on "${createdAs}" (OSStatus ${status})`;
-          return false;
-        }
+        if (status !== 0) refused.push(`${label} (OSStatus ${status})`);
       } finally {
         b.cfRelease(str);
       }
     }
-    lastError = '';
+
+    if (refused.length > 0) {
+      lastError = `CoreMIDI refused ${refused.join(", ")} on "${createdAs}"`;
+      return false;
+    }
+    lastError = "";
     return true;
   } catch (err) {
     lastError = err instanceof Error ? err.message : String(err);
@@ -288,7 +351,7 @@ export function stampIdentity(createdAs: string, identity: EndpointIdentity): bo
  * CoreMIDI, so the only honest verification is on a macOS runner, round-tripping
  * through the real framework. See `--check-midi`.
  */
-export function readIdentity(name: string): EndpointIdentity | null {
+export function readIdentity(name: string): EndpointFacts | null {
   const b = bind();
   if (b === null) return null;
   try {

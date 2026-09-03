@@ -40,12 +40,21 @@ descriptor, because a DAW decides what a port is by its name — these are
 functional strings, not cosmetic ones.
 
 Each endpoint also carries the hardware's identity — manufacturer
-`Focusrite - Novation`, model `Launchpad X`, and the display name a real
-Launchpad produces — set through CoreMIDI directly, since RtMidi has no API for
-it. The endpoint is *created* under the combined name (unique, and the only
-handle CoreMIDI can be searched by afterwards) and then renamed to the bare
-`LPX (DAW)` the hardware reports, with the combined string moved to
-`kMIDIPropertyDisplayName` where Apple says it belongs.
+`Focusrite - Novation`, model `Launchpad X` — set through CoreMIDI directly,
+since RtMidi has no API for it. Those two and no more: the header grants
+*"Creators of virtual endpoints may set this property on their endpoints"* to
+`kMIDIPropertyManufacturer` and `kMIDIPropertyModel`, and to nothing else that
+would help here.
+
+`kMIDIPropertyDisplayName` — the one a host actually shows — is **not**
+settable. It is derived, *"by combining the device and endpoint names"*, and
+writing to it returns `paramErr`. That is fine, because the derived value is
+already the one we want: a virtual endpoint has no device to combine with, so
+its display name is simply its own name, and the name it is created under is
+already `Launchpad X LPX (DAW)`. This is why the endpoint keeps the combined
+name rather than being renamed to the bare `LPX (DAW)` the hardware reports —
+the bare name would lose the device context a host has no other way to
+recover, and two emulated Launchpads would become indistinguishable.
 
 **One difference from real hardware that cannot be closed, and why.** A
 Launchpad is one USB device, so macOS shows one CoreMIDI *device* with two
