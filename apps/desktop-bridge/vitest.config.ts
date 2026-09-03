@@ -22,9 +22,12 @@ import { defineConfig } from "vitest/config";
  * to negotiate with anyone else's threads. It costs a little startup time per
  * file and buys a suite that does not fail for reasons unrelated to the code.
  *
- * The test file does call `cleanup()` from node-datachannel in `afterAll`, and
- * that is still correct and still worth doing — it just cannot cover threads
- * the library has not finished with at the moment the worker goes away.
+ * This was written while the WebRTC test still called `cleanup()` from
+ * node-datachannel in `afterAll`, and forks alone did not stop the crashing:
+ * measured over twenty runs it was still 1/20. Dropping that call is what took
+ * it to 0/20 — see the comment on `afterAll` in test/webrtc.test.ts. The pool
+ * stays because it is the right one for a package that loads three native
+ * addons, and because it is faster, not because it was the fix.
  */
 export default defineConfig({
   test: {
