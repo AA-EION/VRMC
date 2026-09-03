@@ -315,7 +315,10 @@ async function copyTrayHelper(target, destDir) {
  * directly and there is nothing for an FFI to do.
  */
 async function copyKoffi(target, destDir) {
-  if (target.platform !== 'win32') return false;
+  // Windows needs it to reach the teVirtualMIDI driver; macOS needs it to
+  // publish the endpoint identity through CoreMIDI. Linux needs neither, and
+  // staging an FFI with nothing to call is dead weight in the download.
+  if (target.platform !== 'win32' && target.platform !== 'darwin') return false;
   const dir = await resolvePackageDir('koffi');
   if (dir === null) {
     console.warn('  ! koffi is not installed');
@@ -332,7 +335,7 @@ async function copyKoffi(target, destDir) {
    * from koffi's own manifest. Copying koffi alone stages a loader with
    * nothing to load.
    */
-  const platformPackage = `@koromix/koffi-win32-${target.arch}`;
+  const platformPackage = `@koromix/koffi-${target.platform}-${target.arch}`;
   const addonDir = await resolvePackageDir(platformPackage, join(dir, 'package.json'));
   if (addonDir === null) {
     console.warn(`  ! ${platformPackage} is not installed`);

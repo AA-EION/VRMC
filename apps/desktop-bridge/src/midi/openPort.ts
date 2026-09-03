@@ -7,6 +7,7 @@ import {
   openVirtualPort as openVirtualOutput,
   rtMidiLoadError,
 } from './coreMidiBackend.js';
+import type { EndpointIdentity } from './coreMidiIdentity.js';
 import {
   NullSink,
   NullSource,
@@ -18,6 +19,14 @@ import { openTeVirtualMidiPort, WINDOWS_LOOPBACK_PATTERN } from './windowsBacken
 export interface PortOptions {
   /** Name the DAW will display. */
   name: string;
+  /**
+   * The hardware identity to publish on the endpoint, on macOS.
+   *
+   * Null for the plain surfaces, which are not pretending to be anything. See
+   * coreMidiIdentity.ts for what CoreMIDI does and does not let an application
+   * claim here.
+   */
+  identity?: EndpointIdentity | null;
   /** Skip MIDI entirely and discard messages. For testing the network path. */
   noMidi: boolean;
   /** Windows: pattern for the loopback port to fall back to. */
@@ -85,7 +94,7 @@ export async function openBidirectionalPort(options: PortOptions): Promise<PortR
     return { port: nullPort(options.name), ok: false, notes };
   }
 
-  const sink = await openVirtualOutput(options.name);
+  const sink = await openVirtualOutput(options.name, options.identity);
   if (sink === null) {
     // The addon failing to load and the host having no MIDI system produce the
     // same missing port, and pointing at the wrong one costs a long detour:
@@ -104,12 +113,19 @@ export async function openBidirectionalPort(options: PortOptions): Promise<PortR
 
   // The input half is best-effort: without it the device plays but stays dark,
   // which is worth reporting and not worth failing over.
-  const source = await openVirtualInput(options.name);
+  const source = await openVirtualInput(options.name, options.identity);
   if (source === null) {
     notes.push(`Created "${options.name}" as output only; LED feedback unavailable.`);
   } else {
     const api = process.platform === 'darwin' ? 'CoreMIDI' : 'ALSA';
     notes.push(`Created ${api} port "${options.name}" (in and out).`);
+  }
+
+  // Metadata, so its absence is a note rather than a failure — but a silent
+  // absence would be undiagnosable, since nothing about the port looks wrong.
+  const identityError = (sink as { identityError?: string }).identityError ?? '';
+  if (identityError !== '') {
+    notes.push(`Could not publish the hardware identity: ${identityError}`);
   }
 
   return { port: new SimpleVirtualPort(options.name, sink, source), ok: true, notes };

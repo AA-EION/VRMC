@@ -25,6 +25,7 @@ import { DEFAULT_CONFIG, parseArgs } from '../src/config.js';
 import { Router } from '../src/core/Router.js';
 import { DeviceManager } from '../src/devices/DeviceManager.js';
 import { NullSink, NullSource, SimpleVirtualPort } from '../src/midi/MidiSink.js';
+import type { PortOptions } from '../src/midi/openPort.js';
 import { Broadcaster } from '../src/net/Broadcaster.js';
 import { WsServer } from '../src/net/WsServer.js';
 
@@ -523,5 +524,72 @@ describe('end to end over the WebSocket link', () => {
     );
 
     for (const fn of cleanups.splice(0).reverse()) await fn();
+  });
+});
+
+/**
+ * The identity each endpoint publishes to the host.
+ *
+ * What can be checked here is the *decision* — which name, display name,
+ * manufacturer and model each port claims. Whether CoreMIDI accepts them
+ * cannot be: no machine that runs this suite has CoreMIDI, and a mock of the
+ * framework would only assert that the mock agrees with itself. That half is
+ * verified by `--check` on a macOS runner, which round-trips through the real
+ * thing. See core/selfCheck.ts.
+ */
+describe('what an endpoint tells the host it is', () => {
+  /** Capture the identity handed to each opened port. */
+  function identityPorts() {
+    const seen: Record<string, unknown> = {};
+    return {
+      seen,
+      open: async (options: PortOptions) => {
+        seen[options.name] = options.identity ?? null;
+        const port = new FakePorts().open(options);
+        return port;
+      },
+    };
+  }
+
+  it('claims the hardware maker and model on every port', async () => {
+    const ports = identityPorts();
+    const devices = makeManager(ports as never);
+    await devices.add(20, DeviceModel.LAUNCHPAD_X);
+
+    for (const name of ['Launchpad X LPX (DAW)', 'Launchpad X LPX (MIDI)']) {
+      expect(ports.seen[name]).toMatchObject({
+        manufacturer: 'Focusrite - Novation',
+        model: 'Launchpad X',
+      });
+    }
+  });
+
+  it('separates the endpoint name from the name a host displays', async () => {
+    /*
+     * The distinction is Apple's, and it is why this is worth doing at all.
+     * Real hardware names the endpoint "LPX (DAW)" and lets the host prepend
+     * the device it belongs to; `kMIDIPropertyDisplayName` is the combined
+     * result. We create the endpoint pre-combined — it is the only handle
+     * CoreMIDI can be searched by, and it has to be unique across several
+     * emulated devices — then set the bare name afterwards.
+     */
+    const ports = identityPorts();
+    const devices = makeManager(ports as never);
+    await devices.add(20, DeviceModel.LAUNCHPAD_X);
+
+    expect(ports.seen['Launchpad X LPX (DAW)']).toMatchObject({
+      name: 'LPX (DAW)',
+      displayName: 'Launchpad X LPX (DAW)',
+    });
+  });
+
+  it('claims nothing for the plain surfaces', async () => {
+    // VRMC is not pretending to be hardware, so it must not borrow a
+    // manufacturer. A port claiming to be a Novation device while behaving as
+    // a nameless keyboard is worse than one claiming nothing.
+    const ports = identityPorts();
+    const devices = makeManager(ports as never);
+    await devices.add(DeviceId.PADS, 'VRMC');
+    expect(ports.seen['VRMC']).toBeNull();
   });
 });

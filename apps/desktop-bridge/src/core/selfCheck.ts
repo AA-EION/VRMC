@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 import { requireNative } from '../native.js';
+import { openVirtualPort } from '../midi/coreMidiBackend.js';
+import { coreMidiIdentityError, readIdentity } from '../midi/coreMidiIdentity.js';
 
 /**
  * Does this build have the native pieces it needs?
@@ -28,8 +30,10 @@ export interface NativeCheck {
 /**
  * The addons this platform needs.
  *
- * koffi is Windows-only: it is the FFI used to reach the teVirtualMIDI driver,
- * and it has nothing to do on a system with CoreMIDI or ALSA.
+ * koffi is the FFI layer, and what it is for differs by platform: on Windows
+ * it reaches the teVirtualMIDI driver and nothing works without it; on macOS
+ * it publishes the hardware identity on an endpoint, which is polish rather
+ * than function. Linux needs it for neither.
  */
 function expected(): Array<Omit<NativeCheck, 'ok' | 'detail'>> {
   const checks = [
@@ -38,6 +42,9 @@ function expected(): Array<Omit<NativeCheck, 'ok' | 'detail'>> {
   ];
   if (process.platform === 'win32') {
     checks.push({ name: 'koffi', purpose: 'the Windows MIDI driver', required: true });
+  }
+  if (process.platform === 'darwin') {
+    checks.push({ name: 'koffi', purpose: 'publishing the device identity', required: false });
   }
   return checks;
 }
@@ -71,4 +78,68 @@ export function formatChecks(checks: readonly NativeCheck[]): {
       : `  FAIL  ${label}  ${c.purpose}\n        ${c.detail.split('\n')[0]}`;
   });
   return { lines, ok: checks.every((c) => c.ok || !c.required) };
+}
+
+/**
+ * Prove the endpoint identity actually reaches CoreMIDI.
+ *
+ * This is here rather than in the unit tests because it cannot be anywhere
+ * else: no machine that runs this project's test suite has CoreMIDI, so a
+ * test could only assert against a mock of the thing most likely to be wrong.
+ * The failure mode it guards is silent — `MIDIObjectSetStringProperty` given a
+ * property id CoreMIDI does not recognise sets *something* and returns
+ * success, so a wrong constant looks exactly like a working one from the
+ * inside. Only a round trip through the real framework can tell.
+ *
+ * `--check` runs it on macOS, which the release workflow already runs against
+ * the artifact it just built.
+ *
+ * Not required: the identity is metadata, and a port with no manufacturer
+ * still plays. It is reported rather than fatal so that losing the polish
+ * cannot fail a release, while a regression is still visible in the log.
+ */
+export async function checkEndpointIdentity(): Promise<NativeCheck | null> {
+  if (process.platform !== 'darwin') return null;
+
+  const check = {
+    name: 'CoreMIDI identity',
+    purpose: 'the device identity a host reads',
+    required: false,
+  };
+
+  // A name nothing else could be using, so the search cannot find somebody
+  // else's port and report their metadata as ours.
+  const probeName = `VRMC identity probe ${process.pid}`;
+  const want = {
+    name: 'LPX (DAW)',
+    displayName: probeName,
+    manufacturer: 'Focusrite - Novation',
+    model: 'Launchpad X',
+  };
+
+  const sink = await openVirtualPort(probeName, want);
+  if (sink === null) {
+    return { ...check, ok: false, detail: 'could not open a probe port' };
+  }
+  try {
+    // Read back under the *new* name: stamping renames the endpoint, which is
+    // itself part of what is being verified.
+    const got = readIdentity(want.name);
+    if (got === null) {
+      const why = coreMidiIdentityError();
+      return { ...check, ok: false, detail: why === '' ? 'endpoint not found after stamping' : why };
+    }
+    const wrong = (['name', 'displayName', 'manufacturer', 'model'] as const).filter(
+      (key) => got[key] !== want[key],
+    );
+    return wrong.length === 0
+      ? { ...check, ok: true, detail: '' }
+      : {
+          ...check,
+          ok: false,
+          detail: wrong.map((k) => `${k}: wanted "${want[k]}", read "${got[k]}"`).join('; '),
+        };
+  } finally {
+    sink.close();
+  }
 }

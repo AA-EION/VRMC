@@ -9,7 +9,7 @@ import {
 import { ArgError, parseArgs, USAGE, type BridgeConfig } from './config.js';
 import { Router } from './core/Router.js';
 import { loadWorkspace, saveWorkspace } from './core/workspaceFile.js';
-import { checkNativeModules, formatChecks } from './core/selfCheck.js';
+import { checkEndpointIdentity, checkNativeModules, formatChecks } from './core/selfCheck.js';
 import { BRIDGE_VERSION, runSelfTest } from './core/selfTest.js';
 import { autostartState, toggleAutostart } from './setup/autostart.js';
 import { runFirstLaunch } from './setup/firstRun.js';
@@ -75,6 +75,11 @@ async function main(): Promise<void> {
    */
   if (config.check) {
     const checks = checkNativeModules();
+    // On macOS this opens a probe port and round-trips the identity through
+    // CoreMIDI, which is the only place that can be verified — see
+    // core/selfCheck.ts. Elsewhere it returns null and nothing is added.
+    const identity = await checkEndpointIdentity();
+    if (identity !== null) checks.push(identity);
     const { lines, ok } = formatChecks(checks);
     process.stdout.write(`vrmc-bridge ${BRIDGE_VERSION} (${process.platform}-${process.arch})\n`);
     process.stdout.write(`${lines.join('\n')}\n`);

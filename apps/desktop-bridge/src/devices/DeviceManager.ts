@@ -185,12 +185,36 @@ export class DeviceManager {
 
     const portNames =
       spec === null ? [model] : spec.portNames.map((p: string) => this.portName(spec, p));
+
+    /*
+     * What each endpoint should tell a host about itself.
+     *
+     * The endpoint is *created* under the combined name, because that is
+     * unique across several emulated devices and is the only handle CoreMIDI
+     * can be searched by afterwards. Its own name is then set to the bare one
+     * the hardware reports — "LPX (DAW)" — with the combined string moved to
+     * `displayName`, which is where Apple says the device-plus-endpoint name
+     * belongs and what a well-behaved host actually shows.
+     *
+     * Null for a device with no spec: the plain surfaces are not pretending to
+     * be hardware and should not claim a manufacturer.
+     */
+    const identities =
+      spec === null
+        ? portNames.map(() => null)
+        : spec.portNames.map((bare: string, i: number) => ({
+            name: bare,
+            displayName: portNames[i] ?? bare,
+            manufacturer: spec.manufacturer,
+            model: spec.displayName,
+          }));
     const opened: string[] = [];
     const failures: string[] = [];
 
-    for (const name of portNames) {
+    for (const [i, name] of portNames.entries()) {
       const result = await this.openPort({
         name,
+        identity: identities[i] ?? null,
         noMidi: this.options.noMidi,
         loopbackPattern: this.options.loopbackPattern,
       } satisfies PortOptions);

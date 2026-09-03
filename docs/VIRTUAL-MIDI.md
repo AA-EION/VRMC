@@ -39,14 +39,41 @@ pair, and the DAW jack is cable 0. The names and the order are both taken from
 descriptor, because a DAW decides what a port is by its name — these are
 functional strings, not cosmetic ones.
 
-**One difference from real hardware that cannot be closed here.** A Launchpad
-is one USB device, so macOS shows one CoreMIDI *device* with two *entities*
-inside it. These are two standalone virtual endpoints: RtMidi's virtual-port
-API is `MIDISourceCreate`/`MIDIDestinationCreate`, and it has no call for
-creating a device with entities under it. So Audio MIDI Setup lists them as two
-separate entries rather than one expandable device, and the endpoint names
-carry a `{device} {port}` prefix to compensate for having no owning device.
-Closing that gap means talking to CoreMIDI directly rather than through RtMidi.
+Each endpoint also carries the hardware's identity — manufacturer
+`Focusrite - Novation`, model `Launchpad X`, and the display name a real
+Launchpad produces — set through CoreMIDI directly, since RtMidi has no API for
+it. The endpoint is *created* under the combined name (unique, and the only
+handle CoreMIDI can be searched by afterwards) and then renamed to the bare
+`LPX (DAW)` the hardware reports, with the combined string moved to
+`kMIDIPropertyDisplayName` where Apple says it belongs.
+
+**One difference from real hardware that cannot be closed, and why.** A
+Launchpad is one USB device, so macOS shows one CoreMIDI *device* with two
+*entities* inside it. These are two standalone virtual endpoints, and no
+application can do better. CoreMIDI's own headers are explicit:
+
+- `MIDISetupAddDevice` — *"Only MIDI drivers may make this call."*
+- `MIDIDeviceAddEntity` — *"Non-drivers may call this function as of CoreMIDI
+  1.1, to add entities to **external** devices"* — a description of hardware
+  plugged into an interface, whose endpoints are not ones we could send on.
+- `MIDISourceCreate` / `MIDIDestinationCreate` — *"Virtual sources and
+  destinations don't have entities."*
+
+Grouping therefore needs a driver plugin in `/Library/Audio/MIDI Drivers`,
+which is an admin install into a system location, loaded by `MIDIServer` — so a
+crash in it takes MIDI down for every application on the machine, not just this
+one. That was weighed and declined: the grouping is cosmetic (Ableton binds on
+port names and the Device Inquiry family code, both of which already match),
+while the cost is the whole "nothing to install" property of this page. What
+*is* available to an application is the identity above, which the same headers
+permit in as many words: *"Creators of virtual endpoints may set this property
+on their endpoints."*
+
+`vrmc-bridge --check` verifies it on macOS by opening a probe port, stamping
+it, and reading all four fields back through CoreMIDI. That round trip is the
+only honest test: no machine in CI runs the unit tests *and* has CoreMIDI, and
+`MIDIObjectSetStringProperty` given an unrecognised property id returns success
+— so a wrong constant is invisible from the inside.
 
 ### When the headset drops
 

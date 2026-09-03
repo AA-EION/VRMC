@@ -26,6 +26,7 @@ export const LAUNCHPAD_X: DeviceSpec = {
   sysexDeviceId: 0x0c,
   familyCode: [0x03, 0x01],
   firmwareVersion: [0x09, 0x09, 0x09],
+  manufacturer: 'Focusrite - Novation',
 
   // Names and order as the hardware presents them, from CoreFW's USB descriptor
   // (src/sys/driver/launchpad-x/usb.rs and common/usb/descriptors.rs): the DAW

@@ -1,0 +1,307 @@
+// SPDX-License-Identifier: GPL-3.0-only
+
+import { requireNative } from '../native.js';
+
+/**
+ * Giving a virtual endpoint the identity the hardware has.
+ *
+ * WHAT THIS CANNOT DO, SO THE LIMIT IS WRITTEN DOWN ONCE
+ * A real Launchpad is one USB device, so macOS shows one CoreMIDI *device*
+ * containing two *entities*. This cannot reproduce that, and no application
+ * can: CoreMIDI's headers are explicit that `MIDISetupAddDevice` is "only MIDI
+ * drivers may make this call", that a non-driver calling `MIDIDeviceCreate` or
+ * `MIDIDeviceAddEntity` gets an *external* device — a description of hardware
+ * plugged into an interface, whose endpoints are not ones we could send on —
+ * and that "virtual sources and destinations don't have entities". Grouping
+ * needs a driver plugin in /Library/Audio/MIDI Drivers, which is an admin
+ * install and a different product.
+ *
+ * WHAT IT CAN DO, AND WHY IT IS WORTH DOING
+ * The same headers say, for manufacturer, model and (since CoreMIDI 1.3)
+ * display name: "Creators of virtual endpoints may set this property on their
+ * endpoints." Those are exactly the fields a host reads to decide what to call
+ * a port and who made it. Setting them means a MIDI monitor, an Audio MIDI
+ * Setup inspector and any host that surfaces manufacturer or model see
+ * "Focusrite - Novation" and "Launchpad X" rather than nothing — and the
+ * display string becomes the one the real device produces rather than one we
+ * happened to name the endpoint.
+ *
+ * HOW IT TALKS TO CoreMIDI
+ * Through koffi, the same FFI the Windows backend uses for teVirtualMIDI, so
+ * this adds no new kind of dependency. The property ids are read as *data
+ * symbols* from the framework rather than rebuilt from the string literals
+ * they happen to hold: `kMIDIPropertyName` is a CFStringRef global, and
+ * reading it is exact, where hardcoding "name" is a guess that would fail
+ * silently — `MIDIObjectSetStringProperty` with an id CoreMIDI does not
+ * recognise sets some other property and returns success.
+ *
+ * Everything here is best-effort. A failure costs the endpoint its metadata
+ * and nothing else: the port still exists, still sends and still receives, so
+ * a missing koffi or an OS that moved a symbol must not stop MIDI working.
+ */
+
+/** What a host should be told about an endpoint. */
+export interface EndpointIdentity {
+  /** The Apple-recommended user-visible name: device and endpoint combined. */
+  displayName: string;
+  /** The USB manufacturer string, e.g. "Focusrite - Novation". */
+  manufacturer: string;
+  /** The USB product string, e.g. "Launchpad X". */
+  model: string;
+  /**
+   * The endpoint's own name, if it should differ from the one it was created
+   * with. Real hardware names the endpoint "LPX (DAW)" and lets the host
+   * prepend the device; we create it pre-combined so it is unique among
+   * several emulated devices, then set the bare name here so anything reading
+   * `kMIDIPropertyName` sees what the hardware reports.
+   */
+  name?: string;
+}
+
+/** CFStringEncoding for UTF-8. */
+const K_CF_STRING_ENCODING_UTF8 = 0x0800_0100;
+
+const CORE_MIDI = '/System/Library/Frameworks/CoreMIDI.framework/CoreMIDI';
+const CORE_FOUNDATION = '/System/Library/Frameworks/CoreFoundation.framework/CoreFoundation';
+
+/** The slice of koffi used here, declared structurally so this typechecks
+ * without the optional dependency installed. */
+interface KoffiLike {
+  load(path: string): {
+    func(name: string, result: unknown, args: unknown[]): unknown;
+    symbol(name: string): unknown;
+  };
+  decode(pointer: unknown, type: string): unknown;
+  alloc(type: string, count: number): unknown;
+  decodeString?(pointer: unknown): string;
+}
+
+interface Bound {
+  setStringProperty(object: number, property: unknown, value: unknown): number;
+  getStringProperty(object: number, property: unknown, out: unknown): number;
+  sourceCount(): number;
+  source(index: number): number;
+  destinationCount(): number;
+  destination(index: number): number;
+  cfStringCreate(alloc: unknown, cstr: Buffer, encoding: number): unknown;
+  cfStringGetCString(str: unknown, buffer: Buffer, size: number, encoding: number): boolean;
+  cfRelease(cf: unknown): void;
+  property: {
+    name: unknown;
+    manufacturer: unknown;
+    model: unknown;
+    displayName: unknown;
+  };
+  koffi: KoffiLike;
+}
+
+/** Why the last attempt failed, if it did. Read for reporting. */
+let lastError = '';
+
+export function coreMidiIdentityError(): string {
+  return lastError;
+}
+
+let bound: Bound | null | undefined;
+
+/**
+ * Bind the two frameworks, once.
+ *
+ * `undefined` means "not tried yet", `null` means "tried and cannot" — the
+ * distinction matters because a failure here is permanent for the process and
+ * retrying it per port would pay the same cost repeatedly.
+ */
+function bind(): Bound | null {
+  if (bound !== undefined) return bound;
+  bound = null;
+
+  if (process.platform !== 'darwin') {
+    lastError = 'not macOS';
+    return null;
+  }
+
+  try {
+    const koffi = requireNative<KoffiLike>('koffi');
+    const midi = koffi.load(CORE_MIDI);
+    const cf = koffi.load(CORE_FOUNDATION);
+
+    /*
+     * `kMIDIPropertyName` and friends are `const CFStringRef` globals. The
+     * symbol is the address *of the variable*, so it has to be dereferenced to
+     * get the CFStringRef the variable holds.
+     */
+    const constant = (name: string): unknown => {
+      const address = midi.symbol(name);
+      const value = koffi.decode(address, 'void *');
+      if (value === null || value === undefined) {
+        throw new Error(`CoreMIDI exports no ${name}`);
+      }
+      return value;
+    };
+
+    bound = {
+      // ItemCount is unsigned long; MIDIObjectRef and MIDIEndpointRef are UInt32.
+      setStringProperty: midi.func('MIDIObjectSetStringProperty', 'int32', [
+        'uint32',
+        'void *',
+        'void *',
+      ]) as Bound['setStringProperty'],
+      getStringProperty: midi.func('MIDIObjectGetStringProperty', 'int32', [
+        'uint32',
+        'void *',
+        'void **',
+      ]) as Bound['getStringProperty'],
+      sourceCount: midi.func('MIDIGetNumberOfSources', 'ulong', []) as Bound['sourceCount'],
+      source: midi.func('MIDIGetSource', 'uint32', ['ulong']) as Bound['source'],
+      destinationCount: midi.func(
+        'MIDIGetNumberOfDestinations',
+        'ulong',
+        [],
+      ) as Bound['destinationCount'],
+      destination: midi.func('MIDIGetDestination', 'uint32', ['ulong']) as Bound['destination'],
+      cfStringCreate: cf.func('CFStringCreateWithCString', 'void *', [
+        'void *',
+        'char *',
+        'uint32',
+      ]) as Bound['cfStringCreate'],
+      cfStringGetCString: cf.func('CFStringGetCString', 'bool', [
+        'void *',
+        'char *',
+        'long',
+        'uint32',
+      ]) as Bound['cfStringGetCString'],
+      cfRelease: cf.func('CFRelease', 'void', ['void *']) as Bound['cfRelease'],
+      property: {
+        name: constant('kMIDIPropertyName'),
+        manufacturer: constant('kMIDIPropertyManufacturer'),
+        model: constant('kMIDIPropertyModel'),
+        displayName: constant('kMIDIPropertyDisplayName'),
+      },
+      koffi,
+    };
+    lastError = '';
+  } catch (err) {
+    lastError = err instanceof Error ? err.message : String(err);
+    bound = null;
+  }
+  return bound;
+}
+
+/** A CFString holding `value`, which the caller must release. */
+function cfString(b: Bound, value: string): unknown {
+  const buffer = Buffer.from(value + '\0', 'utf8');
+  const str = b.cfStringCreate(null, buffer, K_CF_STRING_ENCODING_UTF8);
+  if (str === null || str === undefined) throw new Error(`could not make a CFString for ${value}`);
+  return str;
+}
+
+/** Read one string property, or '' when it has none. */
+function readProperty(b: Bound, endpoint: number, property: unknown): string {
+  const out = b.koffi.alloc('void *', 1);
+  if (b.getStringProperty(endpoint, property, out) !== 0) return '';
+  const str = b.koffi.decode(out, 'void *');
+  if (str === null || str === undefined) return '';
+  try {
+    // 512 is generous: these are port names, not documents.
+    const buffer = Buffer.alloc(512);
+    if (!b.cfStringGetCString(str, buffer, buffer.length, K_CF_STRING_ENCODING_UTF8)) return '';
+    const end = buffer.indexOf(0);
+    return buffer.toString('utf8', 0, end === -1 ? buffer.length : end);
+  } finally {
+    // MIDIObjectGetStringProperty gives the caller a reference to release.
+    b.cfRelease(str);
+  }
+}
+
+/** Every endpoint on the system, sources and destinations both. */
+function* endpoints(b: Bound): Generator<number> {
+  for (let i = 0; i < b.sourceCount(); i++) yield b.source(i);
+  for (let i = 0; i < b.destinationCount(); i++) yield b.destination(i);
+}
+
+/**
+ * Find the endpoint currently called `name`.
+ *
+ * By name because that is the only handle RtMidi gives us — it creates the
+ * endpoint and keeps the `MIDIEndpointRef` to itself. Names are unique at this
+ * point precisely because the manager creates them pre-combined
+ * ("Launchpad X LPX (DAW)"); the bare name is set afterwards, by which time we
+ * no longer need to find it.
+ */
+function findEndpoint(b: Bound, name: string): number | null {
+  for (const endpoint of endpoints(b)) {
+    if (readProperty(b, endpoint, b.property.name) === name) return endpoint;
+  }
+  return null;
+}
+
+/**
+ * Give the endpoint named `createdAs` the identity of real hardware.
+ *
+ * Returns whether every property was set. Best-effort by design: a false here
+ * means a port with less metadata, never a port that does not work.
+ */
+export function stampIdentity(createdAs: string, identity: EndpointIdentity): boolean {
+  const b = bind();
+  if (b === null) return false;
+
+  try {
+    const endpoint = findEndpoint(b, createdAs);
+    if (endpoint === null) {
+      lastError = `no CoreMIDI endpoint named "${createdAs}"`;
+      return false;
+    }
+
+    // Display name first, and the endpoint's own name last: renaming it is
+    // what makes it unfindable, so nothing that needs the old name may follow.
+    const ordered: [unknown, string][] = [
+      [b.property.displayName, identity.displayName],
+      [b.property.manufacturer, identity.manufacturer],
+      [b.property.model, identity.model],
+    ];
+    if (identity.name !== undefined) ordered.push([b.property.name, identity.name]);
+
+    for (const [property, value] of ordered) {
+      const str = cfString(b, value);
+      try {
+        const status = b.setStringProperty(endpoint, property, str);
+        if (status !== 0) {
+          lastError = `CoreMIDI refused a property on "${createdAs}" (OSStatus ${status})`;
+          return false;
+        }
+      } finally {
+        b.cfRelease(str);
+      }
+    }
+    lastError = '';
+    return true;
+  } catch (err) {
+    lastError = err instanceof Error ? err.message : String(err);
+    return false;
+  }
+}
+
+/**
+ * Read back what a host would see for the endpoint named `name`.
+ *
+ * Exists for the self-test: no machine that runs this project's test suite has
+ * CoreMIDI, so the only honest verification is on a macOS runner, round-tripping
+ * through the real framework. See `--check-midi`.
+ */
+export function readIdentity(name: string): EndpointIdentity | null {
+  const b = bind();
+  if (b === null) return null;
+  try {
+    const endpoint = findEndpoint(b, name);
+    if (endpoint === null) return null;
+    return {
+      name: readProperty(b, endpoint, b.property.name),
+      displayName: readProperty(b, endpoint, b.property.displayName),
+      manufacturer: readProperty(b, endpoint, b.property.manufacturer),
+      model: readProperty(b, endpoint, b.property.model),
+    };
+  } catch (err) {
+    lastError = err instanceof Error ? err.message : String(err);
+    return null;
+  }
+}

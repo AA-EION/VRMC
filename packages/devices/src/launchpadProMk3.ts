@@ -33,6 +33,7 @@ export const LAUNCHPAD_PRO_MK3: DeviceSpec = {
   sysexDeviceId: 0x0e,
   familyCode: [0x23, 0x01],
   firmwareVersion: [0x09, 0x09, 0x09],
+  manufacturer: 'Focusrite - Novation',
 
   // DAW first, then MIDI — the cable order in CoreFW's descriptor, same as
   // every other model. The Pro MK3 presents a third port carrying DIN output,

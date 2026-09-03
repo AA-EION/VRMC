@@ -90,6 +90,16 @@ export interface DeviceSpec {
   firmwareVersion: readonly [number, number, number];
 
   /**
+   * The USB manufacturer string, as the hardware reports it.
+   *
+   * Not decoration: on macOS this is published as the endpoint's
+   * `kMIDIPropertyManufacturer`, which is one of the few identity fields a
+   * virtual endpoint is allowed to carry. Taken from CoreFW's per-model
+   * `usb.rs`, where it is the same for every Launchpad.
+   */
+  manufacturer: string;
+
+  /**
    * MIDI port names, in the order the hardware presents them.
    *
    * Real Launchpads expose two ports: a "DAW" port carrying the session
