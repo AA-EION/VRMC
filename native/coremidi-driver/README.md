@@ -43,9 +43,28 @@ CI builds it on every push, so a compile error shows up without a Mac.
 
 ## Install
 
+From CI, download `vrmc-coremidi-driver` and unpack the tarball inside it —
+`tar`, not the Finder, because the bundle has to keep its name, its layout and
+the executable bit on `Contents/MacOS/VRMC`:
+
+```sh
+tar -xzf vrmc-coremidi-driver.tar.gz
+```
+
+**Check the signature survived the trip before installing.** If this fails, the
+transfer broke the bundle and anything MIDIServer then does tells you nothing:
+
+```sh
+codesign --verify --strict --verbose=2 VRMC.plugin
+```
+
+It should say `valid on disk` and `satisfies its Designated Requirement`, and
+`codesign --display` should show `Signature=adhoc` with `TeamIdentifier=not
+set`. That is the state being tested. Then:
+
 ```sh
 sudo mkdir -p "/Library/Audio/MIDI Drivers"
-sudo cp -R native/coremidi-driver/build/VRMC.plugin "/Library/Audio/MIDI Drivers/"
+sudo cp -R VRMC.plugin "/Library/Audio/MIDI Drivers/"
 sudo killall MIDIServer 2>/dev/null || true
 ```
 

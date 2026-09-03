@@ -54,10 +54,21 @@ jobs:
           # them.
           lipo -archs "$bundle/Contents/MacOS/VRMC" | tee /dev/stderr | grep -q arm64
           lipo -archs "$bundle/Contents/MacOS/VRMC" | grep -q x86_64
+      # Tarred, not uploaded as a directory.
+      #
+      # upload-artifact zips whatever it is given, and a zip of the bundle
+      # *directory* arrives as a bare `Contents/` with the `VRMC.plugin` name
+      # gone, and with no guarantee the executable bit on Contents/MacOS/VRMC
+      # survives. Either would make MIDIServer ignore the plugin for a reason
+      # that has nothing to do with its signature — which is the one thing this
+      # spike exists to measure, so a false negative here would be worse than
+      # no result at all.
+      - name: Pack the bundle
+        run: tar -czf vrmc-coremidi-driver.tar.gz -C native/coremidi-driver/build VRMC.plugin
       - uses: actions/upload-artifact@v4
         with:
           name: vrmc-coremidi-driver
-          path: native/coremidi-driver/build/VRMC.plugin
+          path: vrmc-coremidi-driver.tar.gz
           if-no-files-found: error
 
   # Builds the web image and proves it actually serves the client.
