@@ -26,6 +26,40 @@ jobs:
       - run: pnpm --filter @vrmc/xr-client exec playwright install --with-deps chromium
       - run: pnpm test
 
+  # Compiles the CoreMIDI driver plugin against a real macOS SDK.
+  #
+  # It is one translation unit and cannot be built or run anywhere else, so
+  # without this a mistake in it is invisible until somebody with a Mac tries.
+  # `-Werror` is in build.sh, so this is a real check rather than a smoke test.
+  # It does not prove the driver *loads* — only MIDIServer on a real machine
+  # can say that, which is what the spike is for.
+  coremidi-driver:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the driver
+        run: native/coremidi-driver/build.sh
+      - name: Check the bundle is what CFBundle expects
+        run: |
+          set -euo pipefail
+          bundle=native/coremidi-driver/build/VRMC.plugin
+          # The factory named in Info.plist must exist in the binary, or
+          # MIDIServer finds the bundle, fails to resolve the symbol and loads
+          # nothing — with no error the user ever sees.
+          nm -gU "$bundle/Contents/MacOS/VRMC" | grep -q VrmcDriverFactory
+          plutil -lint "$bundle/Contents/Info.plist"
+          factory=$(plutil -extract CFPlugInTypes.ECDE9574-0FE4-11D4-BB1A-0050E4CEA526.0 raw -o - "$bundle/Contents/Info.plist")
+          plutil -extract "CFPlugInFactories.$factory" raw -o - "$bundle/Contents/Info.plist" | grep -qx VrmcDriverFactory
+          # Both architectures, or the driver silently does not load on one of
+          # them.
+          lipo -archs "$bundle/Contents/MacOS/VRMC" | tee /dev/stderr | grep -q arm64
+          lipo -archs "$bundle/Contents/MacOS/VRMC" | grep -q x86_64
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vrmc-coremidi-driver
+          path: native/coremidi-driver/build/VRMC.plugin
+          if-no-files-found: error
+
   # Builds the web image and proves it actually serves the client.
   #
   # The Dockerfile and the nginx config cannot be checked by a typecheck or a

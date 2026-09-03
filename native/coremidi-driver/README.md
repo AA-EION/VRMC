@@ -1,0 +1,108 @@
+# VRMC CoreMIDI driver (spike)
+
+One device with three ports, the way a real Launchpad appears — and a test of
+whether that can be shipped for free.
+
+## What this answers
+
+Everything else in VRMC opens **virtual endpoints**, which is all an
+application may do. A virtual endpoint has no device behind it, so the
+Launchpad Pro MK3's three ports are three separate devices in every DAW's list,
+where the hardware is one device with three ports. CoreMIDI's header is
+explicit that the grouping API belongs to drivers: `MIDIDeviceCreate` takes a
+`MIDIDriverRef owner`, and `MIDISetupAddDevice` is documented for drivers.
+
+There are two kinds of driver on macOS 26:
+
+| | Entitlement | Cost | Signing |
+|---|---|---|---|
+| **MIDIDriverKit** (`.dext`) | `com.apple.developer.driverkit.family.midi`, granted by Apple per team | Developer Program membership | Developer ID + notarisation. Restricted entitlements **cannot** be ad-hoc signed |
+| **CoreMIDI plugin** (this) | none | none | unknown — that is the question |
+
+`MIDIDriverInterface` is not marked deprecated in Apple's current
+documentation, and third parties still ship plugins for macOS 26. But theirs
+are Developer ID signed and notarised. Whether MIDIServer will load an
+**ad-hoc** signed one decides whether VRMC can present as hardware without an
+Apple Developer account.
+
+If it loads, the full driver is worth building. If it does not, no free path
+exists and we have spent days rather than weeks establishing that.
+
+## Build
+
+```sh
+native/coremidi-driver/build.sh
+```
+
+Produces `native/coremidi-driver/build/VRMC.plugin`, universal, ad-hoc signed.
+CI builds it on every push, so a compile error shows up without a Mac.
+
+## Install
+
+```sh
+sudo mkdir -p "/Library/Audio/MIDI Drivers"
+sudo cp -R native/coremidi-driver/build/VRMC.plugin "/Library/Audio/MIDI Drivers/"
+sudo killall MIDIServer 2>/dev/null || true
+```
+
+`MIDIServer` is launched on demand, so killing it is how you make it reload;
+it comes back the moment anything asks for MIDI. Open **Audio MIDI Setup** →
+*Window* → *Show MIDI Studio* to make something ask.
+
+## What to look for
+
+**It worked** if MIDI Studio shows a *single* icon named `Launchpad Pro MK3`,
+and double-clicking it lists three ports — `LPProMK3 MIDI`, `LPProMK3 DIN`,
+`LPProMK3 DAW`. One device, three ports, with no bridge running: that is the
+thing an application cannot do, and every DAW reads the same setup, so it is
+not an Ableton-specific result.
+
+**It was rejected** if nothing appears. Check whether MIDIServer refused it:
+
+```sh
+log show --last 10m --predicate 'process == "MIDIServer"' --info | grep -i -E "vrmc|plugin|sign|reject|denied"
+```
+
+A code-signing or library-validation complaint is the answer we are looking
+for — it means ad-hoc is not enough and a Developer ID is required either way.
+Silence with no device is a different failure (a malformed plist, or the wrong
+architecture) and is worth reporting with the log.
+
+Also worth capturing either way:
+
+```sh
+codesign --display --verbose=4 "/Library/Audio/MIDI Drivers/VRMC.plugin"
+spctl --assess --type install --verbose "/Library/Audio/MIDI Drivers/VRMC.plugin" || true
+```
+
+## Uninstall
+
+```sh
+sudo rm -rf "/Library/Audio/MIDI Drivers/VRMC.plugin"
+sudo killall MIDIServer 2>/dev/null || true
+```
+
+The device may linger in MIDI Studio afterwards as an offline device, because
+MIDIServer persists a driver's devices in the MIDI setup. *MIDI Studio* →
+*Configuration* → *Remove* clears it.
+
+## What it deliberately does not do
+
+`Send()` discards MIDI and nothing connects this to the bridge. Wiring the two
+together is the next step and only worth taking if the above works. Note also
+that this runs **inside MIDIServer** — a crash here takes MIDI down for every
+application on the machine, which is why the spike does as little as it can.
+
+## One thing a driver will not fix
+
+Ableton's automatic control-surface detection keys on USB vendor and product
+IDs — `Launchpad_Pro_MK3/__init__.py` declares
+`controller_id(vendor_id=4661, product_ids=[291], ...)`. A driver-created
+device is still not a USB device, so whether Live sources those IDs somewhere a
+driver can populate is unknown and untested.
+
+What the driver *does* fix is the presentation: one device with three
+correctly-named ports, in every DAW rather than one. Manual assignment works
+today in any host, because the SysEx identity reply already matches what Live's
+`IdentifiableControlSurface` compares — and Logic identifies control surfaces
+by that same inquiry rather than by USB id.
