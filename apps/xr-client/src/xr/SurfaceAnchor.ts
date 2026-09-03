@@ -1,5 +1,5 @@
-import { bestSurface, poseOnSurface } from './anchors.js';
-import type { SurfacePose } from '@vrmc/layout';
+import { bestSurface, poseOnSurface } from "./anchors.js";
+import type { SurfacePose } from "@vrmc/layout";
 
 /**
  * Finding the real surface under a device, and keeping it there.
@@ -81,6 +81,11 @@ export class SurfaceAnchor {
   onFailed: ((deviceId: number, reason: string) => void) | null = null;
 
   /** Ask for a device to be put down on whatever is under it. */
+  /** How many drops are still waiting for a surface. */
+  get pendingCount(): number {
+    return this.pending.size;
+  }
+
   request(deviceId: number, pose: SurfacePose): void {
     this.pending.set(deviceId, { deviceId, pose });
   }
@@ -153,7 +158,8 @@ export class SurfaceAnchor {
    * longer than that to appear.
    */
   timeOut(reason: string): void {
-    for (const request of this.pending.values()) this.onFailed?.(request.deviceId, reason);
+    for (const request of this.pending.values())
+      this.onFailed?.(request.deviceId, reason);
     this.pending.clear();
   }
 
@@ -167,7 +173,7 @@ export class SurfaceAnchor {
     const planes = frame.detectedPlanes;
     if (planes !== undefined) {
       for (const plane of planes) {
-        if (plane.orientation !== 'horizontal') continue;
+        if (plane.orientation !== "horizontal") continue;
         const pose = frame.getPose?.(plane.planeSpace, space);
         if (pose === undefined || pose === null) continue;
         out.push(pose.transform.position.y);
@@ -267,8 +273,16 @@ export class SurfaceAnchor {
       held.last[2] = z;
       // Position only: the tilt and the yaw are the ones the device was placed
       // with, and an anchor has no opinion about either.
-      held.pose = { centre: [x, y, z], tiltDeg: held.pose.tiltDeg, yawDeg: held.pose.yawDeg };
-      this.onPlaced?.({ deviceId: held.deviceId, pose: held.pose, anchored: true });
+      held.pose = {
+        centre: [x, y, z],
+        tiltDeg: held.pose.tiltDeg,
+        yawDeg: held.pose.yawDeg,
+      };
+      this.onPlaced?.({
+        deviceId: held.deviceId,
+        pose: held.pose,
+        anchored: true,
+      });
     }
   }
 }

@@ -1,34 +1,48 @@
 #!/usr/bin/env node
-import { networkInterfaces } from 'node:os';
+import { networkInterfaces } from "node:os";
 import {
   DeviceId,
   DeviceStatus,
   FIRST_DYNAMIC_DEVICE_ID,
   isPrivateAddress,
-} from '@vrmc/protocol';
-import { ArgError, parseArgs, USAGE, type BridgeConfig } from './config.js';
-import { Router } from './core/Router.js';
-import { loadWorkspace, saveWorkspace } from './core/workspaceFile.js';
-import { checkEndpointIdentity, checkNativeModules, formatChecks } from './core/selfCheck.js';
-import { BRIDGE_VERSION, runSelfTest } from './core/selfTest.js';
-import { autostartState, toggleAutostart } from './setup/autostart.js';
-import { runFirstLaunch } from './setup/firstRun.js';
-import { ensureCertificate } from './setup/certificate.js';
-import { PairingPublisher } from './setup/pairing.js';
-import { copyToClipboard, openUrl } from './tray/desktop.js';
-import { buildMenu, buildTooltip, TrayAction, type TrayState } from './tray/menu.js';
-import { TrayController } from './tray/TrayController.js';
-import { DEFAULT_PORT_NAME_TEMPLATE, DeviceManager } from './devices/DeviceManager.js';
-import { PresenceGate } from './core/PresenceGate.js';
-import { listPorts } from './midi/openPort.js';
-import { Broadcaster } from './net/Broadcaster.js';
-import { RtcTransport } from './net/RtcTransport.js';
-import { SignalClient } from './net/SignalClient.js';
-import { UdpServer } from './net/UdpServer.js';
-import { WsServer } from './net/WsServer.js';
+} from "@vrmc/protocol";
+import { ArgError, parseArgs, USAGE, type BridgeConfig } from "./config.js";
+import { Router } from "./core/Router.js";
+import { loadWorkspace, saveWorkspace } from "./core/workspaceFile.js";
+import {
+  checkEndpointIdentity,
+  checkNativeModules,
+  formatChecks,
+} from "./core/selfCheck.js";
+import { BRIDGE_VERSION, runSelfTest } from "./core/selfTest.js";
+import { autostartState, toggleAutostart } from "./setup/autostart.js";
+import { runFirstLaunch } from "./setup/firstRun.js";
+import { ensureCertificate } from "./setup/certificate.js";
+import { PairingPublisher } from "./setup/pairing.js";
+import { copyToClipboard, openUrl } from "./tray/desktop.js";
+import {
+  buildMenu,
+  buildTooltip,
+  TrayAction,
+  type TrayState,
+} from "./tray/menu.js";
+import { TrayController } from "./tray/TrayController.js";
+import {
+  DEFAULT_PORT_NAME_TEMPLATE,
+  DeviceManager,
+} from "./devices/DeviceManager.js";
+import { PresenceGate } from "./core/PresenceGate.js";
+import { listPorts } from "./midi/openPort.js";
+import { Broadcaster } from "./net/Broadcaster.js";
+import { RtcTransport } from "./net/RtcTransport.js";
+import { SignalClient } from "./net/SignalClient.js";
+import { UdpServer } from "./net/UdpServer.js";
+import { WsServer } from "./net/WsServer.js";
 
 const log = (message: string): void => {
-  process.stdout.write(`${new Date().toISOString().slice(11, 23)}  ${message}\n`);
+  process.stdout.write(
+    `${new Date().toISOString().slice(11, 23)}  ${message}\n`,
+  );
 };
 
 /**
@@ -39,18 +53,19 @@ const log = (message: string): void => {
  * what the user needs, since the Quest connects over the LAN, never loopback.
  */
 function reachableAddresses(host: string): string[] {
-  if (host !== '0.0.0.0' && host !== '::') return [host];
+  if (host !== "0.0.0.0" && host !== "::") return [host];
   const out: string[] = [];
   for (const addresses of Object.values(networkInterfaces())) {
     for (const address of addresses ?? []) {
-      if (address.family === 'IPv4' && !address.internal) out.push(address.address);
+      if (address.family === "IPv4" && !address.internal)
+        out.push(address.address);
     }
   }
-  return out.length > 0 ? out : ['127.0.0.1'];
+  return out.length > 0 ? out : ["127.0.0.1"];
 }
 
 async function main(): Promise<void> {
-  let config: BridgeConfig | 'help';
+  let config: BridgeConfig | "help";
   try {
     config = parseArgs(process.argv.slice(2));
   } catch (err) {
@@ -61,7 +76,7 @@ async function main(): Promise<void> {
     throw err;
   }
 
-  if (config === 'help') {
+  if (config === "help") {
     process.stdout.write(USAGE);
     return;
   }
@@ -81,12 +96,14 @@ async function main(): Promise<void> {
     const identity = await checkEndpointIdentity();
     if (identity !== null) checks.push(identity);
     const { lines, ok } = formatChecks(checks);
-    process.stdout.write(`vrmc-bridge ${BRIDGE_VERSION} (${process.platform}-${process.arch})\n`);
-    process.stdout.write(`${lines.join('\n')}\n`);
+    process.stdout.write(
+      `vrmc-bridge ${BRIDGE_VERSION} (${process.platform}-${process.arch})\n`,
+    );
+    process.stdout.write(`${lines.join("\n")}\n`);
     if (!ok) {
       process.stdout.write(
-        '\nThis build is missing a native library and cannot work.\n' +
-          'Re-download it, or report this with the lines above.\n',
+        "\nThis build is missing a native library and cannot work.\n" +
+          "Re-download it, or report this with the lines above.\n",
       );
     }
     process.exit(ok ? 0 : 1);
@@ -96,8 +113,8 @@ async function main(): Promise<void> {
     const ports = await listPorts();
     process.stdout.write(
       ports.length > 0
-        ? `MIDI outputs:\n${ports.map((p, i) => `  [${i}] ${p}`).join('\n')}\n`
-        : 'No MIDI output ports found.\n',
+        ? `MIDI outputs:\n${ports.map((p, i) => `  [${i}] ${p}`).join("\n")}\n`
+        : "No MIDI output ports found.\n",
     );
     return;
   }
@@ -125,7 +142,7 @@ async function main(): Promise<void> {
     if (saveTimer !== null) clearTimeout(saveTimer);
     saveTimer = setTimeout(() => {
       saveTimer = null;
-      if (!saveWorkspace(workspace)) log('could not write the workspace file');
+      if (!saveWorkspace(workspace)) log("could not write the workspace file");
     }, 1000);
     saveTimer.unref();
   };
@@ -182,7 +199,7 @@ async function main(): Promise<void> {
     await devices.add(DeviceId.PADS, config.portName);
     devices.alias(DeviceId.KEYS, DeviceId.PADS);
     devices.alias(DeviceId.KNOBS, DeviceId.PADS);
-    if (config.startupDevice !== 'none') {
+    if (config.startupDevice !== "none") {
       await devices.add(FIRST_DYNAMIC_DEVICE_ID, config.startupDevice);
     }
   };
@@ -239,21 +256,28 @@ async function main(): Promise<void> {
     }
   };
 
-  const router = new Router(devices, {
-    onPanic: (released) => log(`panic: released ${released} note(s)`),
-    onHello: (name) => {
-      log(`client identified as "${name}"`);
-      // The client saying hello is the only signal a WebSocket connection
-      // gives that it is ready to be told anything.
-      resyncHeadset();
+  const router = new Router(
+    devices,
+    {
+      onPanic: (released) => log(`panic: released ${released} note(s)`),
+      onHello: (name) => {
+        log(`client identified as "${name}"`);
+        // The client saying hello is the only signal a WebSocket connection
+        // gives that it is ready to be told anything.
+        resyncHeadset();
+      },
+      onBye: () => log("client said goodbye"),
+      onRosterChange: () => broadcast?.sendRoster(devices.roster()),
+      onPong: () => broadcast?.notePong(),
+      // Rate-limited by the caller below; a flood of malformed packets should not
+      // itself become the thing that stalls the process.
+      onMalformed: throttle(
+        (reason) => log(`dropped malformed packet: ${reason}`),
+        1000,
+      ),
     },
-    onBye: () => log('client said goodbye'),
-    onRosterChange: () => broadcast?.sendRoster(devices.roster()),
-    onPong: () => broadcast?.notePong(),
-    // Rate-limited by the caller below; a flood of malformed packets should not
-    // itself become the thing that stalls the process.
-    onMalformed: throttle((reason) => log(`dropped malformed packet: ${reason}`), 1000),
-  }, workspace);
+    workspace,
+  );
 
   // TLS on the WebSocket is opt-in, and almost nobody needs it. The headset
   // reaches this bridge over a WebRTC data channel — authenticated by DTLS
@@ -264,15 +288,19 @@ async function main(): Promise<void> {
   let tlsKey = config.tlsKey;
   if (config.selfSignedTls && (tlsCert === undefined || tlsKey === undefined)) {
     try {
-      const generated = await ensureCertificate(reachableAddresses(config.host));
+      const generated = await ensureCertificate(
+        reachableAddresses(config.host),
+      );
       tlsCert = generated.certPath;
       tlsKey = generated.keyPath;
       if (generated.created) {
-        log(`generated a TLS certificate for ${generated.names.join(', ')}`);
+        log(`generated a TLS certificate for ${generated.names.join(", ")}`);
       }
     } catch (err) {
-      log(`could not prepare TLS: ${err instanceof Error ? err.message : String(err)}`);
-      log('continuing on plain ws://');
+      log(
+        `could not prepare TLS: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      log("continuing on plain ws://");
     }
   }
 
@@ -289,6 +317,7 @@ async function main(): Promise<void> {
   // Every headset-bound packet fans out through here, so a client on the
   // WebSocket and one on a data channel see exactly the same stream.
   const bus = new Broadcaster(router.stats);
+  bus.onLog = log;
   broadcast = bus;
   if (ws !== null) bus.add(ws);
 
@@ -316,7 +345,9 @@ async function main(): Promise<void> {
       clients: bus.clientCount,
       devices: devices.roster(),
       lastPacketAgoMs:
-        router.stats.lastPacketAt === 0 ? null : Date.now() - router.stats.lastPacketAt,
+        router.stats.lastPacketAt === 0
+          ? null
+          : Date.now() - router.stats.lastPacketAt,
       packetsIn: router.stats.packets,
       packetsOut: router.stats.packetsOut,
       eventsIn: router.stats.events,
@@ -325,13 +356,15 @@ async function main(): Promise<void> {
       peakJitterMs: router.stats.peakJitterMs,
       lossRatio: router.stats.lossRatio,
       malformed: router.stats.malformed,
-      midiAvailable: devices.roster().some((d) => d.status === DeviceStatus.READY),
-      pairingCode: pairing?.displayCode ?? '',
+      midiAvailable: devices
+        .roster()
+        .some((d) => d.status === DeviceStatus.READY),
+      pairingCode: pairing?.displayCode ?? "",
       pairingRegistered: pairing?.isRegistered ?? false,
-      pairingError: pairing?.error ?? '',
+      pairingError: pairing?.error ?? "",
       siteUrl: config.pairingService,
       rtcPeers: rtc?.peerCount ?? 0,
-      rtcError: signalling?.error ?? '',
+      rtcError: signalling?.error ?? "",
     });
 
     // Audits the whole outbound path, so it covers whichever transport the
@@ -340,7 +373,11 @@ async function main(): Promise<void> {
   }
 
   const udp = config.enableUdp
-    ? new UdpServer(router, { port: config.udpPort, host: config.host, onLog: log })
+    ? new UdpServer(router, {
+        port: config.udpPort,
+        host: config.host,
+        onLog: log,
+      })
     : null;
 
   try {
@@ -349,13 +386,13 @@ async function main(): Promise<void> {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log(`failed to start: ${message}`);
-    if (message.includes('EADDRINUSE')) {
-      log('Another copy of the bridge is probably already running.');
+    if (message.includes("EADDRINUSE")) {
+      log("Another copy of the bridge is probably already running.");
     }
     process.exit(1);
   }
 
-  const scheme = ws?.secure === true ? 'wss' : 'ws';
+  const scheme = ws?.secure === true ? "wss" : "ws";
   /*
    * Say that no ports exist yet, and why, because their absence is the thing
    * somebody will go looking for. A DAW open on the other monitor lists
@@ -363,8 +400,8 @@ async function main(): Promise<void> {
    * rather than as the design.
    */
   log(
-    config.startupDevice === 'none'
-      ? 'no MIDI ports yet: they open when a headset connects and close when it leaves'
+    config.startupDevice === "none"
+      ? "no MIDI ports yet: they open when a headset connects and close when it leaves"
       : `no MIDI ports yet: a ${config.startupDevice} opens when a headset connects`,
   );
   if (ws !== null) {
@@ -382,7 +419,7 @@ async function main(): Promise<void> {
   // find this machine without anyone typing an address. The code is also what
   // the WebRTC handshake is keyed on, so the two go up together.
   const pairing =
-    config.pairingService === ''
+    config.pairingService === ""
       ? null
       : new PairingPublisher({
           serviceUrl: config.pairingService,
@@ -412,9 +449,11 @@ async function main(): Promise<void> {
         onLog: log,
       });
       signalling.start();
-      log('waiting for a headset to pair');
+      log("waiting for a headset to pair");
     } else {
-      log('WebRTC is unavailable, so the hosted client cannot reach this bridge');
+      log(
+        "WebRTC is unavailable, so the hosted client cannot reach this bridge",
+      );
     }
   }
 
@@ -435,20 +474,24 @@ async function main(): Promise<void> {
    * built one, a helper that crashes — the bridge logs it once and carries on
    * serving MIDI, because an icon is worth nothing next to that.
    */
-  const dashboardUrl = `${ws?.secure === true ? 'https' : 'http'}://127.0.0.1:${config.wsPort}/`;
+  const dashboardUrl = `${ws?.secure === true ? "https" : "http"}://127.0.0.1:${config.wsPort}/`;
 
   // Dragging the app to Applications and opening it is the whole installation,
   // so the first launch registers the login item itself. See setup/firstRun.ts
   // for why that is a defensible thing to decide on someone's behalf.
   const firstRun = await runFirstLaunch();
   if (firstRun.first) {
-    log(firstRun.registered ? 'set up to start at login' : `first run: ${firstRun.reason}`);
+    log(
+      firstRun.registered
+        ? "set up to start at login"
+        : `first run: ${firstRun.reason}`,
+    );
   }
 
   let autostart = await autostartState();
 
   const trayState = (): TrayState => ({
-    pairingCode: pairing?.displayCode ?? '',
+    pairingCode: pairing?.displayCode ?? "",
     pairingRegistered: pairing?.isRegistered ?? false,
     clients: bus.clientCount,
     devices: devices.count,
@@ -467,11 +510,15 @@ async function main(): Promise<void> {
   const handleTrayClick = async (id: string): Promise<void> => {
     switch (id) {
       case TrayAction.COPY_CODE: {
-        const code = pairing?.displayCode ?? '';
-        if (code === '') return;
+        const code = pairing?.displayCode ?? "";
+        if (code === "") return;
         // Logged either way: a machine with no clipboard utility should still
         // put the code somewhere the user can reach it.
-        log((await copyToClipboard(code)) ? `copied ${code}` : `pairing code: ${code}`);
+        log(
+          (await copyToClipboard(code))
+            ? `copied ${code}`
+            : `pairing code: ${code}`,
+        );
         return;
       }
       case TrayAction.DASHBOARD:
@@ -479,11 +526,15 @@ async function main(): Promise<void> {
         return;
       case TrayAction.AUTOSTART:
         autostart = await toggleAutostart();
-        log(autostart === 'on' ? 'will start at login' : 'will not start at login');
+        log(
+          autostart === "on"
+            ? "will start at login"
+            : "will not start at login",
+        );
         refreshTray();
         return;
       case TrayAction.QUIT:
-        await shutdown('menu');
+        await shutdown("menu");
         return;
       default:
         return;
@@ -493,7 +544,7 @@ async function main(): Promise<void> {
   if (config.enableTray) {
     const controller = new TrayController({
       onLog: log,
-      onQuit: () => void shutdown('menu'),
+      onQuit: () => void shutdown("menu"),
       onClick: (id) => void handleTrayClick(id),
     });
     if (controller.start()) {
@@ -505,7 +556,7 @@ async function main(): Promise<void> {
       const trayTimer = setInterval(refreshTray, 2000);
       trayTimer.unref();
     } else {
-      log('no tray helper found; running without a menu bar icon');
+      log("no tray helper found; running without a menu bar icon");
     }
   }
 
@@ -576,8 +627,8 @@ async function main(): Promise<void> {
     process.exit(0);
   };
 
-  process.on('SIGINT', () => void shutdown('SIGINT'));
-  process.on('SIGTERM', () => void shutdown('SIGTERM'));
+  process.on("SIGINT", () => void shutdown("SIGINT"));
+  process.on("SIGTERM", () => void shutdown("SIGTERM"));
 }
 
 /** Call `fn` at most once per `intervalMs`, dropping the calls in between. */
@@ -595,6 +646,8 @@ function throttle<T extends unknown[]>(
 }
 
 main().catch((err: unknown) => {
-  process.stderr.write(`vrmc-bridge: fatal: ${err instanceof Error ? err.stack : String(err)}\n`);
+  process.stderr.write(
+    `vrmc-bridge: fatal: ${err instanceof Error ? err.stack : String(err)}\n`,
+  );
   process.exit(1);
 });

@@ -1,4 +1,4 @@
-import { describe, it, expect, beforeEach } from 'vitest';
+import { describe, it, expect, beforeEach } from "vitest";
 import {
   DEFAULT_GRAB_OPTIONS,
   Finger,
@@ -6,17 +6,30 @@ import {
   Grabbable,
   type GrabSink,
   type GrabbableTarget,
-} from '../src/index.js';
+} from "../src/index.js";
 
-interface Event { kind: 'grab' | 'move' | 'release'; id: number }
+interface Event {
+  kind: "grab" | "move" | "release";
+  id: number;
+}
 
 class Recorder implements GrabSink {
   events: Event[] = [];
-  onGrab(id: number): void { this.events.push({ kind: 'grab', id }); }
-  onMove(id: number): void { this.events.push({ kind: 'move', id }); }
-  onRelease(id: number): void { this.events.push({ kind: 'release', id }); }
-  of(kind: Event['kind']): Event[] { return this.events.filter((e) => e.kind === kind); }
-  clear(): void { this.events = []; }
+  onGrab(id: number): void {
+    this.events.push({ kind: "grab", id });
+  }
+  onMove(id: number): void {
+    this.events.push({ kind: "move", id });
+  }
+  onRelease(id: number): void {
+    this.events.push({ kind: "release", id });
+  }
+  of(kind: Event["kind"]): Event[] {
+    return this.events.filter((e) => e.kind === kind);
+  }
+  clear(): void {
+    this.events = [];
+  }
 }
 
 const FRAME_DT = 1 / 90;
@@ -43,7 +56,8 @@ class Rig {
     this.t += FRAME_DT * 1000;
     this.frame.beginFrame(this.t, FRAME_DT);
     if (left !== null) this.hand(Finger.LEFT_THUMB, Finger.LEFT_INDEX, left);
-    if (right !== null) this.hand(Finger.RIGHT_THUMB, Finger.RIGHT_INDEX, right);
+    if (right !== null)
+      this.hand(Finger.RIGHT_THUMB, Finger.RIGHT_INDEX, right);
     this.grab.update(this.frame, this.sink);
   }
 
@@ -55,7 +69,7 @@ class Rig {
   }
 }
 
-describe('taking hold', () => {
+describe("taking hold", () => {
   let grab: Grabbable;
   let rig: Rig;
   let pad: GrabbableTarget;
@@ -67,20 +81,20 @@ describe('taking hold', () => {
     rig = new Rig(grab);
   });
 
-  it('grabs a device the pinch closed inside', () => {
+  it("grabs a device the pinch closed inside", () => {
     rig.step([0, 1, -0.5, OPEN], null);
     rig.step([0, 1, -0.5, CLOSED], null);
-    expect(rig.sink.of('grab').map((e) => e.id)).toEqual([1]);
+    expect(rig.sink.of("grab").map((e) => e.id)).toEqual([1]);
     expect(grab.isHeld(1)).toBe(true);
   });
 
-  it('ignores a pinch closed out of reach', () => {
+  it("ignores a pinch closed out of reach", () => {
     rig.step([2, 1, -0.5, OPEN], null);
     rig.step([2, 1, -0.5, CLOSED], null);
-    expect(rig.sink.of('grab')).toHaveLength(0);
+    expect(rig.sink.of("grab")).toHaveLength(0);
   });
 
-  it('carries the device with the hand', () => {
+  it("carries the device with the hand", () => {
     rig.step([0, 1, -0.5, OPEN], null);
     rig.step([0, 1, -0.5, CLOSED], null);
     rig.step([0.3, 1.2, -0.4, CLOSED], null);
@@ -89,7 +103,7 @@ describe('taking hold', () => {
     expect(pad.centre[2]).toBeCloseTo(-0.4, 6);
   });
 
-  it('keeps the offset it was taken hold of at, so it never jumps', () => {
+  it("keeps the offset it was taken hold of at, so it never jumps", () => {
     // Pinch off-centre; the device should keep that relationship, not snap its
     // centre onto the pinch.
     rig.step([0.1, 1, -0.5, OPEN], null);
@@ -98,23 +112,23 @@ describe('taking hold', () => {
     expect(pad.centre[0]).toBeCloseTo(0.4, 6);
   });
 
-  it('lets go when the pinch opens, once', () => {
+  it("lets go when the pinch opens, once", () => {
     rig.step([0, 1, -0.5, OPEN], null);
     rig.step([0, 1, -0.5, CLOSED], null);
     rig.step([0, 1, -0.5, OPEN], null);
     rig.step([0, 1, -0.5, OPEN], null);
-    expect(rig.sink.of('release')).toHaveLength(1);
+    expect(rig.sink.of("release")).toHaveLength(1);
     expect(grab.isHeld(1)).toBe(false);
   });
 
-  it('lets go when tracking drops rather than freezing the device to a ghost', () => {
+  it("lets go when tracking drops rather than freezing the device to a ghost", () => {
     rig.step([0, 1, -0.5, OPEN], null);
     rig.step([0, 1, -0.5, CLOSED], null);
     rig.step(null, null);
-    expect(rig.sink.of('release')).toHaveLength(1);
+    expect(rig.sink.of("release")).toHaveLength(1);
   });
 
-  it('does not flutter between held and released at the noise floor', () => {
+  it("does not flutter between held and released at the noise floor", () => {
     /*
      * The hysteresis band. Hand tracking's estimate of fingertip separation
      * wanders by several millimetres while pinching, so a single threshold
@@ -123,15 +137,16 @@ describe('taking hold', () => {
      */
     rig.step([0, 1, -0.5, OPEN], null);
     rig.step([0, 1, -0.5, CLOSED], null);
-    const between = (DEFAULT_GRAB_OPTIONS.pinchClose + DEFAULT_GRAB_OPTIONS.pinchOpen) / 2;
+    const between =
+      (DEFAULT_GRAB_OPTIONS.pinchClose + DEFAULT_GRAB_OPTIONS.pinchOpen) / 2;
     for (let i = 0; i < 20; i++) rig.step([0, 1, -0.5, between], null);
-    expect(rig.sink.of('release')).toHaveLength(0);
+    expect(rig.sink.of("release")).toHaveLength(0);
     expect(grab.isHeld(1)).toBe(true);
   });
 });
 
-describe('pinning', () => {
-  it('is invisible to the grab test, not merely deprioritised', () => {
+describe("pinning", () => {
+  it("is invisible to the grab test, not merely deprioritised", () => {
     /*
      * The reason pinning exists at all. A hand playing a pad grid is constantly
      * inside the volume a grab test looks at — that is what playing is — and a
@@ -147,11 +162,11 @@ describe('pinning', () => {
 
     rig.step([0, 1, -0.5, OPEN], null);
     for (let i = 0; i < 30; i++) rig.step([i * 0.01, 1, -0.5, CLOSED], null);
-    expect(rig.sink.of('grab')).toHaveLength(0);
+    expect(rig.sink.of("grab")).toHaveLength(0);
     expect(pinned.centre).toEqual([0, 1, -0.5]);
   });
 
-  it('does not shadow a loose device beside it', () => {
+  it("does not shadow a loose device beside it", () => {
     // A pinned device that merely lost the ranking would still win the pinch
     // and leave the loose one next to it unmovable.
     const grab = new Grabbable();
@@ -164,10 +179,10 @@ describe('pinning', () => {
 
     rig.step([0, 1, -0.5, OPEN], null);
     rig.step([0, 1, -0.5, CLOSED], null);
-    expect(rig.sink.of('grab').map((e) => e.id)).toEqual([2]);
+    expect(rig.sink.of("grab").map((e) => e.id)).toEqual([2]);
   });
 
-  it('releases a device that is pinned while it is being held', () => {
+  it("releases a device that is pinned while it is being held", () => {
     const grab = new Grabbable();
     const pad = target(1);
     grab.add(pad);
@@ -186,7 +201,7 @@ describe('pinning', () => {
   });
 });
 
-describe('turning it with both hands', () => {
+describe("turning it with both hands", () => {
   let grab: Grabbable;
   let rig: Rig;
   let pad: GrabbableTarget;
@@ -204,21 +219,44 @@ describe('turning it with both hands', () => {
     rig.step([-0.1, 1, -0.5, CLOSED], [0.1, 1, -0.5, CLOSED]);
   }
 
-  it('does not jump when the second hand joins', () => {
+  it("does not jump when the second hand joins", () => {
     // Latching on the current bearing is what stops the device snapping to
     // whatever angle the hands happen to be at.
     twoHanded();
     expect(pad.yawDeg).toBeCloseTo(0, 6);
   });
 
-  it('turns with the bearing between the hands', () => {
+  it("turns with the bearing between the hands", () => {
     twoHanded();
     // Swing the right hand a quarter turn about the midpoint.
     rig.step([0, 1, -0.6, CLOSED], [0, 1, -0.4, CLOSED]);
     expect(Math.abs(pad.yawDeg)).toBeCloseTo(90, 4);
   });
 
-  it('takes the short way round when the hands cross behind the player', () => {
+  it("does not bank up rotation while the hands are too close to read", () => {
+    /*
+     * Below `minTwoHandSpan` the bearing between two pinches is noise, so no
+     * rotation is applied — but the latch was left standing. Turn the hands
+     * while they are together, separate them again, and the entire accumulated
+     * difference arrived as one frame's delta: up to half a turn in a single
+     * step, which is exactly the snap the latch exists to prevent.
+     */
+    twoHanded();
+    const before = pad.yawDeg;
+
+    // Bring the hands together — well inside the default 0.12 m span — and
+    // rotate ninety degrees while they are there.
+    rig.step([-0.01, 1, -0.5, CLOSED], [0.01, 1, -0.5, CLOSED]);
+    rig.step([0, 1, -0.51, CLOSED], [0, 1, -0.49, CLOSED]);
+    expect(pad.yawDeg).toBeCloseTo(before, 4);
+
+    // Separate along the axis they were turned to. One step, so any banked
+    // rotation has to arrive here.
+    rig.step([0, 1, -0.6, CLOSED], [0, 1, -0.4, CLOSED]);
+    expect(Math.abs(pad.yawDeg - before)).toBeLessThan(1);
+  });
+
+  it("takes the short way round when the hands cross behind the player", () => {
     /*
      * The wrap. Without it, a bearing crossing from just under +180 to just
      * over -180 reads as a 360-degree change and the device spins all the way
@@ -246,7 +284,7 @@ describe('turning it with both hands', () => {
     expect(Math.abs(pad.yawDeg)).toBeCloseTo(360, 3);
   });
 
-  it('ignores the bearing when the hands are too close to mean anything', () => {
+  it("ignores the bearing when the hands are too close to mean anything", () => {
     // Below the span threshold the angle is dominated by tracking noise, and a
     // device driven from it spins on the spot.
     rig.step([-0.01, 1, -0.5, OPEN], [0.01, 1, -0.5, OPEN]);
@@ -255,19 +293,19 @@ describe('turning it with both hands', () => {
     expect(pad.yawDeg).toBe(0);
   });
 
-  it('stays held when one hand lets go, and announces the release only at the end', () => {
+  it("stays held when one hand lets go, and announces the release only at the end", () => {
     twoHanded();
     rig.sink.clear();
     rig.step([-0.1, 1, -0.5, OPEN], [0.1, 1, -0.5, CLOSED]);
-    expect(rig.sink.of('release')).toHaveLength(0);
+    expect(rig.sink.of("release")).toHaveLength(0);
     expect(grab.isHeld(1)).toBe(true);
     rig.step([-0.1, 1, -0.5, OPEN], [0.1, 1, -0.5, OPEN]);
-    expect(rig.sink.of('release')).toHaveLength(1);
+    expect(rig.sink.of("release")).toHaveLength(1);
   });
 });
 
-describe('the roster changing underneath', () => {
-  it('releases and forgets a device that is removed mid-grab', () => {
+describe("the roster changing underneath", () => {
+  it("releases and forgets a device that is removed mid-grab", () => {
     const grab = new Grabbable();
     grab.add(target(1));
     const rig = new Rig(grab);
@@ -275,11 +313,11 @@ describe('the roster changing underneath', () => {
     rig.step([0, 1, -0.5, CLOSED], null);
 
     expect(grab.remove(1, rig.sink)).toBe(true);
-    expect(rig.sink.of('release').map((e) => e.id)).toEqual([1]);
+    expect(rig.sink.of("release").map((e) => e.id)).toEqual([1]);
     expect(grab.count).toBe(0);
   });
 
-  it('keeps a held device attached to the right hand when another is removed', () => {
+  it("keeps a held device attached to the right hand when another is removed", () => {
     /*
      * Indices shift when something is spliced out of the middle, and a hand
      * still pointing at an old index is a hand holding a different device.

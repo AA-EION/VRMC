@@ -9,7 +9,7 @@ import {
   type SurfacePose,
   type SurfaceTransform,
   type ZoneLocator,
-} from '@vrmc/layout';
+} from "@vrmc/layout";
 import {
   FingerFrame,
   Grabbable,
@@ -17,9 +17,14 @@ import {
   PokeDetector,
   type ControlSink,
   type GrabSink,
-} from '@vrmc/interaction';
-import { DeviceId, EventType, PlacementFlags, VelocityCurve } from '@vrmc/protocol';
-import { DeviceModel, type DeviceSpec } from '@vrmc/devices';
+} from "@vrmc/interaction";
+import {
+  DeviceId,
+  EventType,
+  PlacementFlags,
+  VelocityCurve,
+} from "@vrmc/protocol";
+import { DeviceModel, type DeviceSpec } from "@vrmc/devices";
 import {
   FIRST_DYNAMIC_DEVICE_ID,
   MAX_DEVICE_ID,
@@ -27,27 +32,31 @@ import {
   type DeviceStateEntry,
   type Layout,
   type LayoutState,
-} from '@vrmc/protocol';
-import { ClickSynth } from './audio/ClickSynth.js';
-import { createLaunchpad, type LaunchpadInstance } from './devices/LaunchpadInstance.js';
-import { matchLayout } from './devices/matchLayout.js';
-import { BridgeLink } from './net/BridgeLink.js';
-import { NoteRouter, type FeedbackSink } from './net/NoteRouter.js';
+} from "@vrmc/protocol";
+import { ClickSynth } from "./audio/ClickSynth.js";
+import {
+  createLaunchpad,
+  type LaunchpadInstance,
+} from "./devices/LaunchpadInstance.js";
+import { devicesMissingFromRoster } from "./devices/reconcile.js";
+import { matchLayout } from "./devices/matchLayout.js";
+import { BridgeLink } from "./net/BridgeLink.js";
+import { NoteRouter, type FeedbackSink } from "./net/NoteRouter.js";
 import {
   KEY_THEME,
   PAD_THEME,
   SurfaceHighlighter,
   type SurfaceTheme,
-} from './devices/InstrumentSurface.js';
-import { HandTracker } from './xr/handTracking.js';
-import { HandSkeleton } from './xr/HandSkeleton.js';
-import { SurfaceAnchor } from './xr/SurfaceAnchor.js';
-import { KeypadController } from './ui/KeypadController.js';
-import type { WristMenu } from './ui/WristMenu.js';
+} from "./devices/InstrumentSurface.js";
+import { HandTracker } from "./xr/handTracking.js";
+import { HandSkeleton } from "./xr/HandSkeleton.js";
+import { SurfaceAnchor } from "./xr/SurfaceAnchor.js";
+import { KeypadController } from "./ui/KeypadController.js";
+import type { WristMenu } from "./ui/WristMenu.js";
 
 /** Everything needed to render and drive one instrument. */
 export interface Instrument {
-  id: 'pads' | 'keys';
+  id: "pads" | "keys";
   locator: ZoneLocator;
   detector: PokeDetector;
   highlighter: SurfaceHighlighter;
@@ -164,7 +173,11 @@ export class Engine {
    * running, so a calibration takes effect on every surface at once rather than
    * on whatever happens to be created next.
    */
-  private velocityFit: { gamma: number; minSpeed: number; maxSpeed: number } | null = null;
+  private velocityFit: {
+    gamma: number;
+    minSpeed: number;
+    maxSpeed: number;
+  } | null = null;
 
   /** Kept so a device spawned mid-calibration is heard from too. */
   private strikeListener: ((speed: number) => void) | null = null;
@@ -173,7 +186,7 @@ export class Engine {
   readonly launchpads: LaunchpadInstance[] = [];
 
   /** The arrangements the bridge is storing, and which one is in use. */
-  layouts: LayoutState = { layouts: [], current: '' };
+  layouts: LayoutState = { layouts: [], current: "" };
 
   /** Fires when the stored arrangements change. */
   onLayoutsChanged: (() => void) | null = null;
@@ -185,7 +198,7 @@ export class Engine {
    * bridge pushes its state — which it does on every save, and re-applying
    * then would undo whatever the player had moved since.
    */
-  private appliedLayout = '';
+  private appliedLayout = "";
 
   /** Fires when a device is added or removed, so React can re-render the list. */
   onDevicesChanged: (() => void) | null = null;
@@ -279,7 +292,7 @@ export class Engine {
 
     this.instruments = [
       this.buildInstrument(
-        'keys',
+        "keys",
         new KeyboardLayout(LAUNCHKEY_25),
         KEY_THEME,
         KEYS_POSE,
@@ -290,7 +303,7 @@ export class Engine {
         VelocityCurve.NATURAL,
       ),
       this.buildInstrument(
-        'pads',
+        "pads",
         new PadGridLayout(MPC_4X4),
         PAD_THEME,
         PADS_POSE,
@@ -305,7 +318,16 @@ export class Engine {
     this.knobSink = {
       onValue: (index, value14, flags) => {
         const cc = KNOB_CCS[index] ?? 21;
-        this.link.push(EventType.CONTROL_CHANGE_14, 0, cc, 0, value14, DeviceId.KNOBS, flags, 0);
+        this.link.push(
+          EventType.CONTROL_CHANGE_14,
+          0,
+          cc,
+          0,
+          value14,
+          DeviceId.KNOBS,
+          flags,
+          0,
+        );
       },
       onGrab: () => {},
       onRelease: () => {},
@@ -339,7 +361,8 @@ export class Engine {
       this.link.sendDevicePose(device.placement());
       this.onGrabChanged?.();
     };
-    this.surfaces.onFailed = (deviceId, reason) => this.onAnchorFailed?.(deviceId, reason);
+    this.surfaces.onFailed = (deviceId, reason) =>
+      this.onAnchorFailed?.(deviceId, reason);
   }
 
   /**
@@ -355,10 +378,16 @@ export class Engine {
     // startup and it holds the first dynamic id, so a headset that spawns one
     // before the roster reaches it would otherwise ask for that same id and
     // the bridge would treat the request as a duplicate and do nothing.
-    while (this.launchpads.some((d) => d.deviceId === this.nextDeviceId)) this.nextDeviceId++;
+    while (this.launchpads.some((d) => d.deviceId === this.nextDeviceId))
+      this.nextDeviceId++;
     if (this.nextDeviceId > MAX_DEVICE_ID) return null;
     const deviceId = this.nextDeviceId++;
-    const instance = createLaunchpad(deviceId, model, this.nextPose(), this.link);
+    const instance = createLaunchpad(
+      deviceId,
+      model,
+      this.nextPose(),
+      this.link,
+    );
     if (instance === null) return null;
     this.launchpads.push(instance);
     this.prepareDevice(instance);
@@ -408,8 +437,10 @@ export class Engine {
    * instrument is in front of them rather than on a nominated one.
    */
   listenForStrikes(listener: ((speed: number) => void) | null): void {
-    for (const instrument of this.instruments) instrument.detector.onStrikeSpeed = listener;
-    for (const device of this.launchpads) device.detector.onStrikeSpeed = listener;
+    for (const instrument of this.instruments)
+      instrument.detector.onStrikeSpeed = listener;
+    for (const device of this.launchpads)
+      device.detector.onStrikeSpeed = listener;
     this.strikeListener = listener;
   }
 
@@ -421,15 +452,22 @@ export class Engine {
    * their instruments, and «it will apply to the next Launchpad you add» is not
    * an answer.
    */
-  setVelocityFit(fit: { gamma: number; minSpeed: number; maxSpeed: number } | null): void {
+  setVelocityFit(
+    fit: { gamma: number; minSpeed: number; maxSpeed: number } | null,
+  ): void {
     this.velocityFit = fit;
     if (fit === null) return;
-    for (const instrument of this.instruments) instrument.detector.setVelocityCurve(fit);
+    for (const instrument of this.instruments)
+      instrument.detector.setVelocityCurve(fit);
     for (const device of this.launchpads) device.detector.setVelocityCurve(fit);
   }
 
   /** The curve in force, or null while the presets are. */
-  get velocityCurve(): { gamma: number; minSpeed: number; maxSpeed: number } | null {
+  get velocityCurve(): {
+    gamma: number;
+    minSpeed: number;
+    maxSpeed: number;
+  } | null {
     return this.velocityFit;
   }
 
@@ -492,6 +530,19 @@ export class Engine {
       }
       if (this.adoptPlacement(device, entry.placement)) changed = true;
     }
+
+    // Anything this headset holds that the bridge has forgotten, asked for
+    // again. See devices/reconcile.ts for why this is necessary at all.
+    for (const missing of devicesMissingFromRoster(
+      this.launchpads.map((d) => ({
+        deviceId: d.deviceId,
+        model: d.spec.model,
+      })),
+      roster,
+    )) {
+      this.link.requestDeviceAdd(missing.deviceId, missing.model);
+    }
+
     if (changed) this.onDevicesChanged?.();
   }
 
@@ -502,8 +553,16 @@ export class Engine {
    * a request to create them again would be answered as a no-op at best. It
    * only claims the id, so a device spawned later here cannot collide with it.
    */
-  private adopt(deviceId: number, model: string): LaunchpadInstance | undefined {
-    const instance = createLaunchpad(deviceId, model, this.nextPose(), this.link);
+  private adopt(
+    deviceId: number,
+    model: string,
+  ): LaunchpadInstance | undefined {
+    const instance = createLaunchpad(
+      deviceId,
+      model,
+      this.nextPose(),
+      this.link,
+    );
     if (instance === null) return undefined;
     this.launchpads.push(instance);
     this.prepareDevice(instance);
@@ -523,7 +582,7 @@ export class Engine {
    */
   saveLayout(name: string): boolean {
     const clean = normaliseLayoutName(name);
-    if (clean === '') return false;
+    if (clean === "") return false;
     const layout: Layout = {
       name: clean,
       entries: this.launchpads.map((device) => ({
@@ -562,7 +621,11 @@ export class Engine {
     const free = this.launchpads.filter((d) => !this.grabs.isHeld(d.deviceId));
     for (const { device, placement } of matchLayout(
       layout.entries,
-      free.map((d) => ({ deviceId: d.deviceId, model: d.spec.model, instance: d })),
+      free.map((d) => ({
+        deviceId: d.deviceId,
+        model: d.spec.model,
+        instance: d,
+      })),
     )) {
       const instance = device.instance;
       instance.setPose({
@@ -597,7 +660,7 @@ export class Engine {
   private receiveLayouts(state: LayoutState): void {
     this.layouts = state;
     this.onLayoutsChanged?.();
-    if (state.current !== '' && state.current !== this.appliedLayout) {
+    if (state.current !== "" && state.current !== this.appliedLayout) {
       this.applyLayout(state.current);
     }
   }
@@ -613,7 +676,7 @@ export class Engine {
    */
   private adoptPlacement(
     device: LaunchpadInstance,
-    placement: DeviceStateEntry['placement'],
+    placement: DeviceStateEntry["placement"],
   ): boolean {
     if (placement === null) return false;
     if (this.grabs.isHeld(device.deviceId)) return false;
@@ -652,9 +715,14 @@ export class Engine {
   private prepareDevice(device: LaunchpadInstance): void {
     this.registerGrab(device);
     device.onStrike = (note, velocity, at) => {
-      this.synth.strike(note, velocity, at as unknown as [number, number, number]);
+      this.synth.strike(
+        note,
+        velocity,
+        at as unknown as [number, number, number],
+      );
     };
-    if (this.velocityFit !== null) device.detector.setVelocityCurve(this.velocityFit);
+    if (this.velocityFit !== null)
+      device.detector.setVelocityCurve(this.velocityFit);
     device.detector.onStrikeSpeed = this.strikeListener;
   }
 
@@ -665,7 +733,11 @@ export class Engine {
       // The array the grab writes into is the device's own pose array, so a
       // move needs no copy back — `setPose` in the sink reads exactly what the
       // grab just wrote.
-      centre: [device.pose.centre[0], device.pose.centre[1], device.pose.centre[2]],
+      centre: [
+        device.pose.centre[0],
+        device.pose.centre[1],
+        device.pose.centre[2],
+      ],
       yawDeg: device.pose.yawDeg ?? 0,
       // Half the diagonal, plus a little: a pinch anywhere on or just off the
       // device takes hold of it, and nothing further away does.
@@ -720,7 +792,11 @@ export class Engine {
    * @param space    the reference space poses should be expressed in
    * @param dt       seconds since the previous frame
    */
-  update(xrFrame: XRFrame | undefined, space: XRReferenceSpace | null, dt: number): void {
+  update(
+    xrFrame: XRFrame | undefined,
+    space: XRReferenceSpace | null,
+    dt: number,
+  ): void {
     // Open the batch first so every event this frame produces rides in one
     // packet, then close it once — regardless of which path produced events.
     this.link.beginFrame();
@@ -746,11 +822,28 @@ export class Engine {
 
       // Surfaces last: a drop resolved this frame should use the pose the grab
       // just settled on, not the one it started from.
-      this.surfaces.update(xrFrame, space, this.viewer, (id) => this.grabs.isHeld(id));
-      if (this.dropRequestedAt > 0 && performance.now() - this.dropRequestedAt > DROP_TIMEOUT_MS) {
+      this.surfaces.update(xrFrame, space, this.viewer, (id) =>
+        this.grabs.isHeld(id),
+      );
+      /*
+       * The deadline belongs to "something is still waiting", so it is cleared
+       * the moment nothing is.
+       *
+       * It used to be cleared only when it expired, which made the first
+       * *successful* drop poison the next one: the clock kept running, and a
+       * second drop inside the timeout window was judged against the first
+       * one's deadline and reported "Could not find a surface underneath" for
+       * a surface that had just been found.
+       */
+      if (this.surfaces.pendingCount === 0) {
+        this.dropRequestedAt = 0;
+      } else if (
+        this.dropRequestedAt > 0 &&
+        performance.now() - this.dropRequestedAt > DROP_TIMEOUT_MS
+      ) {
         this.dropRequestedAt = 0;
         this.surfaces.timeOut(
-          'Could not find a surface underneath. Look around the desk for a moment so the headset can map it, then try again.',
+          "Could not find a surface underneath. Look around the desk for a moment so the headset can map it, then try again.",
         );
       }
       // Only while it is on screen. A detector running against a panel nobody
@@ -777,7 +870,8 @@ export class Engine {
 
     this.link.endFrame();
 
-    for (const instrument of this.instruments) instrument.highlighter.update(dt);
+    for (const instrument of this.instruments)
+      instrument.highlighter.update(dt);
   }
 
   /** Called when the session starts. */
@@ -822,7 +916,7 @@ export class Engine {
   }
 
   private buildInstrument(
-    id: Instrument['id'],
+    id: Instrument["id"],
     locator: ZoneLocator,
     theme: SurfaceTheme,
     pose: SurfacePose,
@@ -906,7 +1000,11 @@ export class Engine {
       zone.raise,
       this.strikeAt,
     );
-    this.synth.strike(note, velocity, this.strikeAt as unknown as [number, number, number]);
+    this.synth.strike(
+      note,
+      velocity,
+      this.strikeAt as unknown as [number, number, number],
+    );
   }
 
   /** Put a row of knobs above the pad grid, in world space. */

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
-import { describe, it, expect, vi } from 'vitest';
-import { PresenceGate } from '../src/core/PresenceGate.js';
+import { describe, it, expect, vi } from "vitest";
+import { PresenceGate } from "../src/core/PresenceGate.js";
 
 /**
  * Ports following the headset.
@@ -46,8 +46,8 @@ function harness(graceMs = 10_000) {
   return { gate, opened, closed, timers, elapse };
 }
 
-describe('opening', () => {
-  it('opens the ports when the first client arrives', async () => {
+describe("opening", () => {
+  it("opens the ports when the first client arrives", async () => {
     const h = harness();
     expect(h.gate.isOpen).toBe(false);
     expect(h.opened).toHaveLength(0);
@@ -57,7 +57,7 @@ describe('opening', () => {
     expect(h.opened).toHaveLength(1);
   });
 
-  it('opens nothing before anybody connects', async () => {
+  it("opens nothing before anybody connects", async () => {
     // The whole point. The bridge used to publish three CoreMIDI endpoints at
     // startup, so a Mac with it merely running listed a Launchpad X that was
     // not there and could not be played.
@@ -67,7 +67,7 @@ describe('opening', () => {
     expect(h.closed).toHaveLength(0);
   });
 
-  it('does not open a second set for a second client', async () => {
+  it("does not open a second set for a second client", async () => {
     // A headset on WebRTC and the dashboard on WebSocket are two clients of
     // one session. Opening again would publish a duplicate set of endpoints
     // under the same names — which CoreMIDI allows, so nothing would complain.
@@ -77,7 +77,7 @@ describe('opening', () => {
     expect(h.opened).toHaveLength(1);
   });
 
-  it('does not open twice when two clients arrive during one slow open', async () => {
+  it("does not open twice when two clients arrive during one slow open", async () => {
     /*
      * Opening is a series of calls into CoreMIDI, and a headset can arrive,
      * drop and return inside that window. Both arrivals would see a gate that
@@ -106,7 +106,7 @@ describe('opening', () => {
     expect(opens).toHaveLength(1);
   });
 
-  it('can try again after a failed open', async () => {
+  it("can try again after a failed open", async () => {
     // A gate that stayed "open" after a failure would never retry, and the
     // session would have no MIDI until the bridge was restarted.
     let attempt = 0;
@@ -114,7 +114,7 @@ describe('opening', () => {
       graceMs: 1000,
       onOpen: async () => {
         attempt++;
-        if (attempt === 1) throw new Error('CoreMIDI said no');
+        if (attempt === 1) throw new Error("CoreMIDI said no");
       },
       onClose: () => {},
       setTimer: () => 0,
@@ -129,8 +129,8 @@ describe('opening', () => {
   });
 });
 
-describe('the grace period', () => {
-  it('does not close the moment the last client goes', async () => {
+describe("the grace period", () => {
+  it("does not close the moment the last client goes", async () => {
     /*
      * Headset Wi-Fi drops for a second at a time. A DAW that sees a control
      * surface vanish does not wait politely — Ableton unbinds the script, and
@@ -146,7 +146,7 @@ describe('the grace period', () => {
     expect(h.gate.isClosing).toBe(true);
   });
 
-  it('closes once the grace period passes with nobody there', async () => {
+  it("closes once the grace period passes with nobody there", async () => {
     const h = harness();
     await h.gate.update(1);
     await h.gate.update(0);
@@ -156,7 +156,7 @@ describe('the grace period', () => {
     expect(h.gate.isOpen).toBe(false);
   });
 
-  it('keeps the ports open when a client returns in time', async () => {
+  it("keeps the ports open when a client returns in time", async () => {
     const h = harness();
     await h.gate.update(1);
     await h.gate.update(0);
@@ -170,14 +170,14 @@ describe('the grace period', () => {
     expect(h.gate.isOpen).toBe(true);
   });
 
-  it('waits the configured time, not some other time', async () => {
+  it("waits the configured time, not some other time", async () => {
     const h = harness(4321);
     await h.gate.update(1);
     await h.gate.update(0);
     expect(h.timers.at(-1)?.ms).toBe(4321);
   });
 
-  it('arms one timer for a flapping connection, not one per drop', async () => {
+  it("arms one timer for a flapping connection, not one per drop", async () => {
     // A connection dropping repeatedly should not stack teardowns, or the
     // ports close on the first timer's schedule regardless of who is there.
     const h = harness();
@@ -188,7 +188,7 @@ describe('the grace period', () => {
     expect(h.timers.filter((t) => !t.cancelled)).toHaveLength(1);
   });
 
-  it('reopens after a real departure', async () => {
+  it("reopens after a real departure", async () => {
     const h = harness();
     await h.gate.update(1);
     await h.gate.update(0);
@@ -201,8 +201,61 @@ describe('the grace period', () => {
   });
 });
 
-describe('shutting down', () => {
-  it('closes immediately rather than waiting out the grace period', async () => {
+describe("a departure during an open", () => {
+  it("does not close over the top of an open that is still running", async () => {
+    /*
+     * `opened` is set before `onOpen` is awaited, so with a short grace the
+     * close could land mid-open: `removeAll()` would drop a half-built device
+     * whose ports were not recorded yet, the rest of the open would then create
+     * ports nothing tracked, and the next arrival would open a second set under
+     * the same names. With `--port-grace 0` that is the normal order of events,
+     * not a rare interleaving.
+     */
+    const order: string[] = [];
+    let release: (() => void) | null = null;
+    const timers: (() => void)[] = [];
+
+    const gate = new PresenceGate({
+      graceMs: 0,
+      onOpen: () => {
+        order.push("open:start");
+        return new Promise<void>((resolve) => {
+          release = () => {
+            order.push("open:done");
+            resolve();
+          };
+        });
+      },
+      onClose: () => order.push("close"),
+      setTimer: (fn) => {
+        timers.push(fn);
+        return timers.length - 1;
+      },
+      clearTimer: () => {},
+    });
+
+    const opening = gate.update(1);
+    gate.update(0); // the client leaves while the open is still in flight
+    expect(order).toEqual(["open:start"]);
+
+    // Fire the grace timer *now*, before the open resolves. This is the whole
+    // scenario: with graceMs 0 the timer is due immediately, so it lands in the
+    // middle of the open rather than after it. Nothing should have been armed.
+    for (const fire of timers.splice(0)) fire();
+    expect(order).toEqual(["open:start"]);
+
+    release!();
+    await opening;
+    await Promise.resolve();
+    for (const fire of timers.splice(0)) fire();
+
+    // The close waited for the open to finish rather than interleaving with it.
+    expect(order).toEqual(["open:start", "open:done", "close"]);
+  });
+});
+
+describe("shutting down", () => {
+  it("closes immediately rather than waiting out the grace period", async () => {
     // The process is leaving. Waiting even a tick risks exiting with the ports
     // still published, which leaves them in the DAW until it rescans.
     const h = harness();
@@ -211,7 +264,7 @@ describe('shutting down', () => {
     expect(h.closed).toHaveLength(1);
   });
 
-  it('cancels a pending close rather than closing twice', async () => {
+  it("cancels a pending close rather than closing twice", async () => {
     const h = harness();
     await h.gate.update(1);
     await h.gate.update(0);
@@ -220,15 +273,15 @@ describe('shutting down', () => {
     expect(h.closed).toHaveLength(1);
   });
 
-  it('does nothing when nothing was ever opened', () => {
+  it("does nothing when nothing was ever opened", () => {
     const h = harness();
     h.gate.dispose();
     expect(h.closed).toHaveLength(0);
   });
 });
 
-describe('reporting', () => {
-  it('says why the ports went, and why they stayed', async () => {
+describe("reporting", () => {
+  it("says why the ports went, and why they stayed", async () => {
     const onLog = vi.fn();
     const timers: (() => void)[] = [];
     const gate = new PresenceGate({
@@ -246,10 +299,14 @@ describe('reporting', () => {
     await gate.update(1);
     await gate.update(0);
     await gate.update(1);
-    expect(onLog).toHaveBeenCalledWith(expect.stringContaining('returned within the grace period'));
+    expect(onLog).toHaveBeenCalledWith(
+      expect.stringContaining("returned within the grace period"),
+    );
 
     await gate.update(0);
     timers.at(-1)!();
-    expect(onLog).toHaveBeenCalledWith(expect.stringContaining('closing the MIDI ports'));
+    expect(onLog).toHaveBeenCalledWith(
+      expect.stringContaining("closing the MIDI ports"),
+    );
   });
 });

@@ -1,8 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-import { MAX_LAYOUT_NAME_BYTES } from './constants.js';
-import type { PacketWriter } from './codec.js';
-import { PLACEMENT_BYTES, readPlacement, writePlacement, type DevicePlacement } from './pose.js';
+import { MAX_LAYOUT_BODY_BYTES, MAX_LAYOUT_NAME_BYTES } from "./constants.js";
+import type { PacketWriter } from "./codec.js";
+import {
+  PLACEMENT_BYTES,
+  readPlacement,
+  writePlacement,
+  type DevicePlacement,
+} from "./pose.js";
 
 /**
  * Named arrangements of the room — "Studio", "Couch".
@@ -43,7 +48,7 @@ export interface Layout {
 
 /** Trim a name to something that fits and is worth storing. */
 export function normaliseLayoutName(name: string): string {
-  const trimmed = name.trim().replace(/\s+/g, ' ');
+  const trimmed = name.trim().replace(/\s+/g, " ");
   let bytes = encoder.encode(trimmed);
   if (bytes.length <= MAX_LAYOUT_NAME_BYTES) return trimmed;
   // Cut by characters, not bytes: slicing a UTF-8 buffer mid-sequence produces
@@ -64,12 +69,18 @@ function writeName(w: PacketWriter, name: string): boolean {
 }
 
 /** Read a length-prefixed name. Returns the text and the next offset. */
-function readName(body: Uint8Array, offset: number): { name: string; next: number } | null {
+function readName(
+  body: Uint8Array,
+  offset: number,
+): { name: string; next: number } | null {
   if (offset >= body.length) return null;
   const len = body[offset]!;
   const from = offset + 1;
   if (from + len > body.length) return null;
-  return { name: decoder.decode(body.subarray(from, from + len)), next: from + len };
+  return {
+    name: decoder.decode(body.subarray(from, from + len)),
+    next: from + len,
+  };
 }
 
 // --- LAYOUT_SAVE ---
@@ -126,14 +137,55 @@ export interface LayoutState {
   current: string;
 }
 
-export function writeLayoutState(w: PacketWriter, state: LayoutState): boolean {
-  if (!writeName(w, state.current)) return false;
-  if (state.layouts.length > 255) return false;
-  if (!w.pushU8(state.layouts.length)) return false;
-  for (const layout of state.layouts) {
-    if (!writeLayoutSave(w, layout)) return false;
+/** Bytes one layout occupies on the wire. */
+export function layoutBytes(layout: Layout): number {
+  let total = 1 + encoder.encode(layout.name).length + 1;
+  for (const entry of layout.entries) {
+    total += PLACEMENT_BYTES + 1 + encoder.encode(entry.model).length;
   }
-  return true;
+  return total;
+}
+
+/**
+ * As many layouts as fit in `budget` bytes, longest-standing first.
+ *
+ * Separate from the writing so the arithmetic can be tested without a packet,
+ * and so the caller can see it dropped some.
+ */
+export function fitLayouts(state: LayoutState, budget: number): Layout[] {
+  let left = budget - (1 + encoder.encode(state.current).length + 1);
+  const fitted: Layout[] = [];
+  for (const layout of state.layouts) {
+    const size = layoutBytes(layout);
+    if (size > left) break;
+    left -= size;
+    fitted.push(layout);
+  }
+  return fitted;
+}
+
+/**
+ * Write the layout list, dropping the tail if it will not fit.
+ *
+ * Returns how many were written, which may be fewer than were offered — and
+ * that is the point. This used to return false the moment the body overflowed,
+ * and `Broadcaster.sendLayouts` returned without sending anything at all: a
+ * headset with sixteen saved arrangements of eight devices got *no* layout
+ * state, including `current`, which is the one field it needs to restore the
+ * arrangement somebody is standing in. Sixteen by eight overflows a 4080-byte
+ * body by several hundred bytes, so this was reachable rather than theoretical.
+ *
+ * Losing the oldest few layouts is a real loss and it is still the better one:
+ * the alternative was losing all of them silently.
+ */
+export function writeLayoutState(w: PacketWriter, state: LayoutState): number {
+  const fitted = fitLayouts(state, MAX_LAYOUT_BODY_BYTES);
+  if (!writeName(w, state.current)) return -1;
+  if (!w.pushU8(fitted.length)) return -1;
+  for (const layout of fitted) {
+    if (!writeLayoutSave(w, layout)) return -1;
+  }
+  return fitted.length;
 }
 
 /**
@@ -147,7 +199,7 @@ export function writeLayoutState(w: PacketWriter, state: LayoutState): boolean {
  */
 export function readLayoutState(body: Uint8Array): LayoutState {
   const head = readName(body, 0);
-  if (head === null) return { layouts: [], current: '' };
+  if (head === null) return { layouts: [], current: "" };
   let o = head.next;
   const layouts: Layout[] = [];
   if (o >= body.length) return { layouts, current: head.name };

@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-import { FingerFrame } from './fingers.js';
+import { FingerFrame } from "./fingers.js";
 
 /**
  * Picking a device up, moving it, and turning it to face you.
@@ -47,7 +47,11 @@ export interface GrabSink {
    * The device moved. Fired per frame while held, so this must not allocate or
    * touch the network — it is for keeping the mesh and the detector in step.
    */
-  onMove(id: number, centre: readonly [number, number, number], yawDeg: number): void;
+  onMove(
+    id: number,
+    centre: readonly [number, number, number],
+    yawDeg: number,
+  ): void;
   /**
    * Let go. This is where a caller tells the bridge, once: a grab produces a
    * new pose ninety times a second and exactly one of them is worth sending.
@@ -187,7 +191,8 @@ export class Grabbable {
      */
     for (let hand = 0; hand < PINCH_PAIRS.length; hand++) {
       const index = this.held[hand]!;
-      if (index >= 0 && this.targets[index]?.pinned === true) this.releaseHand(hand, sink);
+      if (index >= 0 && this.targets[index]?.pinned === true)
+        this.releaseHand(hand, sink);
     }
 
     this.applyMotion(sink);
@@ -195,7 +200,8 @@ export class Grabbable {
 
   /** Release everything. For teardown, and for transport loss. */
   releaseAll(sink: GrabSink): void {
-    for (let hand = 0; hand < PINCH_PAIRS.length; hand++) this.releaseHand(hand, sink);
+    for (let hand = 0; hand < PINCH_PAIRS.length; hand++)
+      this.releaseHand(hand, sink);
   }
 
   // --- internals ---
@@ -211,8 +217,10 @@ export class Grabbable {
       const io = index * 3;
       const o = hand * 3;
       this.pinchAt[o] = (frame.position[to]! + frame.position[io]!) * 0.5;
-      this.pinchAt[o + 1] = (frame.position[to + 1]! + frame.position[io + 1]!) * 0.5;
-      this.pinchAt[o + 2] = (frame.position[to + 2]! + frame.position[io + 2]!) * 0.5;
+      this.pinchAt[o + 1] =
+        (frame.position[to + 1]! + frame.position[io + 1]!) * 0.5;
+      this.pinchAt[o + 2] =
+        (frame.position[to + 2]! + frame.position[io + 2]!) * 0.5;
       this.pinchTracked[hand] = 1;
 
       const dx = frame.position[to]! - frame.position[io]!;
@@ -317,19 +325,41 @@ export class Grabbable {
         delta = ((((delta + 180) % 360) + 360) % 360) - 180;
         this.lastBearing = bearing;
         target.yawDeg += delta;
+      } else {
+        /*
+         * Hands too close together to give a meaningful bearing — drop the
+         * latch rather than keeping it.
+         *
+         * Holding it would defeat the latch's own purpose. The bearing is
+         * noise below this span, so rotation performed while the hands were
+         * together is never applied; keep `lastBearing` from before that and
+         * the whole accumulated difference arrives as a single frame's delta
+         * the moment the hands separate, up to half a turn at once. Which is
+         * exactly the snap the comment above says the latch prevents.
+         */
+        this.twoHanded = false;
       }
 
       // Position from the midpoint of the two grab offsets, so the device stays
       // where it was taken hold of rather than snapping between the hands.
       target.centre[0] =
-        (this.pinchAt[LEFT * 3]! + this.grabOffset[LEFT * 3]! +
-          this.pinchAt[RIGHT * 3]! + this.grabOffset[RIGHT * 3]!) * 0.5;
+        (this.pinchAt[LEFT * 3]! +
+          this.grabOffset[LEFT * 3]! +
+          this.pinchAt[RIGHT * 3]! +
+          this.grabOffset[RIGHT * 3]!) *
+        0.5;
       target.centre[1] =
-        (this.pinchAt[LEFT * 3 + 1]! + this.grabOffset[LEFT * 3 + 1]! +
-          this.pinchAt[RIGHT * 3 + 1]! + this.grabOffset[RIGHT * 3 + 1]!) * 0.5;
+        (this.pinchAt[LEFT * 3 + 1]! +
+          this.grabOffset[LEFT * 3 + 1]! +
+          this.pinchAt[RIGHT * 3 + 1]! +
+          this.grabOffset[RIGHT * 3 + 1]!) *
+        0.5;
       target.centre[2] =
-        (this.pinchAt[LEFT * 3 + 2]! + this.grabOffset[LEFT * 3 + 2]! +
-          this.pinchAt[RIGHT * 3 + 2]! + this.grabOffset[RIGHT * 3 + 2]!) * 0.5;
+        (this.pinchAt[LEFT * 3 + 2]! +
+          this.grabOffset[LEFT * 3 + 2]! +
+          this.pinchAt[RIGHT * 3 + 2]! +
+          this.grabOffset[RIGHT * 3 + 2]!) *
+        0.5;
       sink.onMove(target.id, target.centre, target.yawDeg);
       return;
     }
@@ -356,6 +386,7 @@ export class Grabbable {
     const target = this.targets[index];
     // Only the last hand off announces the release: with two hands on one
     // device, lifting one of them is still a hold.
-    if (target !== undefined && !this.heldBySomeone(index)) sink.onRelease(target.id);
+    if (target !== undefined && !this.heldBySomeone(index))
+      sink.onRelease(target.id);
   }
 }

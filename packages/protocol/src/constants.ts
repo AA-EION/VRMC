@@ -41,7 +41,8 @@ export const EVENT_BYTES = 12;
 export const MAX_EVENTS_PER_PACKET = 64;
 
 /** Largest EVENTS packet. */
-export const MAX_EVENT_PACKET_BYTES = HEADER_BYTES + MAX_EVENTS_PER_PACKET * EVENT_BYTES;
+export const MAX_EVENT_PACKET_BYTES =
+  HEADER_BYTES + MAX_EVENTS_PER_PACKET * EVENT_BYTES;
 
 /**
  * Largest control packet.
@@ -74,6 +75,15 @@ export const MAX_LAYOUT_NAME_BYTES = 48;
  * silently drops the one you wanted.
  */
 export const MAX_LAYOUTS = 16;
+
+/**
+ * Body bytes a LAYOUT_STATE may use, after the 16-byte header.
+ *
+ * `MAX_LAYOUTS` alone never bounded this: sixteen layouts of eight devices is
+ * roughly 5 KB against a 4 KB packet, because what costs bytes is devices and
+ * name lengths rather than the number of layouts. See `fitLayouts`.
+ */
+export const MAX_LAYOUT_BODY_BYTES = MAX_CONTROL_BYTES - HEADER_BYTES;
 
 /** Bytes per LED in an LED_UPDATE body: index, r, g, b, blink. */
 export const LED_ENTRY_BYTES = 5;

@@ -67,7 +67,8 @@ export class PresenceGate {
   constructor(options: PresenceGateOptions) {
     this.options = options;
     this.setTimer = options.setTimer ?? ((fn, ms) => setTimeout(fn, ms));
-    this.clearTimer = options.clearTimer ?? ((handle) => clearTimeout(handle as never));
+    this.clearTimer =
+      options.clearTimer ?? ((handle) => clearTimeout(handle as never));
   }
 
   /** Whether the session's ports are currently open. */
@@ -100,7 +101,9 @@ export class PresenceGate {
     if (this.pendingClose !== null) {
       this.clearTimer(this.pendingClose);
       this.pendingClose = null;
-      this.options.onLog?.('client returned within the grace period; ports kept open');
+      this.options.onLog?.(
+        "client returned within the grace period; ports kept open",
+      );
     }
     if (this.opening !== null) return this.opening;
     if (this.opened) return Promise.resolve();
@@ -124,12 +127,32 @@ export class PresenceGate {
   }
 
   private depart(): void {
+    /*
+     * Never while an open is still running.
+     *
+     * `opened` goes true before `onOpen` is awaited, so with a short grace the
+     * timer could fire mid-open: `removeAll()` would drop a half-built device
+     * whose ports had not been recorded yet, the rest of the open would then
+     * create ports nothing was tracking, and the next arrival — seeing
+     * `opened` back to false — would open a second set under the same names.
+     * With `--port-grace 0` that is not a race so much as the normal order.
+     *
+     * Waiting for the open to finish and then departing is correct rather than
+     * merely safe: the client really has gone, and the close that follows
+     * tears down everything the open just built.
+     */
+    if (this.opening !== null) {
+      void this.opening.then(() => this.depart());
+      return;
+    }
     if (!this.opened || this.pendingClose !== null) return;
     this.pendingClose = this.setTimer(() => {
       this.pendingClose = null;
       if (!this.opened) return;
       this.opened = false;
-      this.options.onLog?.('no client for the grace period; closing the MIDI ports');
+      this.options.onLog?.(
+        "no client for the grace period; closing the MIDI ports",
+      );
       this.options.onClose();
     }, this.options.graceMs);
   }

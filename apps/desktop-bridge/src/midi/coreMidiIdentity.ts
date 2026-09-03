@@ -272,7 +272,13 @@ function* endpoints(b: Bound): Generator<number> {
 }
 
 /**
- * Find the endpoint currently called `name`.
+ * Every endpoint currently called `name`.
+ *
+ * Plural because a bidirectional port is two endpoints — a source and a
+ * destination — created under one name, and both should carry the identity. It
+ * returned the first match once, which meant the destination never got one:
+ * the search walks sources first, so stamping the input half found the output
+ * half again and wrote the same values to it a second time.
  *
  * By name because that is the only handle RtMidi gives us — it creates the
  * endpoint and keeps the `MIDIEndpointRef` to itself. Names are unique at this
@@ -280,11 +286,13 @@ function* endpoints(b: Bound): Generator<number> {
  * ("Launchpad X LPX (DAW)"); the bare name is set afterwards, by which time we
  * no longer need to find it.
  */
-function findEndpoint(b: Bound, name: string): number | null {
+function findEndpoints(b: Bound, name: string): number[] {
+  const found: number[] = [];
   for (const endpoint of endpoints(b)) {
-    if (readProperty(b, endpoint, b.property.name) === name) return endpoint;
+    if (readProperty(b, endpoint, b.property.name) === name)
+      found.push(endpoint);
   }
-  return null;
+  return found;
 }
 
 /**
@@ -301,8 +309,8 @@ export function stampIdentity(
   if (b === null) return false;
 
   try {
-    const endpoint = findEndpoint(b, createdAs);
-    if (endpoint === null) {
+    const found = findEndpoints(b, createdAs);
+    if (found.length === 0) {
       lastError = `no CoreMIDI endpoint named "${createdAs}"`;
       return false;
     }
@@ -325,8 +333,10 @@ export function stampIdentity(
     for (const [label, property, value] of writes) {
       const str = cfString(b, value);
       try {
-        const status = b.setStringProperty(endpoint, property, str);
-        if (status !== 0) refused.push(`${label} (OSStatus ${status})`);
+        for (const endpoint of found) {
+          const status = b.setStringProperty(endpoint, property, str);
+          if (status !== 0) refused.push(`${label} (OSStatus ${status})`);
+        }
       } finally {
         b.cfRelease(str);
       }
@@ -355,8 +365,8 @@ export function readIdentity(name: string): EndpointFacts | null {
   const b = bind();
   if (b === null) return null;
   try {
-    const endpoint = findEndpoint(b, name);
-    if (endpoint === null) return null;
+    const [endpoint] = findEndpoints(b, name);
+    if (endpoint === undefined) return null;
     return {
       name: readProperty(b, endpoint, b.property.name),
       displayName: readProperty(b, endpoint, b.property.displayName),
