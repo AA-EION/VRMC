@@ -120,9 +120,12 @@ describe("creating and destroying emulated devices", () => {
     const ports = new FakePorts();
     const devices = makeManager(ports);
     await devices.add(21, DeviceModel.LAUNCHPAD_PRO_MK3);
+    // Three, in the hardware's order, with DAW last — see the spec's comment
+    // and Live's Launchpad_Pro_MK3 capabilities.
     expect(ports.opened).toEqual([
-      "Launchpad Pro MK3 LPProMK3 DAW",
       "Launchpad Pro MK3 LPProMK3 MIDI",
+      "Launchpad Pro MK3 LPProMK3 DIN",
+      "Launchpad Pro MK3 LPProMK3 DAW",
     ]);
   });
 

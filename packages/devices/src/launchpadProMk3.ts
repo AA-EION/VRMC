@@ -35,19 +35,29 @@ export const LAUNCHPAD_PRO_MK3: DeviceSpec = {
   firmwareVersion: [0x09, 0x09, 0x09],
   manufacturer: 'Focusrite - Novation',
 
-  // The names a stock Launchpad Pro MK3 puts on the bus. These were
-  // `PRO MK3 (DAW)` / `PRO MK3 (MIDI)`, taken from CoreFW, which is community
-  // firmware and names its ports its own way; Novation's hardware calls them
-  // `LPProMK3 DAW` and `LPProMK3 MIDI`.
-  //
-  // The real device presents a third, `LPProMK3 DIN`, between them: Live's
-  // Launchpad_Pro_MK3 script asks for three ports in and three out, with
-  // REMOTE on the first, nothing on the second and SCRIPT on the third. Only
-  // two are created here because the DIN port exists to reach the sockets on
-  // the back panel and there are none, so `dawPortIndex` is 0 rather than the
-  // hardware's 2.
-  portNames: ['LPProMK3 DAW', 'LPProMK3 MIDI'],
-  dawPortIndex: 0,
+  /*
+   * The three ports a stock Launchpad Pro MK3 puts on the bus, in its order.
+   *
+   * Unlike every other model here the DAW port is *last*. Live's
+   * `Launchpad_Pro_MK3.get_capabilities()` asks for three ports in and three
+   * out and says what each is for: REMOTE on the first, no props at all on the
+   * second, NOTES_CC + SYNC + SCRIPT on the third. That is MIDI, DIN, DAW —
+   * so `dawPortIndex` is 2, and anything that assumed index 0 is wrong for
+   * this model.
+   *
+   * `LPProMK3 DIN` carries what the hardware would send out of the two DIN
+   * sockets on its back panel. There is no back panel, so nothing is behind
+   * this port; it exists because the device is meant to present as the
+   * hardware does, and a host that counts ports gets the count it expects.
+   * A DAW that routes to it gets the same silence a real Pro MK3 with nothing
+   * plugged into its DIN sockets would give.
+   *
+   * These names were `PRO MK3 (DAW)` / `PRO MK3 (MIDI)`, from CoreFW — which
+   * is community firmware naming its own ports, and parenthesises where
+   * Novation does not.
+   */
+  portNames: ['LPProMK3 MIDI', 'LPProMK3 DIN', 'LPProMK3 DAW'],
+  dawPortIndex: 2,
 
   controls: [
     ...gridControls(),

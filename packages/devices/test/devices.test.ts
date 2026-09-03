@@ -157,32 +157,46 @@ describe.each([
 describe('the ports, as the hardware presents them', () => {
   const models = Object.entries(DEVICE_SPECS);
 
-  it.each(models)('%s puts the DAW port first', (_model, spec) => {
-    // Not `dawPortIndex < length` — the actual claim is that it is *first*,
-    // which is what Live's Launchpad_X capabilities say and what the two-port
-    // spec here relies on.
-    expect(spec.dawPortIndex).toBe(0);
-    expect(spec.portNames[0]).toContain('DAW');
-    expect(spec.portNames[1]).toContain('MIDI');
+  it.each(models)('%s points dawPortIndex at a port actually called DAW', (_model, spec) => {
+    // Not `dawPortIndex < length`, which stayed green through a spec whose
+    // index pointed at the wrong port. The DAW port is first on the X and
+    // *last* on the Pro MK3, so the claim worth making is not about position:
+    // it is that the index and the name agree.
+    expect(spec.portNames[spec.dawPortIndex]).toContain('DAW');
+    expect(spec.portNames.filter((n) => n.includes('DAW'))).toHaveLength(1);
   });
 
   it.each(models)('%s names its ports the way the hardware does', (_model, spec) => {
-    // `<prefix> DAW` / `<prefix> MIDI`: one shared prefix, a space, no
-    // brackets. The bracketed form is CoreFW's, and a port named in a style no
-    // Launchpad uses is one a host has no reason to treat as a Launchpad.
+    // `<prefix> DAW` / `<prefix> MIDI` / `<prefix> DIN`: one shared prefix, a
+    // space, no brackets. The bracketed form is CoreFW's, and a port named in
+    // a style no Launchpad uses is one a host has no reason to treat as a
+    // Launchpad.
     for (const name of spec.portNames) {
-      expect(name).toMatch(/^[A-Za-z0-9]+ (?:DAW|MIDI)$/);
+      expect(name).toMatch(/^[A-Za-z0-9]+ (?:DAW|MIDI|DIN)$/);
     }
     const prefixes = new Set(spec.portNames.map((n) => n.split(' ')[0]));
     expect(prefixes.size).toBe(1);
   });
 
   it('matches the hardware model for model', () => {
-    // From Novation's setup guides for each model. Spelled out rather than
-    // derived so that changing a spec cannot quietly change the expectation
-    // with it.
+    /*
+     * From Novation's setup guides for each model, and from the shape of
+     * Live's own `get_capabilities()`. Spelled out rather than derived so that
+     * changing a spec cannot quietly change the expectation with it.
+     *
+     * Two ports on the X, three on the Pro MK3, and the DAW port in a
+     * different place on each. Live's Launchpad_X lists SCRIPT on the first
+     * in/out pair; its Launchpad_Pro_MK3 lists REMOTE first, a propless port
+     * second and SCRIPT third.
+     */
     expect(LAUNCHPAD_X.portNames).toEqual(['LPX DAW', 'LPX MIDI']);
-    expect(LAUNCHPAD_PRO_MK3.portNames).toEqual(['LPProMK3 DAW', 'LPProMK3 MIDI']);
+    expect(LAUNCHPAD_X.dawPortIndex).toBe(0);
+    expect(LAUNCHPAD_PRO_MK3.portNames).toEqual([
+      'LPProMK3 MIDI',
+      'LPProMK3 DIN',
+      'LPProMK3 DAW',
+    ]);
+    expect(LAUNCHPAD_PRO_MK3.dawPortIndex).toBe(2);
   });
 
   it('replies to a device inquiry with the bytes Live compares against', () => {

@@ -28,25 +28,41 @@ hardware a DAW can identify, spawn a Launchpad from the wrist menu in the
 headset, or start the bridge with `--device launchpad-x` to have one opened for
 every session. Either way its two ports are named as the hardware names them:
 
-| Model | Ports, in the order the host enumerates them |
-|---|---|
-| Launchpad X | `LPX DAW`, `LPX MIDI` |
-| Launchpad Pro MK3 | `LPProMK3 DAW`, `LPProMK3 MIDI` |
+| Model | Ports, in the order the host enumerates them | DAW port |
+|---|---|---|
+| Launchpad X | `LPX DAW`, `LPX MIDI` | first |
+| Launchpad Pro MK3 | `LPProMK3 MIDI`, `LPProMK3 DIN`, `LPProMK3 DAW` | last |
 
-DAW first: Live's own `Launchpad_X` script asks for two ports in and two out
-with `SCRIPT` on the first pair and `REMOTE` on the second.
+Both the names and the order come from the hardware. Live's own scripts settle
+the order: `Launchpad_X.get_capabilities()` puts `SCRIPT` on the first in/out
+pair and `REMOTE` on the second, so the X's DAW port is first;
+`Launchpad_Pro_MK3` asks for three ports in and three out with `REMOTE` first,
+no props at all on the second and `SCRIPT` third, so the Pro MK3's DAW port is
+**last**. Nothing here may assume index 0.
 
-These were `LPX (DAW)` and `PRO MK3 (DAW)` for a while, taken from
+`LPProMK3 DIN` carries what the hardware would send out of the DIN sockets on
+its back panel. There is no back panel, so nothing is behind it. It is created
+anyway, because the device is meant to present as the hardware does and a host
+that counts ports should get the count it expects; routing to it gets the same
+silence a real Pro MK3 with empty DIN sockets would give.
+
+The names were `LPX (DAW)` and `PRO MK3 (DAW)` for a while, taken from
 [CoreFW](https://github.com/anthonyhfm/launchpad-core-firmware)'s USB
 descriptor. That was the wrong source: CoreFW is community firmware naming its
 own ports, and it parenthesises where Novation does not. The names above are
 Novation's, from their Ableton setup guides for the two models.
 
-The Pro MK3 has a third port on real hardware, `LPProMK3 DIN`, sitting between
-the other two — Live's `Launchpad_Pro_MK3` script asks for three in and three
-out, `REMOTE` first, nothing on the second, `SCRIPT` third. It is not created
-here: it exists to reach the DIN sockets on the back panel, and there is no
-back panel.
+### Why a Launchpad Mini MK2 is one device and this is not
+
+Because that generation has one port. Live's `Launchpad_MK2` capabilities list
+a single `inport` and a single `outport`, both carrying `SCRIPT` *and*
+`REMOTE` — DAW control and ordinary MIDI share one port. The MK3 generation
+split them, so a real Launchpad X shows two entries in a DAW's port list and a
+real Pro MK3 shows three. Ours showing two or three is not the difference from
+hardware.
+
+The difference is that macOS groups a real Launchpad's ports under one CoreMIDI
+*device*, and cannot group ours, for the reason below.
 
 Each endpoint also carries the hardware's identity — manufacturer
 `Focusrite - Novation`, model `Launchpad X` — set through CoreMIDI directly,
