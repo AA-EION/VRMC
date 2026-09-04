@@ -85,10 +85,35 @@ export function dashboardHtml(): string {
 -->
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='3.6' fill='%230a0c12'/><g fill='%2363e0ff'><rect x='3' y='3' width='4' height='4' rx='1'/><rect x='9' y='3' width='4' height='4' rx='1'/><rect x='3' y='9' width='4' height='4' rx='1'/><rect x='9' y='9' width='4' height='4' rx='1'/></g></svg>" />
 <style>
+  /*
+   * Both appearances, chosen by the system rather than by this file.
+   *
+   * It was "color-scheme: dark" and a single set of near-black values, which
+   * is one theme wearing the name of a design: on a Mac set to Light it was a
+   * dark rectangle in a light window, and the accent — a pale cyan picked to
+   * glow on near-black — had almost no contrast against a white card.
+   *
+   * "light-dark()" keeps both values on one line each, so a colour and its
+   * counterpart cannot drift apart the way two blocks of hex eventually do.
+   * The light values are not the dark ones lightened: the accent, the warning
+   * and the status colours are all darkened instead, because a colour legible
+   * on black is generally not legible on white.
+   */
   :root {
-    color-scheme: dark;
-    --bg: #0a0c12; --panel: #151926; --border: #262c40; --text: #e8ecf6;
-    --muted: #9aa4bf; --accent: ${ACCENT}; --ok: #6ee7a8; --bad: #ff8189; --warn: #ffc86b;
+    color-scheme: light dark;
+    --bg: light-dark(#f5f6fa, #0a0c12);
+    --panel: light-dark(#ffffff, #151926);
+    --border: light-dark(#d7dbe7, #262c40);
+    --text: light-dark(#12151f, #e8ecf6);
+    --muted: light-dark(#585f73, #9aa4bf);
+    --accent: light-dark(#0a6f8f, ${ACCENT});
+    --ok: light-dark(#0d7a44, #6ee7a8);
+    --bad: light-dark(#b3182d, #ff8189);
+    --warn: light-dark(#7a4d00, #ffc86b);
+    /* Sunken and raised surfaces, so nothing below has to hard-code a hex. */
+    --inset: light-dark(#eef0f6, #0a0c12);
+    --raised: light-dark(#e6e9f2, #2a3145);
+    --raised-hover: light-dark(#dadeeb, #38415c);
   }
   * { box-sizing: border-box; }
   body {
@@ -107,15 +132,15 @@ export function dashboardHtml(): string {
   dd { margin: .15rem 0 0; font-family: ui-monospace, Menlo, monospace; font-variant-numeric: tabular-nums; }
   .addr { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin-bottom: .5rem; }
   .addr code {
-    background: #0a0c12; border: 1px solid var(--border); border-radius: .4rem;
+    background: var(--inset); border: 1px solid var(--border); border-radius: .4rem;
     padding: .45rem .6rem; font-size: .95rem; color: var(--accent);
   }
   button {
     font: inherit; font-size: .85rem; font-weight: 600; padding: .5rem .9rem;
-    border-radius: .5rem; border: 1px solid var(--border); background: #2a3145;
+    border-radius: .5rem; border: 1px solid var(--border); background: var(--raised);
     color: var(--text); cursor: pointer;
   }
-  button:hover:not(:disabled) { background: #38415c; }
+  button:hover:not(:disabled) { background: var(--raised-hover); }
   button:disabled { opacity: .5; cursor: default; }
   .row { display: flex; gap: .5rem; flex-wrap: wrap; }
   table { width: 100%; border-collapse: collapse; font-size: .86rem; }

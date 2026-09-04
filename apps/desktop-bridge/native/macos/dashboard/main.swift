@@ -120,11 +120,30 @@ final class BridgeStatus {
 
 // MARK: - The window
 
-/// EION Studios' two inks, as the rest of the interface uses them.
+/*
+ * Colour, and why almost none of it is fixed.
+ *
+ * The first version of this window painted a near-black ground and wrote white
+ * on it, which is one theme wearing the name of a design. In Light it was
+ * white-on-white in places and unreadable in the rest, and it ignored the
+ * user's own setting entirely.
+ *
+ * Text is `.primary` and `.secondary` now — not "black" or "white opacity 0.7"
+ * — so it follows the appearance and, more to the point, is *guaranteed* to
+ * contrast with whatever is behind it, in both themes, including the ones
+ * accessibility settings produce. Anything hard-coded here would be a
+ * contrast ratio I cannot check from where I am and the user would find.
+ *
+ * The two colours that remain are semantic and both are system dynamic colours,
+ * which means they already have a Light and a Dark value chosen by people who
+ * did check.
+ */
 private extension Color {
-    static let eionInk = Color(red: 0.05, green: 0.05, blue: 0.06)
-    static let eionAccent = Color(red: 0.40, green: 0.78, blue: 0.94)
-    static let eionWarn = Color(red: 0.98, green: 0.72, blue: 0.35)
+    /// Something needs attention. Orange rather than red: nothing here is a
+    /// failure the user caused, and red would say it was.
+    static let warn = Color(nsColor: .systemOrange)
+    /// The accent, used sparingly — for the tint on glass, not for text.
+    static let brand = Color(nsColor: .controlAccentColor)
 }
 
 struct DashboardView: View {
@@ -164,13 +183,20 @@ struct DashboardView: View {
         .onDisappear { model.stop() }
     }
 
-    /// A quiet gradient, so the glass has something to refract.
+    /// A quiet ground, so the glass has something to refract.
     ///
     /// Liquid Glass over a flat fill reads as a grey rectangle — the material
-    /// is only legible when there is something behind it to bend.
+    /// is only legible when there is something behind it to bend. So there is a
+    /// gradient, but built from the *window's* own background colour rather
+    /// than a fixed one: it follows the appearance, and the accent tint over it
+    /// is faint enough to stay out of the way of the text on top.
     private var backdrop: some View {
         LinearGradient(
-            colors: [Color.eionInk, Color.eionInk.opacity(0.82), Color.eionAccent.opacity(0.16)],
+            colors: [
+                Color(nsColor: .windowBackgroundColor),
+                Color(nsColor: .underPageBackgroundColor),
+                Color.brand.opacity(0.14),
+            ],
             startPoint: .topLeading,
             endPoint: .bottomTrailing
         )
@@ -186,7 +212,7 @@ struct DashboardView: View {
                 .font(.system(.caption, design: .monospaced))
                 .foregroundStyle(.secondary)
         }
-        .foregroundStyle(.white)
+        .foregroundStyle(.primary)
     }
 
     private var pairingCard: some View {
@@ -199,20 +225,20 @@ struct DashboardView: View {
                     Text(code)
                         .font(.system(size: 34, weight: .medium, design: .monospaced))
                         .tracking(4)
-                        .foregroundStyle(.white)
+                        .foregroundStyle(.primary)
                         .textSelection(.enabled)
                     Spacer()
                     Button(copied ? "Copied" : "Copy") { copy(code) }
                         .buttonStyle(.glass)
                 }
                 if status?.pairingRegistered == false {
-                    Note("not reachable — check the network", tone: .eionWarn)
+                    Note("not reachable — check the network", tone: .warn)
                 }
                 if let site = status?.siteUrl, !site.isEmpty {
                     Note("open \(site) in the headset")
                 }
             } else if let reason = status?.pairingError, !reason.isEmpty {
-                Note(reason, tone: .eionWarn)
+                Note(reason, tone: .warn)
             } else {
                 Note("publishing is off")
             }
@@ -227,10 +253,10 @@ struct DashboardView: View {
             Row("Jitter", value: milliseconds(status?.jitterMs), detail: "peak \(milliseconds(status?.peakJitterMs))")
             Row("Loss", value: status?.lossRatio.map { percent($0) } ?? "—")
             if let error = status?.rtcError, !error.isEmpty {
-                Note(error, tone: .eionWarn)
+                Note(error, tone: .warn)
             }
             if let error = model.error {
-                Note(error, tone: .eionWarn)
+                Note(error, tone: .warn)
             }
         }
     }
@@ -242,7 +268,7 @@ struct DashboardView: View {
                 Note(status?.midiAvailable == false
                      ? "no MIDI port — the bridge cannot reach a DAW"
                      : "none open; spawn one from the wrist menu in the headset",
-                     tone: status?.midiAvailable == false ? .eionWarn : nil)
+                     tone: status?.midiAvailable == false ? .warn : nil)
             } else {
                 ForEach(devices) { device in
                     Row(device.model, value: "", detail: device.detail)
@@ -282,7 +308,7 @@ private struct Card<Content: View>: View {
             Text(title.uppercased())
                 .font(.system(size: 11, weight: .semibold))
                 .tracking(1.4)
-                .foregroundStyle(.white.opacity(0.55))
+                .foregroundStyle(.secondary)
             content
         }
         .frame(maxWidth: .infinity, alignment: .leading)
@@ -306,18 +332,18 @@ private struct Row: View {
 
     var body: some View {
         HStack(alignment: .firstTextBaseline) {
-            Text(label).foregroundStyle(.white.opacity(0.75))
+            Text(label).foregroundStyle(.secondary)
             Spacer(minLength: 12)
             VStack(alignment: .trailing, spacing: 2) {
                 if !value.isEmpty {
                     Text(value)
                         .font(.system(.body, design: .monospaced))
-                        .foregroundStyle(.white)
+                        .foregroundStyle(.primary)
                 }
                 if let detail, !detail.isEmpty {
                     Text(detail)
                         .font(.caption)
-                        .foregroundStyle(.white.opacity(0.5))
+                        .foregroundStyle(.secondary)
                 }
             }
         }
@@ -337,9 +363,79 @@ private struct Note: View {
     var body: some View {
         Text(text)
             .font(.system(size: 12))
-            .foregroundStyle(tone ?? .white.opacity(0.55))
+            .foregroundStyle(tone ?? Color.secondary)
             .fixedSize(horizontal: false, vertical: true)
             .frame(maxWidth: .infinity, alignment: .leading)
+    }
+}
+
+// MARK: - Lifecycle
+
+/*
+ * When the window exists, and when the process does.
+ *
+ * THE PROBLEM THIS SOLVES
+ * A dock icon lingered after the window was closed, and opening the dashboard
+ * again added another — so the dock accumulated one icon per time it had ever
+ * been opened. The cause was simply that nothing ever ended the process: the
+ * run loop kept going with no window, holding an activation policy that puts an
+ * icon in the dock.
+ *
+ * THE RULES, WHICH ARE THREE
+ * The process ends when its last window closes. It ends when it loses focus,
+ * because a status window you have clicked away from has served its purpose and
+ * a lingering one is clutter. And a second copy is never started: the bridge
+ * raises the one that is already running instead.
+ *
+ * WHY `hasBeenActive` GUARDS THE SECOND RULE
+ * `applicationDidResignActive` also fires *before* a launching app has ever
+ * been active — the window would appear and vanish in the same breath. So the
+ * rule only arms once the app has actually held focus at least once.
+ */
+final class DashboardDelegate: NSObject, NSApplicationDelegate {
+    private let window: NSWindow
+    private var hasBeenActive = false
+    private var signalSource: DispatchSourceSignal?
+
+    init(window: NSWindow) {
+        self.window = window
+    }
+
+    func applicationDidFinishLaunching(_ notification: Notification) {
+        /*
+         * SIGUSR1 means "the user asked for the dashboard again".
+         *
+         * The bridge sends it rather than launching a second copy. Handled
+         * through a Dispatch source rather than `signal()` because a signal
+         * handler may only call async-signal-safe functions, and raising a
+         * window is emphatically not one — a Dispatch source delivers on a
+         * queue, where ordinary code is allowed.
+         */
+        signal(SIGUSR1, SIG_IGN)
+        let source = DispatchSource.makeSignalSource(signal: SIGUSR1, queue: .main)
+        source.setEventHandler { [weak self] in
+            self?.raise()
+        }
+        source.resume()
+        signalSource = source
+    }
+
+    func applicationShouldTerminateAfterLastWindowClosed(_ app: NSApplication) -> Bool {
+        true
+    }
+
+    func applicationDidBecomeActive(_ notification: Notification) {
+        hasBeenActive = true
+    }
+
+    func applicationDidResignActive(_ notification: Notification) {
+        guard hasBeenActive else { return }
+        NSApplication.shared.terminate(nil)
+    }
+
+    private func raise() {
+        window.makeKeyAndOrderFront(nil)
+        NSApplication.shared.activate(ignoringOtherApps: true)
     }
 }
 
@@ -354,6 +450,10 @@ private struct Note: View {
  * is what the tray helper already does here, it is predictable, and
  * `setActivationPolicy(.regular)` is what turns a helper into something with a
  * Dock icon and a window that can take focus.
+ *
+ * `.regular` is also why the lifecycle above matters: that policy is what puts
+ * the icon in the dock, so the icon is present exactly as long as the process
+ * is, and the process is present exactly as long as the window is wanted.
  */
 let arguments = CommandLine.arguments
 let base = URL(string: arguments.count > 1 ? arguments[1] : "http://127.0.0.1:7401/")
@@ -373,9 +473,15 @@ window.titlebarAppearsTransparent = true
 window.titleVisibility = .hidden
 // The glass has to have the desktop behind it to be worth using.
 window.isMovableByWindowBackground = true
+// Closing the window ends the process, so the window must not outlive its own
+// close by being kept alive for a reuse that never comes.
+window.isReleasedWhenClosed = false
 window.contentView = NSHostingView(rootView: DashboardView(baseURL: base))
 window.center()
 window.makeKeyAndOrderFront(nil)
+
+let delegate = DashboardDelegate(window: window)
+app.delegate = delegate
 
 app.activate(ignoringOtherApps: true)
 app.run()

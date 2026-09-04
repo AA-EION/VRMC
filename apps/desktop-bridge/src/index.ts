@@ -607,6 +607,54 @@ async function main(): Promise<void> {
     driver,
   });
 
+  /*
+   * The dashboard window, at most one.
+   *
+   * Launching a second copy is what filled the dock with an icon per time the
+   * dashboard had ever been opened. The window's own process now ends when it
+   * closes or loses focus, and this is the other half: when one is already
+   * running it is *raised* rather than launched again.
+   *
+   * SIGUSR1 is the poke. Not a socket or a file: the bridge already holds the
+   * child's handle, so it knows exactly which process to signal, and nothing
+   * has to be invented to find out.
+   */
+  let dashboardChild: ReturnType<typeof spawn> | null = null;
+
+  const openDashboard = (executable: string): void => {
+    if (dashboardChild !== null) {
+      try {
+        dashboardChild.kill("SIGUSR1");
+        return;
+      } catch {
+        // It has gone since we last looked; fall through and start one.
+        dashboardChild = null;
+      }
+    }
+    try {
+      const child = spawn(executable, [dashboardUrl], {
+        detached: true,
+        stdio: "ignore",
+      });
+      dashboardChild = child;
+      // Cleared as soon as it goes, so the next click launches rather than
+      // signalling a pid that no longer exists — or worse, one the system has
+      // since given to something else.
+      child.once("exit", () => {
+        if (dashboardChild === child) dashboardChild = null;
+      });
+      // Detached and unreferenced: closing the window must not stop the
+      // bridge, and the bridge exiting must not close the window out from
+      // under somebody reading it.
+      child.unref();
+    } catch (err) {
+      log(
+        `could not open the dashboard window (${err instanceof Error ? err.message : String(err)}); using the browser`,
+      );
+      openUrl(dashboardUrl);
+    }
+  };
+
   let tray: TrayController | null = null;
   const refreshTray = (): void => {
     if (tray === null) return;
@@ -643,21 +691,7 @@ async function main(): Promise<void> {
           openUrl(dashboardUrl);
           return;
         }
-        try {
-          const child = spawn(native, [dashboardUrl], {
-            detached: true,
-            stdio: "ignore",
-          });
-          // Detached and unreferenced: closing the window must not be able to
-          // stop the bridge, and the bridge exiting must not close the window
-          // out from under somebody reading it.
-          child.unref();
-        } catch (err) {
-          log(
-            `could not open the dashboard window (${err instanceof Error ? err.message : String(err)}); using the browser`,
-          );
-          openUrl(dashboardUrl);
-        }
+        openDashboard(native);
         return;
       }
       case TrayAction.AUTOSTART:
