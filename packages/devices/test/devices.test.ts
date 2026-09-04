@@ -743,6 +743,112 @@ describe('Launchkey MK3 49', () => {
     expect(new Set(midi).size).toBeLessThan(midi.length);
   });
 
+  it('releases every held control, whatever its id', () => {
+    /*
+     * The bug this found. The emulator's `pressed` and `leds` arrays were a
+     * fixed 110 entries — enough for a Launchpad, whose ids are `row * 10 +
+     * col` — and this device's ids run to 308. Writes past the end of a typed
+     * array are silently dropped, so six of the sixteen pads read back as
+     * never held, and `releaseAll` skipped them.
+     *
+     * `releaseAll` is not a corner: it runs when the device is removed and
+     * when the host changes mode. A note left on then has nothing left to
+     * stop it, and it rings until the DAW is restarted.
+     */
+    const sent: number[][] = [];
+    const emulator = new LaunchpadEmulator(spec, {
+      onLed: () => {},
+      onMidiOut: (bytes) => sent.push([...bytes]),
+    });
+
+    const pressable = spec.controls.filter((c) => c.kind !== ControlKind.OUTPUT_ONLY);
+    for (const control of pressable) emulator.press(control.index, 100);
+    sent.length = 0;
+    emulator.releaseAll();
+
+    // One release each, carrying the MIDI byte rather than the id.
+    expect(sent).toHaveLength(pressable.length);
+    const released = new Set(sent.map((m) => m[1]!));
+    for (const control of pressable) {
+      expect(released.has(control.data1 ?? control.index), `${control.label || control.role} ${control.index} was left ringing`).toBe(true);
+    }
+    // And every one of them is a release: velocity 0, or CC 0.
+    expect(sent.every((m) => m[2] === 0)).toBe(true);
+  });
+
+  it('lights the pad the DAW addressed, by note number', () => {
+    /*
+     * Two bugs met here. The host lights a pad with a Note On for the note
+     * that pad *sends* — 96..111 — and everything on this side is keyed by
+     * control id — 100..115. On a Launchpad those are the same number, so the
+     * emulator used the wire byte as the LED index and nothing noticed. Here
+     * note 96 landed on id 96, which is not a control at all, while ids
+     * 110..115 were past the end of a fixed 110-entry array and dropped.
+     *
+     * Either way the pad stayed dark with the DAW believing it lit — and a
+     * session grid that does not light is the whole point of the device.
+     */
+    const lit: number[] = [];
+    const emulator = new LaunchpadEmulator(spec, {
+      onLed: (index, r, g, b) => lit.push(index, r, g, b),
+      onMidiOut: () => {},
+    });
+    const pads = spec.controls.filter((c) => c.role === ButtonRole.GRID);
+    for (const pad of pads) {
+      emulator.handleHostMessage(new Uint8Array([0x90, pad.data1!, 5]));
+    }
+    expect(lit.filter((_, i) => i % 4 === 0)).toEqual(pads.map((p) => p.index));
+    // Colour, not merely an event: a palette entry that decoded to black would
+    // satisfy the indices above and still leave the grid dark.
+    expect(lit.filter((_, i) => i % 4 !== 0).some((c) => c > 0)).toBe(true);
+  });
+
+  it('extinguishes the pad a Note Off names', () => {
+    // The other half of the translation, and the half a lit-only test misses:
+    // an untranslated Note Off clears an id nothing owns, so the pad stays lit
+    // after the clip stops — which on a session grid is worse than never
+    // lighting, because it reads as a clip still playing.
+    const lit: Array<[number, number]> = [];
+    const emulator = new LaunchpadEmulator(spec, {
+      onLed: (index, r) => lit.push([index, r]),
+      onMidiOut: () => {},
+    });
+    const pad = spec.controls.find((c) => c.role === ButtonRole.GRID)!;
+    emulator.handleHostMessage(new Uint8Array([0x90, pad.data1!, 5]));
+    emulator.handleHostMessage(new Uint8Array([0x80, pad.data1!, 0]));
+    expect(lit).toHaveLength(2);
+    expect(lit[1]![0]).toBe(pad.index);
+    expect(lit[1]![1]).toBe(0);
+  });
+
+  it('does not confuse a key with the fader that sends the same byte', () => {
+    // Note 41 is a key; CC 41 is the sixth fader. One reverse map over both
+    // would resolve whichever was built first, so a Note On for 41 could light
+    // a fader and a CC could light a key.
+    const lit: number[] = [];
+    const emulator = new LaunchpadEmulator(spec, {
+      onLed: (index) => lit.push(index),
+      onMidiOut: () => {},
+    });
+    emulator.handleHostMessage(new Uint8Array([0x90, 41, 5]));
+    emulator.handleHostMessage(new Uint8Array([0xb0, 41, 5]));
+    const key41 = spec.controls.find((c) => c.role === ButtonRole.KEY && c.data1 === 41)!;
+    const fader41 = spec.controls.find((c) => c.role === ButtonRole.FADER && c.data1 === 41)!;
+    expect(key41.index).not.toBe(fader41.index);
+    expect(lit).toEqual([key41.index, fader41.index]);
+  });
+
+  it('gives each kind of control a unique MIDI byte, so the reverse map is exact', () => {
+    // Within one status nibble the bytes must not repeat, or the id an LED
+    // resolves to is whichever control happened to be declared first.
+    for (const kind of [ControlKind.NOTE, ControlKind.CC]) {
+      const bytes = spec.controls
+        .filter((c) => c.kind === kind)
+        .map((c) => c.data1 ?? c.index);
+      expect(new Set(bytes).size, `${kind} bytes collide`).toBe(bytes.length);
+    }
+  });
+
   it('has sixteen pads in two rows, not sixty-four in eight', () => {
     // `gridSize` is the width. Anything reading it as both dimensions draws an
     // 8x8 where there are two rows of eight.
