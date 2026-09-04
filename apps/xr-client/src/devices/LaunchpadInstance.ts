@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 import {
+  ButtonRole,
+  CompositeSurface,
   DeviceModel,
-  isContinuousPart,
   LaunchkeySurface,
   LaunchpadLayout,
   specFor,
+  VrmcSurface,
   type DeviceSpec,
 } from '@vrmc/devices';
 
@@ -15,7 +17,7 @@ import {
  * The two implementations answer these identically and nothing else has to
  * know which it is holding.
  */
-export type DeviceSurface = LaunchpadLayout | LaunchkeySurface;
+export type DeviceSurface = LaunchpadLayout | CompositeSurface;
 import {
   KnobControl,
   PokeDetector,
@@ -75,6 +77,8 @@ export class LaunchpadInstance implements NoteSink {
    * whole of this costs those devices one empty Set and one early return.
    */
   private readonly continuous: ReadonlySet<number>;
+  /** Zone index -> MIDI channel, 0-based. See `zoneChannels`. */
+  private readonly channels: Uint8Array;
   private readonly knobs = new KnobControl();
   /** Knob index -> the zone it belongs to, so a value can name its control. */
   private readonly knobZones: number[] = [];
@@ -126,10 +130,10 @@ export class LaunchpadInstance implements NoteSink {
   /**
    * Told about each strike, with the world position of the pad that was hit.
    *
-   * Emulated hardware had no tactile audio at all: the built-in surfaces
-   * clicked and a Launchpad — the device most people actually play — was
-   * silent until the DAW answered. A virtual pad has no edge to feel, so
-   * without something immediate you cannot tell a hit from a near miss.
+   * A virtual pad has no edge to feel, so without something immediate you
+   * cannot tell a hit from a near miss. This used to be wired only to the
+   * built-in panels, leaving a Launchpad — the device most people actually
+   * play — silent until the DAW answered.
    */
   onStrike: ((note: number, velocity: number, at: Float32Array) => void) | null = null;
 
@@ -151,7 +155,8 @@ export class LaunchpadInstance implements NoteSink {
      */
     this.knobSink = {
       onValue: (knobIndex: number, value14: number, flags: number) => {
-        const zone = this.layout.zones[this.knobZones[knobIndex] ?? -1];
+        const zoneIndex = this.knobZones[knobIndex] ?? -1;
+        const zone = this.layout.zones[zoneIndex];
         const control =
           zone === undefined
             ? undefined
@@ -160,7 +165,7 @@ export class LaunchpadInstance implements NoteSink {
         if (cc === undefined) return;
         this.link.push(
           EventType.CONTROL_CHANGE_14,
-          0,
+          this.channels[zoneIndex] ?? 0,
           cc,
           0,
           value14,
@@ -186,6 +191,8 @@ export class LaunchpadInstance implements NoteSink {
      * array so they are still drawn and still lit; only locating is masked.
      */
     this.continuous = continuousZones(this.layout);
+    this.channels = zoneChannels(this.layout);
+    paintResting(this.layout, this.leds);
     this.detector = new PokeDetector(
       this.continuous.size === 0
         ? this.layout
@@ -243,6 +250,24 @@ export class LaunchpadInstance implements NoteSink {
       );
       this.knobs.setKnobPosition(i, world[0], world[1], world[2]);
     }
+  }
+
+  /**
+   * The zones that are knobs or faders, in knob order.
+   *
+   * For the renderer, which draws a knob where the grab test looks for one —
+   * reading it from here rather than recomputing it is what stops the two
+   * drifting apart, which on a control you cannot feel is the difference
+   * between a knob and a knob-shaped decoration.
+   */
+  get continuousZoneIndices(): readonly number[] {
+    return this.knobZones;
+  }
+
+  /** A continuous control's value, 0..1, by its zone. */
+  valueOfZone(zoneIndex: number): number {
+    const knob = this.knobZones.indexOf(zoneIndex);
+    return knob < 0 ? 0 : this.knobs.valueOf(knob);
   }
 
   /**
@@ -334,7 +359,7 @@ export class LaunchpadInstance implements NoteSink {
     }
     this.link.push(
       EventType.NOTE_ON,
-      0,
+      this.channels[zoneIndex] ?? 0,
       controlIndex,
       velocity,
       0,
@@ -348,7 +373,7 @@ export class LaunchpadInstance implements NoteSink {
     this.leds.release(zoneIndex);
     this.link.push(
       EventType.NOTE_OFF,
-      0,
+      this.channels[zoneIndex] ?? 0,
       controlIndex,
       0,
       0,
@@ -358,10 +383,10 @@ export class LaunchpadInstance implements NoteSink {
     );
   }
 
-  aftertouch(_zoneIndex: number, controlIndex: number, pressure: number): void {
+  aftertouch(zoneIndex: number, controlIndex: number, pressure: number): void {
     this.link.push(
       EventType.AFTERTOUCH_POLY,
-      0,
+      this.channels[zoneIndex] ?? 0,
       controlIndex,
       pressure,
       0,
@@ -387,9 +412,9 @@ export class LaunchpadInstance implements NoteSink {
  * in the same row, at the same size.
  */
 function buildSurface(spec: DeviceSpec): DeviceSurface {
-  return spec.model === DeviceModel.LAUNCHKEY_MK3_49
-    ? new LaunchkeySurface(spec)
-    : new LaunchpadLayout(spec);
+  if (spec.model === DeviceModel.LAUNCHKEY_MK3_49) return new LaunchkeySurface(spec);
+  if (spec.model === DeviceModel.VRMC) return new VrmcSurface(spec);
+  return new LaunchpadLayout(spec);
 }
 
 /**
@@ -399,15 +424,66 @@ function buildSurface(spec: DeviceSpec): DeviceSurface {
  * gains a fader row later needs no change here.
  */
 function continuousZones(surface: DeviceSurface): ReadonlySet<number> {
-  if (!(surface instanceof LaunchkeySurface)) return EMPTY_ZONES;
+  if (!(surface instanceof CompositeSurface)) return EMPTY_ZONES;
   const out = new Set<number>();
   for (const zone of surface.zones) {
-    if (isContinuousPart(surface.partOf(zone.index))) out.add(zone.index);
+    if (surface.isContinuous(zone.index)) out.add(zone.index);
+  }
+  return out;
+}
+
+/**
+ * The MIDI channel each zone sends on.
+ *
+ * One byte per zone rather than a lookup per note: this is read on the note
+ * path, which runs at whatever rate somebody can play, and the answer never
+ * changes for the life of the device.
+ *
+ * Every Launchpad is channel 1 throughout — a grid is one instrument. A
+ * composite device is not: the VRMC surface's pads are a drum rack on channel
+ * 10 while its keys are on 1, and sending the pads on 1 puts them into the
+ * keyboard's instrument, where they play as pitches rather than as drums.
+ */
+function zoneChannels(surface: DeviceSurface): Uint8Array {
+  const out = new Uint8Array(surface.zones.length);
+  if (surface instanceof CompositeSurface) {
+    for (const zone of surface.zones) out[zone.index] = surface.channelOf(zone.index);
   }
   return out;
 }
 
 const EMPTY_ZONES: ReadonlySet<number> = new Set<number>();
+
+/**
+ * What each control looks like with nothing lighting it.
+ *
+ * A Launchpad's are all the same dark plastic, which is why this said nothing
+ * until a keyboard arrived. A piano key is bone-white and an accidental is
+ * near-black, and drawing them at a pad grid's resting colour gives a row of
+ * dark rectangles whose shape you cannot read — which is exactly what the VRMC
+ * surface looked like the first time it was drawn as a device.
+ *
+ * The colours are the ones the fixed panels used, so the instrument did not
+ * change appearance when it stopped being built into the engine.
+ */
+function paintResting(surface: DeviceSurface, leds: LedState): void {
+  if (!(surface instanceof CompositeSurface)) return;
+  for (const zone of surface.zones) {
+    const role = surface.roleOf(zone.index);
+    if (role === ButtonRole.KEY) {
+      const [r, g, b] = zone.accidental ? KEY_BLACK : KEY_WHITE;
+      leds.setRest(zone.index, r, g, b);
+    } else if (role === ButtonRole.KNOB || role === ButtonRole.FADER) {
+      // The recess a knob or a fader cap sits in, darker than the chassis so
+      // the control reads as standing proud of it.
+      leds.setRest(zone.index, ...CONTROL_WELL);
+    }
+  }
+}
+
+const KEY_WHITE = [0.933, 0.945, 0.965] as const;
+const KEY_BLACK = [0.078, 0.086, 0.122] as const;
+const CONTROL_WELL = [0.035, 0.04, 0.055] as const;
 
 /** Build an instance for a model, or null if the model is not emulated. */
 export function createLaunchpad(

@@ -23,7 +23,17 @@ keys, pads and knobs. Because CoreMIDI publishes system-wide, DAWs that rescan
 while running see it without a restart.
 
 A plain port is all it can be — no control-surface script matches the name
-"VRMC", so Ableton lists it as a nameless keyboard and nothing lights up. For
+"VRMC", so Ableton lists it as a nameless keyboard and nothing lights up.
+
+The surface behind that port is a device like any other: `+ VRMC` in the wrist
+menu adds one, and removing it closes the port, which the DAW sees as an
+unplug. It used to be three device ids aliased onto this one port, because in
+the headset it was two panels and a row of knobs built into the engine rather
+than a device — which is also why it could not be moved, pinned, dropped onto a
+real desk, or saved in an arrangement. Its keys send on channel 1 and its pads
+on channel 10, so a drum rack hears the pads and an instrument hears the keys.
+
+For
 hardware a DAW can identify, spawn a Launchpad from the wrist menu in the
 headset, or start the bridge with `--device launchpad-x` to have one opened for
 every session. Either way its two ports are named as the hardware names them:

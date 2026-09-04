@@ -19,6 +19,7 @@ import {
   isDeviceInquiry,
   isGridIndex,
   DeviceModel,
+  isHardwareModel,
   nearestPaletteIndex,
   paletteB,
   paletteG,
@@ -31,6 +32,9 @@ import {
   xy,
   type DeviceSpec,
   LaunchpadLayout,
+  VRMC,
+  VrmcPart,
+  VrmcSurface,
   type EmulatorObserver,
 } from '../src/index.js';
 
@@ -156,7 +160,13 @@ describe.each([
  * in/out pair and REMOTE on the second, so the DAW port is first.
  */
 describe('the ports, as the hardware presents them', () => {
-  const models = Object.entries(DEVICE_SPECS);
+  // Only the models that emulate hardware. The VRMC surface has a spec like
+  // these do but claims no hardware at all — it opens one plain port under
+  // whatever --port-name says — so holding it to a Launchpad's naming would be
+  // asserting the opposite of what it is for. See the block below.
+  const models = Object.entries(DEVICE_SPECS).filter(([model]) =>
+    isHardwareModel(model),
+  );
 
   it.each(models)('%s points dawPortIndex at a port actually called DAW', (_model, spec) => {
     // Not `dawPortIndex < length`, which stayed green through a spec whose
@@ -211,11 +221,98 @@ describe('the ports, as the hardware presents them', () => {
      * This is the one part of looking like a Launchpad that a virtual port can
      * actually satisfy, so it is worth pinning to the byte.
      */
-    for (const spec of Object.values(DEVICE_SPECS)) {
+    for (const [, spec] of models) {
       const reply = buildInquiryReply(spec);
       expect([...reply.slice(5, 12)]).toEqual([
         0x00, 0x20, 0x29, spec.familyCode[0], spec.familyCode[1], 0x00, 0x00,
       ]);
+    }
+  });
+});
+
+describe('the VRMC surface', () => {
+  it('is a spec, but not hardware', () => {
+    /*
+     * The distinction the bridge acts on. A model on `HARDWARE_MODELS` opens
+     * the ports its spec names, publishes a manufacturer and model on the
+     * endpoints, answers a Device Inquiry and speaks its protocol through an
+     * emulator. This one must do none of that: no DAW ships a script for a
+     * "VRMC", so a Novation-shaped identity would only invite a host to load
+     * somebody else's script over a device that cannot answer it.
+     */
+    expect(specFor(DeviceModel.VRMC)).toBe(VRMC);
+    expect(isHardwareModel(DeviceModel.VRMC)).toBe(false);
+    expect(VRMC.usbVendorId).toBe(0);
+    expect(VRMC.usbProductId).toBe(0);
+    expect(VRMC.familyCode).toEqual([0, 0]);
+    // One port, and nothing named DAW on it — there is no DAW protocol here.
+    expect(VRMC.portNames).toHaveLength(1);
+    expect(VRMC.portNames[0]).not.toContain('DAW');
+  });
+
+  it('has the keys, pads and knobs the two fixed panels had', () => {
+    // The surface did not change when it became a device: same two octaves
+    // from C3, same sixteen drum pads from note 36, same four CCs from 21.
+    const keys = VRMC.controls.filter((c) => c.role === ButtonRole.KEY);
+    const pads = VRMC.controls.filter((c) => c.role === ButtonRole.GRID);
+    const knobs = VRMC.controls.filter((c) => c.role === ButtonRole.KNOB);
+    expect(keys.map((c) => c.data1)).toEqual(
+      Array.from({ length: 25 }, (_, i) => 48 + i),
+    );
+    expect(pads.map((c) => c.data1)).toEqual(
+      Array.from({ length: 16 }, (_, i) => 36 + i),
+    );
+    expect(knobs.map((c) => c.data1)).toEqual([21, 22, 23, 24]);
+    expect(knobs.every((c) => c.kind === ControlKind.CC)).toBe(true);
+  });
+
+  it('gives every control a unique id, though a pad and a key share a note', () => {
+    // Notes 48..51 are both the bottom of the keyboard and four of the pads.
+    // They stay apart on the wire by channel, but nothing keyed by id would
+    // know that — so the ids are disjoint, as on the Launchkey.
+    const ids = VRMC.controls.map((c) => c.index);
+    expect(new Set(ids).size).toBe(ids.length);
+    const notes = VRMC.controls
+      .filter((c) => c.kind === ControlKind.NOTE)
+      .map((c) => c.data1);
+    expect(new Set(notes).size).toBeLessThan(notes.length);
+  });
+
+  it('puts the pads on channel 10 and the keys on 1', () => {
+    /*
+     * The one thing that would break silently. A drum rack listens on channel
+     * 10 and nothing else does, so pads sent on 1 arrive at the keyboard's
+     * instrument and play as pitches — audible, plausible, and wrong.
+     */
+    const surface = new VrmcSurface();
+    const padZone = surface.zones.find(
+      (z) => surface.partOf(z.index) === VrmcPart.PADS,
+    )!;
+    const keyZone = surface.zones.find(
+      (z) => surface.partOf(z.index) === VrmcPart.KEYS,
+    )!;
+    expect(surface.channelOf(padZone.index)).toBe(9);
+    expect(surface.channelOf(keyZone.index)).toBe(0);
+  });
+
+  it('makes the knobs pinchable and everything else pokeable', () => {
+    const surface = new VrmcSurface();
+    for (const zone of surface.zones) {
+      const part = surface.partOf(zone.index);
+      expect(surface.isContinuous(zone.index)).toBe(part === VrmcPart.KNOBS);
+    }
+  });
+
+  it('locates every control from its own centre', () => {
+    // The geometry is what decides whether a poke lands on the pad somebody
+    // aimed at, and it is wrong in a way that looks fine from outside.
+    const surface = new VrmcSurface();
+    for (const zone of surface.zones) {
+      const x = zone.rect.x + zone.rect.width / 2;
+      const y = zone.rect.y + zone.rect.height / 2;
+      expect(surface.locate(x, y), `zone ${zone.index} (${zone.label})`).toBe(
+        zone.index,
+      );
     }
   });
 });

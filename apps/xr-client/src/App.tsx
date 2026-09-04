@@ -101,7 +101,14 @@ export function App(): React.ReactElement {
   const [support, setSupport] = useState<XrSupport | null>(null);
   // The engine mutates its device array in place, which React cannot observe,
   // so it publishes a snapshot whenever the roster changes.
-  const [devices, setDevices] = useState<readonly LaunchpadInstance[]>([]);
+  //
+  // Seeded from the engine rather than from an empty array: the VRMC surface is
+  // created in the constructor, before this component can subscribe, so an
+  // empty initial state would leave it played but not drawn until the next
+  // change happened to publish one.
+  const [devices, setDevices] = useState<readonly LaunchpadInstance[]>(() => [
+    ...engine.launchpads,
+  ]);
   const [layouts, setLayouts] = useState<LayoutState>(() => engine.layouts);
   const [pairingBusy, setPairingBusy] = useState(false);
   const [pairingNote, setPairingNote] = useState('');
@@ -470,6 +477,13 @@ export function App(): React.ReactElement {
         label: () => '+ KEYBOARD',
         run: () => {
           engine.addDevice(DeviceModel.LAUNCHKEY_MK3_49);
+        },
+      },
+      {
+        id: 'add-vrmc',
+        label: () => '+ VRMC',
+        run: () => {
+          engine.addDevice(DeviceModel.VRMC);
         },
       },
       {

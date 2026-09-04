@@ -23,20 +23,6 @@ export interface SurfaceTheme {
   plate: string;
 }
 
-export const PAD_THEME: SurfaceTheme = {
-  idle: '#2b3350',
-  idleAccidental: '#161a28',
-  active: '#63e0ff',
-  plate: '#0b0e17',
-};
-
-export const KEY_THEME: SurfaceTheme = {
-  idle: '#eef1f6',
-  idleAccidental: '#14161f',
-  active: '#63e0ff',
-  plate: '#0b0e17',
-};
-
 /** Seconds a released zone takes to fade back to its resting colour. */
 const FADE_SECONDS = 0.18;
 

@@ -10,3 +10,5 @@ export * from './LaunchpadEmulator.js';
 export * from './registry.js';
 export * from './LaunchpadLayout.js';
 export * from './LaunchkeyLayout.js';
+export * from './CompositeSurface.js';
+export * from './vrmc.js';

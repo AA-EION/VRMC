@@ -31,9 +31,26 @@ const PULSE_FLOOR = 0.25;
 /** Seconds a released control takes to fade back to its host-set colour. */
 const TOUCH_FADE = 0.14;
 
+/** What an unlit control looks like unless the device says otherwise. */
+const DEFAULT_REST = [0.055, 0.06, 0.075] as const;
+
 export class LedState {
   /** Target colour per zone, 0..1 linear-ish, as three floats. */
   private readonly base: Float32Array;
+  /**
+   * What a zone looks like with nothing lighting it.
+   *
+   * An unlit control still has to be visible as a physical object — on a real
+   * Launchpad the plastic catches the room's light, and in passthrough the
+   * same has to be faked or the grid dissolves into holes.
+   *
+   * Per zone rather than one constant because the devices are no longer all
+   * pad grids. A piano key is bone-white and its accidentals near-black; a
+   * keyboard rendered at a pad grid's dark resting colour is a row of dark
+   * rectangles you cannot read the shape of, which is what it looked like the
+   * first time the VRMC surface was drawn this way.
+   */
+  private readonly rest: Float32Array;
   /** Blink mode per zone. */
   private readonly blink: Uint8Array;
   /** Local press overlay: seconds of fade remaining once released. */
@@ -53,9 +70,30 @@ export class LedState {
   constructor(zoneCount: number) {
     this.zoneCount = zoneCount;
     this.base = new Float32Array(zoneCount * 3);
+    this.rest = new Float32Array(zoneCount * 3);
+    for (let i = 0; i < zoneCount; i++) {
+      this.rest[i * 3] = DEFAULT_REST[0];
+      this.rest[i * 3 + 1] = DEFAULT_REST[1];
+      this.rest[i * 3 + 2] = DEFAULT_REST[2];
+    }
     this.blink = new Uint8Array(zoneCount);
     this.press = new Float32Array(zoneCount);
     this.held = new Uint8Array(zoneCount);
+  }
+
+  /**
+   * Set a zone's unlit colour, 0..1 per channel.
+   *
+   * Set once when the device is built, from what the control physically is —
+   * not from anything the DAW says, which goes through `setLed`.
+   */
+  setRest(zoneIndex: number, r: number, g: number, b: number): void {
+    if (zoneIndex < 0 || zoneIndex >= this.zoneCount) return;
+    const o = zoneIndex * 3;
+    this.rest[o] = r;
+    this.rest[o + 1] = g;
+    this.rest[o + 2] = b;
+    this.dirty = true;
   }
 
   attach(mesh: InstancedMesh | null): void {
@@ -184,11 +222,16 @@ export class LedState {
         b += (1 - b) * mix;
       }
 
-      // An unlit pad still needs to be visible as a physical object, so it
-      // renders as dark grey rather than pure black. On a real Launchpad the
-      // plastic catches the room's light; in passthrough the same has to be
-      // faked or the grid dissolves into holes.
-      this.scratch.setRGB(0.055 + r * 0.945, 0.06 + g * 0.94, 0.075 + b * 0.925);
+      // Lit colour over the control's own unlit one, so a dark pad and a white
+      // key both start from what they are and brighten from there.
+      const rr = this.rest[o]!;
+      const rg = this.rest[o + 1]!;
+      const rb = this.rest[o + 2]!;
+      this.scratch.setRGB(
+        rr + r * (1 - rr),
+        rg + g * (1 - rg),
+        rb + b * (1 - rb),
+      );
       mesh.setColorAt(i, this.scratch);
     }
     if (mesh.instanceColor !== null) mesh.instanceColor.needsUpdate = true;

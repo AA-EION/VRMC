@@ -269,17 +269,20 @@ const scene = await page.evaluate((roomObjects) => {
 check('R3F scene reachable', scene.ok, scene.ok ? '' : scene.reason);
 
 if (scene.ok) {
-  check('both instrument surfaces built as instanced meshes', scene.instanced === 2,
+  // One surface, not two. The keys, the pads and the knobs were two panels and
+  // a loose row of knobs until the VRMC surface became a device; they are one
+  // instanced mesh on one plane now, which is what makes it movable.
+  check('the VRMC surface is one instanced mesh', scene.instanced === 1,
     `${scene.instanced} instanced`);
-  check('all 41 zones instanced (25 keys + 16 pads)', scene.totalInstances === 41,
+  check('all 45 zones instanced (25 keys + 16 pads + 4 knobs)', scene.totalInstances === 45,
     `${scene.totalInstances} instances`);
-  check('instance colours allocated by the highlighter', scene.withInstanceColor === 2,
-    `${scene.withInstanceColor}/2`);
-  // 2 backing plates + 1 label plane (pads only) + 4 knobs x 2 meshes each.
-  // The room's own shell is excluded where this is gathered: this check is
-  // about the instruments, and a count that quietly includes the backdrop stops
-  // saying what its name says the moment the room gains anything.
-  check('knobs, plates and labels present', scene.meshes === 11, `${scene.meshes} plain meshes`);
+  check('instance colours allocated', scene.withInstanceColor === 1,
+    `${scene.withInstanceColor}/1`);
+  // 1 backing plate + 4 knobs x 2 meshes each. The room's own shell is
+  // excluded where this is gathered: this check is about the instruments, and
+  // a count that quietly includes the backdrop stops saying what its name says
+  // the moment the room gains anything.
+  check('knobs and plate present', scene.meshes === 9, `${scene.meshes} plain meshes`);
   check('geometry rasterised', scene.triangles > 400, `${scene.triangles} triangles/frame`);
 }
 
@@ -301,16 +304,21 @@ const framing = await page.evaluate(() => {
   if (!h) return { ok: false };
   const cam = h.camera;
   const out = [];
-  for (const inst of h.engine.instruments) {
+  for (const inst of h.engine.launchpads) {
     const [ox, oy, oz] = inst.transform.origin;
     // Centre of the surface, in world space.
     const [qx, , , qw] = inst.transform.quaternion;
     const th = 2 * Math.atan2(qx, qw);
-    const cx = ox + inst.locator.width / 2;
-    const cy = oy + (inst.locator.height / 2) * Math.cos(th);
-    const cz = oz + (inst.locator.height / 2) * Math.sin(th);
+    const cx = ox + inst.layout.width / 2;
+    const cy = oy + (inst.layout.height / 2) * Math.cos(th);
+    const cz = oz + (inst.layout.height / 2) * Math.sin(th);
     const v = new h.THREE.Vector3(cx, cy, cz).project(cam);
-    out.push({ id: inst.id, x: +v.x.toFixed(3), y: +v.y.toFixed(3), z: +v.z.toFixed(3) });
+    out.push({
+      id: inst.spec.model,
+      x: +v.x.toFixed(3),
+      y: +v.y.toFixed(3),
+      z: +v.z.toFixed(3),
+    });
   }
   return { ok: true, projected: out };
 });
@@ -409,10 +417,16 @@ const interaction = await page.evaluate(async () => {
   if (!h) return { ok: false, reason: 'no handle' };
 
   const engine = h.engine;
-  const pads = engine.instruments.find((i) => i.id === 'pads');
-  if (!pads) return { ok: false, reason: 'no pad instrument' };
+  // The VRMC surface, and its first pad. It is a device now rather than a
+  // built-in panel, so it is found the same way any device is.
+  const pads = engine.launchpads.find((d) => d.spec.model === 'vrmc');
+  if (!pads) return { ok: false, reason: 'no VRMC device' };
 
-  const zone = pads.locator.zones[0];
+  const padZone = pads.layout.zones.find(
+    (z) => pads.layout.partOf(z.index) === 'pads',
+  );
+  if (!padZone) return { ok: false, reason: 'no pad zone' };
+  const zone = padZone;
   const t = pads.transform;
   const [qx, , , qw] = t.quaternion;
   const th = 2 * Math.atan2(qx, qw);
@@ -429,14 +443,16 @@ const interaction = await page.evaluate(async () => {
   const lx = zone.rect.x + zone.rect.width / 2;
   const ly = zone.rect.y + zone.rect.height / 2;
 
-  // Count notes by wrapping the router's sink methods.
+  // Count notes by wrapping the device's own sink. The device *is* the sink
+  // now — there is no separate router for it — which is the point: the same
+  // path a Launchpad uses.
   const notes = [];
-  const router = pads.router;
-  const realOn = router.noteOn.bind(router);
-  router.noteOn = (zi, note, vel, off, flags) => {
-    notes.push({ zone: zi, note, vel });
-    realOn(zi, note, vel, off, flags);
+  const realOn = pads.noteOn.bind(pads);
+  pads.noteOn = (zi, control, vel, off, flags) => {
+    notes.push({ zone: zi, note: control, vel });
+    realOn(zi, control, vel, off, flags);
   };
+  const router = pads;
 
   const RADIUS = 0.008;
   const frame = engine.fingers;
@@ -463,46 +479,58 @@ const interaction = await page.evaluate(async () => {
     pads.detector.update(frame, router);
   }
 
-  // Read the instance colour the highlighter wrote for that pad.
-  let padColor = null;
-  h.scene.traverse((o) => {
-    if (o.isInstancedMesh && o.count === 16 && o.instanceColor) {
-      const a = o.instanceColor.array;
-      padColor = [a[0], a[1], a[2]].map((v) => +v.toFixed(3));
-    }
-  });
-
-  router.noteOn = realOn;
-  return { ok: true, notes, padColor };
+  pads.noteOn = realOn;
+  return { ok: true, notes, struck: zone.index };
 });
 
 check('poke produced a note', interaction.ok && interaction.notes.length === 1,
   interaction.ok ? JSON.stringify(interaction.notes) : interaction.reason);
 if (interaction.ok && interaction.notes.length === 1) {
   const n = interaction.notes[0];
-  check('note is pad 1 (C1, MIDI 36)', n.note === 36 && n.zone === 0, `note=${n.note} zone=${n.zone}`);
+  // The control *id*, not the MIDI byte: the pads' ids start at 100 and the
+  // bridge resolves them against the spec, exactly as it does for a Launchpad.
+  check('note is the first pad, by control id', n.note === 100, `note=${n.note} zone=${n.zone}`);
   check('velocity derived from approach speed', n.vel > 1 && n.vel <= 127, `velocity=${n.vel}`);
 }
+/**
+ * Read the struck pad's instance colour, once a frame has actually written it.
+ *
+ * Inside the poke evaluate it cannot be read at all: the buffer is filled by
+ * `LedState.update` from the render loop, so nothing has been written yet and
+ * what comes back is the resting colour. This check used to do exactly that,
+ * and passed — the resting colour happens to be slightly bluer than it is red,
+ * which is all the old assertion asked for. It has never tested a highlight
+ * until now.
+ */
+const readStruckPad = () =>
+  page.evaluate((struck) => {
+    const h = window.__vrmc;
+    let colour = null;
+    h.scene.traverse((o) => {
+      if (o.isInstancedMesh && o.count === 45 && o.instanceColor) {
+        const a = o.instanceColor.array;
+        const i = struck * 3;
+        colour = [a[i], a[i + 1], a[i + 2]].map((v) => +v.toFixed(3));
+      }
+    });
+    return colour;
+  }, interaction.ok ? interaction.struck : 0);
+
+// Much brighter than its resting colour, which is the dark plastic a pad grid
+// sits at. The touch overlay mixes toward white rather than to a fixed accent,
+// so the assertion is about brightness rather than about hue.
+await page.waitForTimeout(150);
+const padColor = await readStruckPad();
 check('struck pad lit up in the instance colour buffer',
-  interaction.ok && interaction.padColor !== null &&
-    interaction.padColor[2] > interaction.padColor[0],
-  `rgb=${JSON.stringify(interaction.padColor)}`);
+  padColor !== null && padColor.every((c) => c > 0.5),
+  `rgb=${JSON.stringify(padColor)}`);
 
 // A held zone must not fade. Let several frames elapse, then confirm it is
-// still lit — this is the regression guard for the highlighter's held state.
+// still lit — this is the regression guard for the held state.
 await page.waitForTimeout(400);
-const stillLit = await page.evaluate(() => {
-  const h = window.__vrmc;
-  let colour = null;
-  h.scene.traverse((o) => {
-    if (o.isInstancedMesh && o.count === 16 && o.instanceColor) {
-      const a = o.instanceColor.array;
-      colour = [a[0], a[1], a[2]].map((v) => +v.toFixed(3));
-    }
-  });
-  return colour;
-});
-check('held pad stays lit across frames', stillLit !== null && stillLit[2] > stillLit[0] + 0.3,
+const stillLit = await readStruckPad();
+check('held pad stays lit across frames',
+  stillLit !== null && stillLit.every((c) => c > 0.5),
   `rgb=${JSON.stringify(stillLit)}`);
 
 /*
@@ -581,7 +609,8 @@ const launchpad = await page.evaluate(async () => {
   };
 });
 
-check('emulated Launchpad spawned', launchpad.ok && launchpad.deviceCount === 1,
+// Two: the VRMC surface the engine starts with, and the Launchpad just added.
+check('emulated Launchpad spawned', launchpad.ok && launchpad.deviceCount === 2,
   launchpad.ok ? `${launchpad.model}, ${launchpad.zones} controls` : launchpad.reason);
 if (launchpad.ok) {
   // 64 grid pads + 8 top + 8 scene = 80 pokeable controls; the logo is not one.
@@ -604,7 +633,9 @@ const lit = await page.evaluate(() => {
     if (o.isInstancedMesh && o.count === 80 && o.instanceColor) lpMesh = o;
   });
   if (!lpMesh) return { ok: false };
-  const device = h.engine.launchpads[0];
+  // By model, not by position: the VRMC surface holds index 0 now.
+  const device = h.engine.launchpads.find((d) => d.spec.model === 'launchpad-x');
+  if (!device) return { ok: false };
   const read = (xy) => {
     const z = device.layout.zoneForIndex(xy);
     const a = lpMesh.instanceColor.array;
@@ -846,7 +877,7 @@ check('the room reached full opacity for the reading', throughTheRoom === true);
  */
 const keyBox = await page.evaluate(() => {
   const h = window.__vrmc;
-  const keys = h?.engine?.instruments?.find((i) => i.id === 'keys');
+  const keys = h?.engine?.launchpads?.find((d) => d.spec.model === 'vrmc');
   if (!keys) return null;
   const [ox, oy, oz] = keys.transform.origin;
   const [qx, , , qw] = keys.transform.quaternion;
@@ -860,9 +891,9 @@ const keyBox = await page.evaluate(() => {
   // The four corners of the surface, in its own frame, projected out.
   for (const [lx, ly] of [
     [0, 0],
-    [keys.locator.width, 0],
-    [0, keys.locator.height],
-    [keys.locator.width, keys.locator.height],
+    [keys.layout.width, 0],
+    [0, keys.layout.height],
+    [keys.layout.width, keys.layout.height],
   ]) {
     const v = new h.THREE.Vector3(ox + lx, oy + ly * cos, oz + ly * sin).project(h.camera);
     minX = Math.min(minX, v.x);

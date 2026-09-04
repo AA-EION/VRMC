@@ -6,6 +6,7 @@ import {
   FIRST_DYNAMIC_DEVICE_ID,
   isPrivateAddress,
 } from "@vrmc/protocol";
+import { DeviceModel } from "@vrmc/devices";
 import { ArgError, parseArgs, USAGE, type BridgeConfig } from "./config.js";
 import { Router } from "./core/Router.js";
 import { loadWorkspace, saveWorkspace } from "./core/workspaceFile.js";
@@ -255,6 +256,7 @@ async function main(): Promise<void> {
       noMidi: config.noMidi,
       loopbackPattern: config.loopbackPattern,
       portNameTemplate: config.portNameTemplate,
+      plainPortName: config.portName,
       // Decided per port, not once at startup: MIDIServer loads the driver on
       // demand and exits when idle, so whether it is there right now changes
       // minute to minute.
@@ -273,28 +275,30 @@ async function main(): Promise<void> {
    * play. They now come and go with the headset — see core/PresenceGate.ts for
    * why departure is delayed and arrival is not.
    *
-   * The first is one plain port with no hardware identity, shared by pads,
-   * keys and knobs the way a single piece of hardware would be; they are told
-   * apart by their event ids.
+   * The first is the VRMC surface: keys, pads and knobs on one plain port with
+   * no hardware identity. It used to be three device ids aliased onto one
+   * port, because on the headset it was three panels wired into the engine
+   * rather than a device — which meant it could not be moved, pinned, anchored,
+   * saved in a layout or put away, and a player who only wanted a Launchpad had
+   * it in the room regardless. It is now one device on one id, spawned and
+   * removed like any other, and the aliases are gone with the panels.
+   *
+   * It is still an anonymous port, deliberately. A DAW has no script matching
+   * "VRMC", so it appears as a nameless keyboard with nothing to bind — which
+   * is honest. A Launchpad X is emulated closely enough that Ableton loads its
+   * own control-surface script: the port names match, the Device Inquiry reply
+   * carries the family code the script checks for, and the LED SysEx it sends
+   * is understood. `HARDWARE_MODELS` is what separates the two.
    *
    * The second is emulated hardware, and only if `--startup-device` asks for
-   * it. The port above is anonymous — a DAW has no script matching "VRMC", so
-   * it appears as a nameless keyboard with no session grid and nothing to
-   * bind. A Launchpad X is emulated closely enough that Ableton loads its own
-   * control-surface script: the port names match, the Device Inquiry reply
-   * carries the family code the script checks for, and the LED SysEx it sends
-   * is understood.
-   *
-   * Not an alias of the surfaces above: those send plain note numbers, while a
-   * Launchpad's controls are XY indices through the emulator, and routing one
-   * into the other would light the wrong pads. It is a separate device, which
-   * is what it is on a desk too. It keeps the first dynamic id, so the roster
-   * the headset receives is indistinguishable from one it spawned itself.
+   * it. Not the same device as the surface above: that one sends plain note
+   * numbers, while a Launchpad's controls are XY indices through the emulator,
+   * and routing one into the other would light the wrong pads. It keeps the
+   * first dynamic id, so the roster the headset receives is indistinguishable
+   * from one it spawned itself.
    */
   const openSessionDevices = async (): Promise<void> => {
-    await devices.add(DeviceId.PADS, config.portName);
-    devices.alias(DeviceId.KEYS, DeviceId.PADS);
-    devices.alias(DeviceId.KNOBS, DeviceId.PADS);
+    await devices.add(DeviceId.PADS, DeviceModel.VRMC);
     if (config.startupDevice !== "none") {
       await devices.add(FIRST_DYNAMIC_DEVICE_ID, config.startupDevice);
     }

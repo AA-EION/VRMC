@@ -13,6 +13,7 @@ import {
   DeviceId,
   DeviceStatus,
   EventType,
+  MidiStatus,
   FIRST_DYNAMIC_DEVICE_ID,
   PacketKind,
   PacketReader,
@@ -40,6 +41,8 @@ import { WsServer } from "../src/net/WsServer.js";
  */
 class FakePorts {
   readonly opened: string[] = [];
+  /** What each opened port was told to publish about itself, if anything. */
+  readonly identities: unknown[] = [];
   /** What each opened port asked its two halves to be called. */
   readonly directions: { source: string; destination: string }[] = [];
   readonly sinks = new Map<string, NullSink>();
@@ -49,11 +52,14 @@ class FakePorts {
     name,
     sourceName,
     destinationName,
+    identity,
   }: {
     name: string;
     sourceName?: string;
     destinationName?: string;
+    identity?: unknown;
   }) => {
+    this.identities.push(identity ?? null);
     this.directions.push({
       source: sourceName ?? name,
       destination: destinationName ?? name,
@@ -79,6 +85,7 @@ class FakePorts {
 function makeManager(
   ports: FakePorts,
   onLed?: DeviceManagerLed,
+  plainPortName?: string,
 ): DeviceManager {
   return new DeviceManager(
     {
@@ -91,6 +98,7 @@ function makeManager(
       loopbackPattern: /never/,
       portNameTemplate: "{device} {port}",
       openPort: ports.open,
+      ...(plainPortName === undefined ? {} : { plainPortName }),
     },
   );
 }
@@ -267,13 +275,12 @@ describe("what a DAW finds", () => {
     const ports = new FakePorts();
     const devices = makeManager(ports);
     await devices.add(DeviceId.PADS, "VRMC");
-    devices.alias(DeviceId.KEYS, DeviceId.PADS);
     await devices.add(FIRST_DYNAMIC_DEVICE_ID, DeviceModel.LAUNCHPAD_X);
 
     // Middle C from the headset's keyboard. A Launchpad reads data1 as an XY
     // index, so had these shared a device this would have lit a pad instead of
     // playing a note.
-    devices.handleEvent(DeviceId.KEYS, EventType.NOTE_ON, 0, 60, 100, 0);
+    devices.handleEvent(DeviceId.PADS, EventType.NOTE_ON, 0, 60, 100, 0);
 
     expect(ports.sent("VRMC")).toContainEqual([0x90, 60, 100]);
     expect(ports.sent("Launchpad X LPX DAW")).toHaveLength(0);
@@ -745,5 +752,79 @@ describe("directional port names", () => {
     const devices = makeManager(ports);
     await devices.add(31, DeviceModel.LAUNCHPAD_X);
     for (const d of ports.directions) expect(d.source).toBe(d.destination);
+  });
+});
+
+/*
+ * The VRMC surface is a device with a spec that must still not present as
+ * hardware.
+ *
+ * The branch used to be "does a spec exist" — everything without one got a
+ * plain port, everything with one got the full hardware treatment. That was
+ * true while the only spec'd devices were Launchpads, and it stopped being
+ * true the moment the built-in surface became a device so it could be added
+ * and removed like the rest.
+ *
+ * Getting it wrong is not a crash. It is a port pair called "VRMC DAW" and
+ * "VRMC MIDI" publishing "EION Studios / VRMC" as its manufacturer and model,
+ * answering a Device Inquiry, and routing every press through a Launchpad
+ * emulator that would turn a key's control id into some other note entirely.
+ */
+describe("a device that is not emulating hardware", () => {
+  it("opens one plain port, under the name --port-name gave", async () => {
+    const ports = new FakePorts();
+    const devices = makeManager(ports, undefined, "My Studio Rig");
+    await devices.add(1, DeviceModel.VRMC);
+
+    expect(ports.opened).toEqual(["My Studio Rig"]);
+    // No template applied, and nothing called DAW: there is no DAW protocol
+    // on this port for a host to find.
+    expect(ports.opened[0]).not.toContain("VRMC VRMC");
+    expect(ports.directions[0]).toEqual({
+      source: "My Studio Rig",
+      destination: "My Studio Rig",
+    });
+  });
+
+  it("publishes no manufacturer or model on its endpoint", async () => {
+    // A port that advertises itself as hardware while behaving as a nameless
+    // keyboard is worse than one that claims nothing: it invites a host to
+    // load a script the device cannot answer.
+    const ports = new FakePorts();
+    const devices = makeManager(ports, undefined, "VRMC");
+    await devices.add(1, DeviceModel.VRMC);
+    expect(ports.identities).toEqual([null]);
+  });
+
+  it("passes plain MIDI through, on the channel the headset stamped", async () => {
+    /*
+     * No emulator, so the pad grid's channel 10 survives to the port. Through
+     * an emulator it would not: `LaunchpadEmulator.press` emits on channel 1
+     * and takes a control id, so the drum pads would arrive as pitches on the
+     * keyboard's own channel.
+     */
+    const ports = new FakePorts();
+    const devices = makeManager(ports, undefined, "VRMC");
+    await devices.add(1, DeviceModel.VRMC);
+
+    devices.handleEvent(1, EventType.NOTE_ON, 9, 38, 100, 0);
+    devices.handleEvent(1, EventType.NOTE_OFF, 9, 38, 0, 0);
+    expect(ports.sent("VRMC")).toEqual([
+      [MidiStatus.NOTE_ON | 9, 38, 100],
+      [MidiStatus.NOTE_OFF | 9, 38, 0],
+    ]);
+  });
+
+  it("still opens the hardware pair for a model that is hardware", async () => {
+    // The other side of the same branch, so a change that made everything
+    // plain would not pass by making the tests above pass.
+    const ports = new FakePorts();
+    const devices = makeManager(ports, undefined, "VRMC");
+    await devices.add(2, DeviceModel.LAUNCHPAD_X);
+    expect(ports.opened).toEqual(["Launchpad X LPX DAW", "Launchpad X LPX MIDI"]);
+    expect(ports.identities[0]).toEqual({
+      manufacturer: "Focusrite - Novation",
+      model: "Launchpad X",
+    });
   });
 });

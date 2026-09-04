@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import { describe, it, expect, beforeEach } from 'vitest';
-import { DeviceModel, LaunchkeySurface, specFor } from '@vrmc/devices';
+import {
+  DeviceModel,
+  LaunchkeySurface,
+  specFor,
+  VrmcPart,
+  VrmcSurface,
+} from '@vrmc/devices';
 import { FingerFrame, Finger } from '@vrmc/interaction';
 import { localToWorld, type SurfacePose } from '@vrmc/layout';
 import { EventType } from '@vrmc/protocol';
@@ -23,7 +29,9 @@ import type { BridgeLink } from '../src/net/BridgeLink.js';
 
 interface Sent {
   type: number;
+  channel: number;
   data1: number;
+  data2: number;
   value14: number;
   deviceId: number;
 }
@@ -33,15 +41,15 @@ class FakeLink {
 
   push(
     type: number,
-    _channel: number,
+    channel: number,
     data1: number,
-    _data2: number,
+    data2: number,
     value14: number,
     deviceId: number,
     _flags: number,
     _tOffsetMs: number,
   ): boolean {
-    this.sent.push({ type, data1, value14, deviceId });
+    this.sent.push({ type, channel, data1, data2, value14, deviceId });
     return true;
   }
 }
@@ -214,3 +222,130 @@ describe('the poke detector on a device with faders', () => {
     expect(notes[0]!.data1).toBe(24);
   });
 });
+
+describe('the VRMC surface, as a device', () => {
+  let vrmcLink: FakeLink;
+  let vrmc: LaunchpadInstance;
+  let vrmcSurface: VrmcSurface;
+
+  beforeEach(() => {
+    const spec = specFor(DeviceModel.VRMC);
+    if (spec === null) throw new Error('the VRMC spec is missing');
+    vrmcLink = new FakeLink();
+    vrmc = new LaunchpadInstance(9, spec, POSE, vrmcLink as unknown as BridgeLink);
+    vrmcSurface = vrmc.layout as VrmcSurface;
+  });
+
+  /** Zone indices of one region. */
+  function region(part: string): number[] {
+    return vrmcSurface.zones
+      .filter((z) => vrmcSurface.partOf(z.index) === part)
+      .map((z) => z.index);
+  }
+
+  let clock = 0;
+
+  /** Push a fingertip through a zone, lifting the hand away first. */
+  function poke(zoneIndex: number): void {
+    const zone = vrmcSurface.zones[zoneIndex]!;
+    const at = (dz: number): [number, number, number] => {
+      const w = localToWorld(
+        vrmc.transform,
+        zone.rect.x + zone.rect.width / 2,
+        zone.rect.y + zone.rect.height / 2,
+        zone.raise + dz,
+      );
+      return [w[0]!, w[1]!, w[2]!];
+    };
+
+    // Out of tracking between strikes, so the second one is approached rather
+    // than teleported into from wherever the last one ended. A hand that jumps
+    // across the surface without lifting is not a thing a player can do, and
+    // the detector is entitled to disbelieve it.
+    const away = new FingerFrame();
+    away.beginFrame((clock += 11), 1 / 90);
+    vrmc.detector.update(away, vrmc);
+
+    const [ax, ay, az] = at(0.04);
+    const [tx, ty, tz] = at(-0.006);
+    const first = new FingerFrame();
+    first.beginFrame((clock += 11), 1 / 90);
+    first.setFinger(Finger.RIGHT_INDEX, ax, ay, az, 0.008);
+    vrmc.detector.update(first, vrmc);
+    const second = new FingerFrame();
+    second.beginFrame((clock += 11), 1 / 90);
+    second.setFinger(Finger.RIGHT_INDEX, tx, ty, tz, 0.008);
+    vrmc.detector.update(second, vrmc);
+  }
+
+  it('sends the pads on channel 10 and the keys on 1', () => {
+    /*
+     * The failure this rules out is audible but not obviously wrong: a drum
+     * rack listens on channel 10 and nothing else does, so pads sent on 1
+     * arrive at the keyboard's instrument and play as pitches. It sounds like
+     * a bad patch rather than like a routing bug.
+     *
+     * The bridge has no emulator for this device — it is not pretending to be
+     * hardware — so whatever channel is stamped here is the channel that
+     * reaches the DAW.
+     */
+    poke(region(VrmcPart.PADS)[0]!);
+    poke(region(VrmcPart.KEYS)[0]!);
+    const notes = vrmcLink.sent.filter((e) => e.type === EventType.NOTE_ON);
+    expect(notes).toHaveLength(2);
+    expect(notes[0]!.channel).toBe(9);
+    expect(notes[1]!.channel).toBe(0);
+  });
+
+  it('releases a pad on the channel it pressed it on', () => {
+    // A Note Off on the wrong channel leaves the drum voice ringing, which is
+    // the one case where the mismatch is not merely wrong but permanent.
+    const pad = region(VrmcPart.PADS)[0]!;
+    poke(pad);
+    vrmc.releaseAll();
+    const offs = vrmcLink.sent.filter(
+      (e) => e.type === EventType.NOTE_OFF || (e.type === EventType.NOTE_ON && e.value14 === 0),
+    );
+    expect(offs.length).toBeGreaterThan(0);
+    for (const off of offs) expect(off.channel).toBe(9);
+  });
+
+  it('sends its knobs on CC 21..24', () => {
+    const knobs = region(VrmcPart.KNOBS);
+    expect(knobs).toHaveLength(4);
+    const seen: number[] = [];
+    for (const zone of knobs) {
+      vrmcLink.sent.length = 0;
+      dragKnob(vrmc, vrmcSurface, zone, 0.05);
+      const cc = vrmcLink.sent.find((e) => e.type === EventType.CONTROL_CHANGE_14);
+      expect(cc, `zone ${zone} sent nothing`).toBeDefined();
+      seen.push(cc!.data1);
+    }
+    expect(seen).toEqual([21, 22, 23, 24]);
+  });
+
+  it('keeps a hand crossing the knobs from playing a note', () => {
+    poke(region(VrmcPart.KNOBS)[0]!);
+    expect(vrmcLink.sent.filter((e) => e.type === EventType.NOTE_ON)).toHaveLength(0);
+  });
+});
+
+/** Grab a control on any device at its centre, drag, and let go. */
+function dragKnob(
+  device: LaunchpadInstance,
+  surface: { zones: readonly { index: number; rect: { x: number; y: number; width: number; height: number }; raise: number }[] },
+  zoneIndex: number,
+  dy: number,
+): void {
+  const zone = surface.zones[zoneIndex]!;
+  const w = localToWorld(
+    device.transform,
+    zone.rect.x + zone.rect.width / 2,
+    zone.rect.y + zone.rect.height / 2,
+    zone.raise,
+  );
+  const at: [number, number, number] = [w[0]!, w[1]!, w[2]!];
+  device.updateContinuous(pinchFrame(at, 0));
+  device.updateContinuous(pinchFrame([at[0], at[1] + dy, at[2]], 11));
+  device.updateContinuous(openFrame([at[0], at[1] + dy, at[2]], 22));
+}

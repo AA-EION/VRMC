@@ -1,29 +1,10 @@
-import {
-  KeyboardLayout,
-  LAUNCHKEY_25,
-  localToWorld,
-  localToWorldInto,
-  MPC_4X4,
-  PadGridLayout,
-  surfaceTransform,
-  type SurfacePose,
-  type SurfaceTransform,
-  type ZoneLocator,
-} from "@vrmc/layout";
+import { type SurfacePose } from "@vrmc/layout";
 import {
   FingerFrame,
   Grabbable,
-  KnobControl,
-  PokeDetector,
-  type ControlSink,
   type GrabSink,
 } from "@vrmc/interaction";
-import {
-  DeviceId,
-  EventType,
-  PlacementFlags,
-  VelocityCurve,
-} from "@vrmc/protocol";
+import { DeviceId, PlacementFlags } from "@vrmc/protocol";
 import { DeviceModel, type DeviceSpec } from "@vrmc/devices";
 import {
   FIRST_DYNAMIC_DEVICE_ID,
@@ -41,38 +22,22 @@ import {
 import { devicesMissingFromRoster } from "./devices/reconcile.js";
 import { matchLayout } from "./devices/matchLayout.js";
 import { BridgeLink } from "./net/BridgeLink.js";
-import { NoteRouter, type FeedbackSink } from "./net/NoteRouter.js";
-import {
-  KEY_THEME,
-  PAD_THEME,
-  SurfaceHighlighter,
-  type SurfaceTheme,
-} from "./devices/InstrumentSurface.js";
 import { HandTracker } from "./xr/handTracking.js";
 import { HandSkeleton } from "./xr/HandSkeleton.js";
 import { SurfaceAnchor } from "./xr/SurfaceAnchor.js";
 import { KeypadController } from "./ui/KeypadController.js";
 import type { WristMenu } from "./ui/WristMenu.js";
 
-/** Everything needed to render and drive one instrument. */
-export interface Instrument {
-  id: "pads" | "keys";
-  locator: ZoneLocator;
-  detector: PokeDetector;
-  highlighter: SurfaceHighlighter;
-  router: NoteRouter;
-  theme: SurfaceTheme;
-  pose: SurfacePose;
-  transform: SurfaceTransform;
-}
-
 /**
- * Default placement, chosen to match how the hardware being emulated actually
- * sits on a desk: keys nearest and nearly flat, the pad grid behind them and
- * angled up toward the player, the way a controller on a low stand would be.
+ * Where the VRMC surface sits before anybody moves it.
+ *
+ * It used to be two panels at two poses — keys nearly flat and near, the pad
+ * grid behind them and angled up. They are one plane now, because they are one
+ * device, so this is the compromise between those two: tilted far enough back
+ * that the pads and knobs above the keys are visible, far enough forward that
+ * the keys are still comfortable to play.
  */
-const KEYS_POSE: SurfacePose = { centre: [0, 0.76, -0.36], tiltDeg: 74 };
-const PADS_POSE: SurfacePose = { centre: [0, 0.92, -0.58], tiltDeg: 42 };
+const VRMC_POSE: SurfacePose = { centre: [0, 0.84, -0.46], tiltDeg: 62 };
 
 /**
  * How long a drop waits for the runtime to find something, in ms.
@@ -83,9 +48,6 @@ const PADS_POSE: SurfacePose = { centre: [0, 0.92, -0.58], tiltDeg: 42 };
  * silently for one.
  */
 const DROP_TIMEOUT_MS = 2500;
-
-/** CC numbers the four knobs send, matching a Launchkey's default map. */
-const KNOB_CCS = [21, 22, 23, 24] as const;
 
 /**
  * Owns every piece of per-frame state.
@@ -124,14 +86,14 @@ export class Engine {
    */
   drawHands = false;
   readonly fingers = new FingerFrame();
-  readonly knobs = new KnobControl();
   /**
    * Picking devices up and putting them down.
    *
-   * Only emulated hardware is registered. The pad grid, the keyboard and the
-   * knobs are one piece of built-in furniture — they are what the app *is* —
-   * and a keyboard that can be dragged out of reach is one you then have to go
-   * and find.
+   * Every device is registered, the VRMC surface included. It used to be
+   * excluded on the grounds that it was what the app *is* rather than furniture
+   * in it — which was true while it was two panels wired into this class, and
+   * was also why it could not be moved, pinned, put on a real desk, saved in an
+   * arrangement or put away.
    */
   readonly grabs = new Grabbable();
 
@@ -152,19 +114,6 @@ export class Engine {
 
   /** When the oldest outstanding drop request was made, on the frame clock. */
   private dropRequestedAt = 0;
-  readonly instruments: Instrument[];
-  /**
-   * World positions of the knobs, kept so the renderer draws them exactly where
-   * the grab test looks for them. Recomputing this in the view would be one
-   * more chance for the two to disagree.
-   */
-  readonly knobPositions: Array<[number, number, number]> = [];
-
-  /** Knob index -> CC number. */
-  private readonly knobSink: ControlSink;
-
-  /** Scratch for a struck zone's world position. One buffer, not one per note. */
-  private readonly strikeAt = new Float32Array(3);
 
   /**
    * The velocity curve fitted to this player, or null for the presets.
@@ -290,50 +239,20 @@ export class Engine {
       },
     };
 
-    this.instruments = [
-      this.buildInstrument(
-        "keys",
-        new KeyboardLayout(LAUNCHKEY_25),
-        KEY_THEME,
-        KEYS_POSE,
-        DeviceId.KEYS,
-        0,
-        // A keyboard rewards a firmer curve: the extra travel makes soft
-        // playing controllable instead of accidental.
-        VelocityCurve.NATURAL,
-      ),
-      this.buildInstrument(
-        "pads",
-        new PadGridLayout(MPC_4X4),
-        PAD_THEME,
-        PADS_POSE,
-        DeviceId.PADS,
-        // Channel 10 (index 9) is the General MIDI drum channel, which is what
-        // a drum rack expects to receive on.
-        9,
-        VelocityCurve.SOFT,
-      ),
-    ];
-
-    this.knobSink = {
-      onValue: (index, value14, flags) => {
-        const cc = KNOB_CCS[index] ?? 21;
-        this.link.push(
-          EventType.CONTROL_CHANGE_14,
-          0,
-          cc,
-          0,
-          value14,
-          DeviceId.KNOBS,
-          flags,
-          0,
-        );
-      },
-      onGrab: () => {},
-      onRelease: () => {},
-    };
-
-    this.placeKnobs();
+    /*
+     * The VRMC surface, created here rather than waited for.
+     *
+     * The bridge opens one too, on the same reserved id, so the roster that
+     * arrives on connection finds it already present and adopts it rather than
+     * making a second. Creating it here is what lets somebody put the headset
+     * on and play before pairing — the alternative is an empty room with a
+     * keypad in it, which is what waiting for the roster would give.
+     *
+     * From here on it is an ordinary device: it can be picked up, pinned,
+     * dropped onto a real desk, saved in a layout, and removed. That is the
+     * whole reason it stopped being two panels wired into this class.
+     */
+    this.adopt(DeviceId.PADS, DeviceModel.VRMC, VRMC_POSE);
 
     // LED traffic is decoded straight into the right device's state. Bound once
     // here rather than per packet: this fires dozens of times per DAW redraw.
@@ -437,8 +356,6 @@ export class Engine {
    * instrument is in front of them rather than on a nominated one.
    */
   listenForStrikes(listener: ((speed: number) => void) | null): void {
-    for (const instrument of this.instruments)
-      instrument.detector.onStrikeSpeed = listener;
     for (const device of this.launchpads)
       device.detector.onStrikeSpeed = listener;
     this.strikeListener = listener;
@@ -457,8 +374,6 @@ export class Engine {
   ): void {
     this.velocityFit = fit;
     if (fit === null) return;
-    for (const instrument of this.instruments)
-      instrument.detector.setVelocityCurve(fit);
     for (const device of this.launchpads) device.detector.setVelocityCurve(fit);
   }
 
@@ -556,13 +471,9 @@ export class Engine {
   private adopt(
     deviceId: number,
     model: string,
+    pose: SurfacePose = this.nextPose(),
   ): LaunchpadInstance | undefined {
-    const instance = createLaunchpad(
-      deviceId,
-      model,
-      this.nextPose(),
-      this.link,
-    );
+    const instance = createLaunchpad(deviceId, model, pose, this.link);
     if (instance === null) return undefined;
     this.launchpads.push(instance);
     this.prepareDevice(instance);
@@ -575,10 +486,10 @@ export class Engine {
   /**
    * Store the room as it stands, under a name.
    *
-   * Every emulated device goes in, including pinned ones — pinning is part of
-   * an arrangement rather than a thing that happens to it. The built-in
-   * surfaces are left out, because they are the app rather than furniture in
-   * it: there is nothing to restore and nowhere else for them to be.
+   * Every device goes in, including pinned ones — pinning is part of an
+   * arrangement rather than a thing that happens to it, and including the VRMC
+   * surface, which used to be left out on the grounds that it was the app
+   * rather than furniture in it. It has somewhere else to be now.
    */
   saveLayout(name: string): boolean {
     const clean = normaliseLayoutName(name);
@@ -776,15 +687,6 @@ export class Engine {
     };
   }
 
-  /** Instruments, in render order. */
-  get keys(): Instrument {
-    return this.instruments[0]!;
-  }
-
-  get pads(): Instrument {
-    return this.instruments[1]!;
-  }
-
   /**
    * Advance one frame.
    *
@@ -807,10 +709,7 @@ export class Engine {
       // After the tips, and only when something draws them. The two readers are
       // independent: a failure to fill the skeleton cannot affect a note.
       if (this.drawHands) this.skeleton.update(xrFrame, space);
-      for (const instrument of this.instruments) {
-        instrument.detector.update(this.fingers, instrument.router);
-      }
-      // Emulated hardware shares the same fingertip frame, so a hand can move
+      // Every device shares the same fingertip frame, so a hand can move
       // between a Launchpad and the keyboard without either losing track of it.
       for (const device of this.launchpads) {
         device.detector.update(this.fingers, device);
@@ -819,7 +718,6 @@ export class Engine {
         // and on an instrument this size that is ordinary rather than clever.
         device.updateContinuous(this.fingers);
       }
-      this.knobs.update(this.fingers, this.knobSink);
       // After the detectors, so a frame that both plays a pad and moves a
       // device resolves the note against the pose it was struck at.
       this.grabs.update(this.fingers, this.grabSink);
@@ -873,9 +771,6 @@ export class Engine {
     }
 
     this.link.endFrame();
-
-    for (const instrument of this.instruments)
-      instrument.highlighter.update(dt);
   }
 
   /** Called when the session starts. */
@@ -898,11 +793,7 @@ export class Engine {
    */
   allNotesOff(): void {
     this.link.beginFrame();
-    for (const instrument of this.instruments) {
-      instrument.detector.releaseAll(instrument.router);
-    }
     for (const device of this.launchpads) device.releaseAll();
-    this.knobs.releaseAll(this.knobSink);
     this.wrist?.close();
     this.link.endFrame();
     this.link.sendPanic();
@@ -919,110 +810,4 @@ export class Engine {
     this.synth.close();
   }
 
-  private buildInstrument(
-    id: Instrument["id"],
-    locator: ZoneLocator,
-    theme: SurfaceTheme,
-    pose: SurfacePose,
-    deviceId: DeviceId,
-    channel: number,
-    velocityGamma: number,
-  ): Instrument {
-    // Declared before the feedback sink so the sink can reach the instrument it
-    // belongs to: the sink is built first because the router needs it, and the
-    // instrument is built last because it holds the router.
-    let instrument: Instrument | undefined;
-    const highlighter = new SurfaceHighlighter(locator, theme);
-    const feedback: FeedbackSink = {
-      onNoteOn: (zoneIndex, note, velocity) => {
-        highlighter.strike(zoneIndex, velocity);
-        this.clickAtZone(instrument, zoneIndex, note, velocity);
-      },
-      onNoteOff: (zoneIndex) => highlighter.release(zoneIndex),
-    };
-
-    const fit = this.velocityFit;
-    const detector = new PokeDetector(locator, {
-      // A fitted curve wins over the preset. The presets differ per surface —
-      // a keyboard rewards a firmer curve than a pad grid — but a calibration
-      // is about the hand rather than the instrument, so it replaces both.
-      velocityGamma: fit?.gamma ?? velocityGamma,
-      ...(fit === null || fit === undefined
-        ? {}
-        : { velocityMinSpeed: fit.minSpeed, velocityMaxSpeed: fit.maxSpeed }),
-    });
-    const transform = surfaceTransform(locator, pose);
-    const { origin, quaternion } = transform;
-    // The mesh is drawn at this transform and the detector inverts it, so both
-    // are fed from the same source rather than each deriving its own.
-    detector.setPose(
-      origin[0],
-      origin[1],
-      origin[2],
-      quaternion[0],
-      quaternion[1],
-      quaternion[2],
-      quaternion[3],
-    );
-
-    instrument = {
-      id,
-      locator,
-      detector,
-      highlighter,
-      router: new NoteRouter(this.link, deviceId, channel, feedback),
-      theme,
-      pose,
-      transform,
-    };
-    return instrument;
-  }
-
-  /**
-   * Play the click where the pad is.
-   *
-   * A click in the middle of your head says something was struck; a click from
-   * the left says which. On a surface half a metre across that is the
-   * difference between a controller you have to look at and one you can play by
-   * ear, which is how anybody plays a real one.
-   */
-  private clickAtZone(
-    instrument: Instrument | undefined,
-    zoneIndex: number,
-    note: number,
-    velocity: number,
-  ): void {
-    const zone = instrument?.locator.zones[zoneIndex];
-    if (instrument === undefined || zone === undefined) {
-      this.synth.strike(note, velocity);
-      return;
-    }
-    localToWorldInto(
-      instrument.transform,
-      zone.rect.x + zone.rect.width / 2,
-      zone.rect.y + zone.rect.height / 2,
-      zone.raise,
-      this.strikeAt,
-    );
-    this.synth.strike(
-      note,
-      velocity,
-      this.strikeAt as unknown as [number, number, number],
-    );
-  }
-
-  /** Put a row of knobs above the pad grid, in world space. */
-  private placeKnobs(): void {
-    const pads = this.instruments[1];
-    if (pads === undefined) return;
-    const spacing = 0.075;
-    const count = KNOB_CCS.length;
-    for (let i = 0; i < count; i++) {
-      const localX = pads.locator.width / 2 + (i - (count - 1) / 2) * spacing;
-      const localY = pads.locator.height + 0.06;
-      const world = localToWorld(pads.transform, localX, localY, 0.02);
-      this.knobs.addKnob(world[0], world[1], world[2], 0.5);
-      this.knobPositions.push(world);
-    }
-  }
 }

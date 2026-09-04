@@ -8,7 +8,7 @@
  * publishes it system-wide and every DAW on the machine lists it — so a port
  * for a device nobody is playing is a device in somebody's Ableton dropdown
  * that does not exist. The bridge used to open three of them before anything
- * connected (the built-in surfaces, plus a Launchpad X from `startupDevice`)
+ * connected (the VRMC surface, plus a Launchpad X from `startupDevice`)
  * and close them only on SIGINT, which is why a Mac with the bridge merely
  * running showed a Launchpad that was not there.
  *

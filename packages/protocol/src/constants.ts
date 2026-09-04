@@ -220,8 +220,14 @@ export const EventFlags = {
  *
  * v1 treated this as a fixed enum of the three built-in surfaces. v2 makes it a
  * runtime instance id, because there can now be several devices at once and a
- * user may hold two Launchpads. The three values below stay reserved so the
- * original surfaces keep their identity.
+ * user may hold two Launchpads.
+ *
+ * `PADS` is now the whole VRMC surface: its keys, pads and knobs were three
+ * ids aliased onto one MIDI port while they were three panels built into the
+ * headset's engine, and they are one device on one id since that surface
+ * became something you can add and remove. `KEYS` and `KNOBS` stay reserved
+ * rather than reused, so an older client's events cannot land on a Launchpad
+ * that happened to be given the number.
  */
 export const DeviceId = {
   PADS: 1,

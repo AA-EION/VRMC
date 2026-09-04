@@ -20,6 +20,14 @@ export const DeviceModel = {
   LAUNCHPAD_PRO_MK3: 'launchpad-pro-mk3',
   /** Novation Launchkey MK3 49: keys, pads, knobs and faders. */
   LAUNCHKEY_MK3_49: 'launchkey-mk3-49',
+  /**
+   * The VRMC surface: 25 keys, 16 pads and 4 knobs, claiming no hardware.
+   *
+   * Emulated in the sense that it has a spec and a layout, but not hardware:
+   * no DAW ships a script for it, so it opens one plain port and passes plain
+   * MIDI. `HARDWARE_MODELS` is what tells the two apart.
+   */
+  VRMC: 'vrmc',
 } as const;
 export type DeviceModel = (typeof DeviceModel)[keyof typeof DeviceModel];
 

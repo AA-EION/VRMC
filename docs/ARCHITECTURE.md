@@ -316,7 +316,7 @@ instrument surfaces build as instanced meshes with all 41 zones, the frame loop
 advances, geometry rasterises, and both surfaces fall inside the preview
 camera's frustum.
 
-It then drives the *real* `PokeDetector` and `NoteRouter` with synthetic
+It then drives the *real* `PokeDetector` and `LaunchpadInstance` with synthetic
 fingertip positions and asserts a strike on pad 1 produces MIDI note 36 with a
 velocity derived from approach speed, lights that pad in the instance colour
 buffer, and keeps it lit while held. It also spawns an emulated Launchpad,

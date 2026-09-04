@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 import {
+  isHardwareModel,
   LaunchpadEmulator,
   specFor,
   type DeviceSpec,
@@ -81,6 +82,16 @@ export interface DeviceManagerOptions {
    */
   portNameTemplate: string;
   /**
+   * What to call the port of a device that is not emulating hardware.
+   *
+   * The VRMC surface has a spec — controls, a layout, a size — but no host
+   * script, so it opens one plain port instead of the named pair a Launchpad
+   * gets. This is that name, from --port-name, and it is a setting rather than
+   * a constant because it is the port a user may need to name to fit their own
+   * routing.
+   */
+  plainPortName?: string;
+  /**
    * Where a device is, if anybody has said.
    *
    * Injected rather than stored here because placement outlives the device: the
@@ -107,15 +118,6 @@ export const DEFAULT_PORT_NAME_TEMPLATE = "{device} {port}";
  */
 export class DeviceManager {
   private readonly devices = new Map<number, DeviceInstance>();
-  /**
-   * Extra ids that resolve to an existing device.
-   *
-   * The three original surfaces — pads, keys and knobs — are one MIDI port
-   * between them, the way a single piece of hardware would be, but they keep
-   * separate ids so events stay attributable. Aliasing lets both be true
-   * without opening three ports that would collide on name.
-   */
-  private readonly aliases = new Map<number, number>();
   private readonly events: DeviceEvents;
   private readonly options: DeviceManagerOptions;
   private readonly openPort: PortOpener;
@@ -138,17 +140,7 @@ export class DeviceManager {
   }
 
   has(deviceId: number): boolean {
-    return this.devices.has(this.resolve(deviceId));
-  }
-
-  /** Route `from` to the device registered as `to`. */
-  alias(from: number, to: number): void {
-    if (from === to) return;
-    this.aliases.set(from, to);
-  }
-
-  private resolve(deviceId: number): number {
-    return this.aliases.get(deviceId) ?? deviceId;
+    return this.devices.has(deviceId);
   }
 
   /** Roster for a DEVICE_STATE packet. */
@@ -194,10 +186,19 @@ export class DeviceManager {
     this.devices.set(deviceId, instance);
     this.events.onRosterChange();
 
-    const portNames =
-      spec === null
-        ? [model]
-        : spec.portNames.map((p: string) => this.portName(spec, p));
+    /*
+     * A device that is not emulating hardware gets exactly one plain port.
+     *
+     * The branch is on the model rather than on whether a spec exists, because
+     * the VRMC surface now has one and must still not present as hardware: no
+     * DAW ships a script for it, so a named port pair, a manufacturer string
+     * and a Device Inquiry reply would only invite a host to load somebody
+     * else's script over a device that cannot answer it.
+     */
+    const hardware = spec !== null && isHardwareModel(model);
+    const portNames = hardware
+      ? spec.portNames.map((p: string) => this.portName(spec, p))
+      : [this.options.plainPortName ?? spec?.portNames[0] ?? model];
 
     /*
      * What each endpoint should tell a host about itself.
@@ -213,13 +214,12 @@ export class DeviceManager {
      * be hardware, and a port that advertises itself as Novation while
      * behaving as a nameless keyboard is worse than one that claims nothing.
      */
-    const identities =
-      spec === null
-        ? portNames.map(() => null)
-        : portNames.map(() => ({
-            manufacturer: spec.manufacturer,
-            model: spec.displayName,
-          }));
+    const identities = hardware
+      ? portNames.map(() => ({
+          manufacturer: spec.manufacturer,
+          model: spec.displayName,
+        }))
+      : portNames.map(() => null);
     const opened: string[] = [];
     const failures: string[] = [];
 
@@ -234,11 +234,11 @@ export class DeviceManager {
         // Only some hardware names the two halves differently; `portName`
         // applies the same template to whichever names the spec gives.
         sourceName:
-          spec?.portNamesByDirection === undefined
+          !hardware || spec.portNamesByDirection === undefined
             ? undefined
             : this.portName(spec, spec.portNamesByDirection.source[i] ?? ''),
         destinationName:
-          spec?.portNamesByDirection === undefined
+          !hardware || spec.portNamesByDirection === undefined
             ? undefined
             : this.portName(spec, spec.portNamesByDirection.destination[i] ?? ''),
       } satisfies PortOptions);
@@ -254,12 +254,15 @@ export class DeviceManager {
       }
     }
 
-    if (spec !== null) {
+    if (hardware) {
       instance.dawPort =
         instance.ports[spec.dawPortIndex] ?? instance.ports[0] ?? null;
       instance.emulator = this.buildEmulator(instance, spec);
       this.wireInputs(instance, spec);
     } else {
+      // No emulator, so `handleEvent` passes plain MIDI straight through with
+      // the channel the headset stamped — which is how the pad grid reaches a
+      // drum rack on channel 10 while the keys play on 1.
       instance.dawPort = instance.ports[0] ?? null;
     }
 
@@ -276,7 +279,7 @@ export class DeviceManager {
 
   /** Destroy a device, releasing anything it was holding first. */
   remove(deviceId: number): boolean {
-    const id = this.resolve(deviceId);
+    const id = deviceId;
     const instance = this.devices.get(id);
     if (instance === undefined) return false;
 
@@ -288,9 +291,6 @@ export class DeviceManager {
     for (const port of instance.ports) port.close();
 
     this.devices.delete(id);
-    for (const [from, to] of this.aliases) {
-      if (to === id) this.aliases.delete(from);
-    }
     this.events.onLog(`[device ${id}] removed (${instance.model})`);
     this.events.onRosterChange();
     return true;
@@ -336,7 +336,7 @@ export class DeviceManager {
     data2: number,
     value14: number,
   ): void {
-    const instance = this.devices.get(this.resolve(deviceId));
+    const instance = this.devices.get(deviceId);
     if (instance === undefined) return;
 
     const emulator = instance.emulator;
@@ -396,7 +396,7 @@ export class DeviceManager {
 
   /** Forward SysEx from the headset to a device's DAW port. */
   sendSysEx(deviceId: number, bytes: Uint8Array): void {
-    const instance = this.devices.get(this.resolve(deviceId));
+    const instance = this.devices.get(deviceId);
     const port = instance?.dawPort;
     if (port == null) return;
     // MidiSink is a three-byte channel-message interface; SysEx needs the raw
@@ -406,7 +406,7 @@ export class DeviceManager {
 
   /** Names of the MIDI ports a device opened. For tests and diagnostics. */
   portNamesOf(deviceId: number): string[] {
-    const instance = this.devices.get(this.resolve(deviceId));
+    const instance = this.devices.get(deviceId);
     return instance === undefined ? [] : instance.ports.map((p) => p.name);
   }
 
@@ -416,7 +416,7 @@ export class DeviceManager {
     portIndex: number,
     bytes: Uint8Array,
   ): boolean {
-    const instance = this.devices.get(this.resolve(deviceId));
+    const instance = this.devices.get(deviceId);
     const source = instance?.ports[portIndex]?.source;
     if (source?.onMessage == null) return false;
     source.onMessage(bytes);
@@ -434,7 +434,7 @@ export class DeviceManager {
       blink: number,
     ) => void,
   ): void {
-    const instance = this.devices.get(this.resolve(deviceId));
+    const instance = this.devices.get(deviceId);
     const emulator = instance?.emulator;
     const spec = instance?.spec;
     if (emulator == null || spec == null) return;

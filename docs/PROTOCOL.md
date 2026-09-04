@@ -208,9 +208,15 @@ single visual change.
 ### Device instance ids
 
 `deviceId` in the event record is a runtime instance id, not a fixed enum. Ids
-1, 2 and 3 stay reserved for the original pad grid, keyboard and knobs;
-dynamically created devices start at 16. This is what lets two Launchpads be
-live at once without a note started on one being released on the other.
+1, 2 and 3 stay reserved; dynamically created devices start at 16. This is what
+lets two Launchpads be live at once without a note started on one being
+released on the other.
+
+Id 1 is the VRMC surface — the keys, pads and knobs the app starts with. It was
+three ids, aliased on the bridge onto one MIDI port, back when it was three
+panels wired into the headset's engine rather than a device. It is one device
+on one id now, spawned and removed like any other, and 2 and 3 are reserved
+only so an older client's events do not land on something else.
 
 ## Event record — 12 bytes
 
