@@ -318,6 +318,24 @@ async function copyTrayHelper(target, destDir) {
 }
 
 /**
+ * Copy the native dashboard, on macOS.
+ *
+ * Into `Contents/MacOS` and not `Contents/Resources`, unlike the addons and the
+ * driver: this one is an executable, which is exactly what that directory
+ * means. It is also why the signing rule treats anything directly in there as
+ * code — see build/codesign.mjs.
+ */
+async function copyDashboard(target, destDir) {
+  if (target.platform !== 'darwin' || process.platform !== 'darwin') return false;
+  const built = join(root, 'native/build/vrmc-dashboard');
+  if (!existsSync(built)) return false;
+  const to = join(destDir, 'vrmc-dashboard');
+  await cp(built, to);
+  await chmod(to, 0o755);
+  return true;
+}
+
+/**
  * Copy the CoreMIDI driver, so the app can install it without a download.
  *
  * macOS only, and optional: `native/coremidi-driver/build.sh` has to have run,
@@ -551,6 +569,7 @@ async function buildTarget(target) {
   const hasTray = await copyTrayHelper(target, exeDir);
   const hasDriver = await copyCoreMidiDriver(target, libDir);
   if (hasDriver) console.log('  staged the CoreMIDI driver');
+  if (await copyDashboard(target, exeDir)) console.log('  staged the native dashboard');
 
   /*
    * Refuse to produce a build that cannot work.

@@ -27,6 +27,8 @@ import {
   TrayAction,
   type TrayState,
 } from "./tray/menu.js";
+import { spawn } from "node:child_process";
+import { findDashboard } from "./tray/helperPath.js";
 import { TrayController } from "./tray/TrayController.js";
 import {
   DEFAULT_PORT_NAME_TEMPLATE,
@@ -579,9 +581,38 @@ async function main(): Promise<void> {
         );
         return;
       }
-      case TrayAction.DASHBOARD:
-        openUrl(dashboardUrl);
+      case TrayAction.DASHBOARD: {
+        /*
+         * The native window when this build has one, the browser otherwise.
+         *
+         * Not a preference to configure: they show the same thing from the
+         * same `/api/status`, so a choice here would be a choice between two
+         * identical answers. The native one is simply better where it exists —
+         * no browser tab to lose among thirty others, and it looks like part
+         * of the app because it is.
+         */
+        const native = findDashboard();
+        if (native === null) {
+          openUrl(dashboardUrl);
+          return;
+        }
+        try {
+          const child = spawn(native, [dashboardUrl], {
+            detached: true,
+            stdio: "ignore",
+          });
+          // Detached and unreferenced: closing the window must not be able to
+          // stop the bridge, and the bridge exiting must not close the window
+          // out from under somebody reading it.
+          child.unref();
+        } catch (err) {
+          log(
+            `could not open the dashboard window (${err instanceof Error ? err.message : String(err)}); using the browser`,
+          );
+          openUrl(dashboardUrl);
+        }
         return;
+      }
       case TrayAction.AUTOSTART:
         autostart = await toggleAutostart();
         log(

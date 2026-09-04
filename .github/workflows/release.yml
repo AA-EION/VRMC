@@ -114,6 +114,24 @@ jobs:
           test -n "$found" || { echo "no $name in the staged build"; exit 1; }
           echo "packaged $found"
 
+      # The dashboard window, and that it is genuinely universal.
+      #
+      # A helper missing the architecture it is asked to run on does not fail
+      # loudly — the window simply never opens, with nothing said anywhere. So
+      # the slices are asserted rather than assumed, on the artifact people
+      # download.
+      - name: The dashboard must be packaged, universal
+        if: runner.os == 'macOS'
+        shell: bash
+        run: |
+          set -euo pipefail
+          found=$(find apps/desktop-bridge/build/dist -name vrmc-dashboard | sed -n 1p)
+          test -n "$found" || { echo "no vrmc-dashboard in the staged build"; exit 1; }
+          archs=$(lipo -archs "$found")
+          echo "packaged $found ($archs)"
+          grep -q arm64 <<<"$archs" || { echo "no arm64 slice"; exit 1; }
+          grep -q x86_64 <<<"$archs" || { echo "no x86_64 slice"; exit 1; }
+
       # The signature has to be real, and this is the only place it can be
       # checked: `codesign` exists on no other runner.
       #

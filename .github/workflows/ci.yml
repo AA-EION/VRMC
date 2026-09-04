@@ -74,6 +74,30 @@ jobs:
           git diff --exit-code native/coremidi-driver/test/vectors.h \
             || { echo "vectors.h is stale; run node apps/desktop-bridge/build/driverVectors.mjs"; exit 1; }
 
+  # Compiles the Swift helpers against a real macOS SDK.
+  #
+  # Neither the tray icon nor the dashboard window can be built anywhere else,
+  # and both fail *silently* when they are wrong — a helper that will not
+  # compile is simply absent, and the bridge carries on headless. So a compile
+  # error here has to be a failed build rather than a warning nobody reads.
+  swift-helpers:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the tray helper and the dashboard
+        run: node native/build.mjs
+        working-directory: apps/desktop-bridge
+      - name: Both must exist, and the dashboard must be universal
+        run: |
+          set -euo pipefail
+          cd apps/desktop-bridge/native/build
+          test -x vrmc-tray || { echo "no tray helper"; exit 1; }
+          test -x vrmc-dashboard || { echo "no dashboard"; exit 1; }
+          archs=$(lipo -archs vrmc-dashboard)
+          echo "dashboard: $archs"
+          grep -q arm64 <<<"$archs" || { echo "no arm64 slice"; exit 1; }
+          grep -q x86_64 <<<"$archs" || { echo "no x86_64 slice"; exit 1; }
+
   # Compiles the CoreMIDI driver plugin against a real macOS SDK.
   #
   # It is one translation unit and cannot be built or run anywhere else, so
