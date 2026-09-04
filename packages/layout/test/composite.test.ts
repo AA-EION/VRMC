@@ -1,6 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import { describe, it, expect } from 'vitest';
-import { CompositeLayout, type SurfacePart } from '../src/composite.js';
+import { CompositeLayout, maskPokeable, type SurfacePart } from '../src/composite.js';
 import { KeyboardLayout, LAUNCHKEY_25 } from '../src/keys.js';
 import { PadGridLayout, MPC_4X4 } from '../src/pads.js';
 
@@ -158,5 +158,47 @@ describe('an empty or single part', () => {
     for (const [i, zone] of c.zones.entries()) {
       expect(zone.note).toBe(pads.zones[i]!.note);
     }
+  });
+});
+
+/**
+ * Masking the zones a finger must not trigger.
+ *
+ * A Launchkey's faders sit between its keys and its pads, so a hand crossing
+ * the instrument passes over them constantly. A poke detector given the whole
+ * surface would fire a note every time — not an edge case, the ordinary path.
+ */
+describe('unpokeable zones', () => {
+  const c = build();
+  const padsStart = keys.zones.length;
+  const keysOnly = maskPokeable(c, (i) => i < padsStart);
+
+  const centreOf = (index: number): [number, number] => {
+    const z = c.zones[index]!;
+    return [z.rect.x + z.rect.width / 2, z.rect.y + z.rect.height / 2];
+  };
+
+  it('still finds a zone that is pokeable', () => {
+    expect(keysOnly.locate(...centreOf(3))).toBe(3);
+  });
+
+  it('finds nothing over a masked zone', () => {
+    expect(keysOnly.locate(...centreOf(padsStart))).toBe(-1);
+  });
+
+  it('keeps every zone in the array, so indices do not shift', () => {
+    /*
+     * The zone index is the identity the renderer, the LED state and the
+     * detector all share. Dropping the masked ones would renumber everything
+     * after them, and the surface would draw one control while lighting
+     * another.
+     */
+    expect(keysOnly.zones).toHaveLength(c.zones.length);
+    for (const [i, zone] of keysOnly.zones.entries()) expect(zone.index).toBe(i);
+  });
+
+  it('keeps the surface extent, so it is still drawn whole', () => {
+    expect(keysOnly.width).toBeCloseTo(c.width, 6);
+    expect(keysOnly.height).toBeCloseTo(c.height, 6);
   });
 });

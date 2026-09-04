@@ -2,6 +2,7 @@
 
 import {
   DeviceModel,
+  isContinuousPart,
   LaunchkeySurface,
   LaunchpadLayout,
   specFor,
@@ -15,7 +16,13 @@ import {
  * know which it is holding.
  */
 export type DeviceSurface = LaunchpadLayout | LaunchkeySurface;
-import { PokeDetector, type NoteSink } from '@vrmc/interaction';
+import {
+  KnobControl,
+  PokeDetector,
+  type ControlSink,
+  type FingerFrame,
+  type NoteSink,
+} from '@vrmc/interaction';
 import {
   DeviceStatus,
   EventFlags,
@@ -25,7 +32,9 @@ import {
   type DevicePlacement,
 } from '@vrmc/protocol';
 import {
+  localToWorld,
   localToWorldInto,
+  maskPokeable,
   surfaceTransform,
   type SurfacePose,
   type SurfaceTransform,
@@ -58,6 +67,18 @@ export class LaunchpadInstance implements NoteSink {
    */
   readonly layout: DeviceSurface;
   readonly leds: LedState;
+
+  /**
+   * The zones that are pinched rather than poked, and their `KnobControl`.
+   *
+   * Empty for every Launchpad, which has no continuous controls at all — the
+   * whole of this costs those devices one empty Set and one early return.
+   */
+  private readonly continuous: ReadonlySet<number>;
+  private readonly knobs = new KnobControl();
+  /** Knob index -> the zone it belongs to, so a value can name its control. */
+  private readonly knobZones: number[] = [];
+  private readonly knobSink: ControlSink;
   readonly detector: PokeDetector;
   /**
    * Where the device is, in world space.
@@ -119,11 +140,57 @@ export class LaunchpadInstance implements NoteSink {
     this.deviceId = deviceId;
     this.spec = spec;
     this.link = link;
+
+    /*
+     * A knob's value is sent as the MIDI CC itself, not as a control id.
+     *
+     * Unlike a press, which the bridge hands to the emulator to turn into a
+     * message, a 14-bit CC goes straight to the port — so the number sent has
+     * to be the one a DAW will act on. `data1` is that number; the id would
+     * arrive as some other CC entirely.
+     */
+    this.knobSink = {
+      onValue: (knobIndex: number, value14: number, flags: number) => {
+        const zone = this.layout.zones[this.knobZones[knobIndex] ?? -1];
+        const control =
+          zone === undefined
+            ? undefined
+            : spec.controls.find((c) => c.index === zone.note);
+        const cc = control?.data1 ?? control?.index;
+        if (cc === undefined) return;
+        this.link.push(
+          EventType.CONTROL_CHANGE_14,
+          0,
+          cc,
+          0,
+          value14,
+          this.deviceId,
+          flags,
+          0,
+        );
+      },
+      onGrab: () => {},
+      onRelease: () => {},
+    };
     this.pose = pose;
     this.layout = buildSurface(spec);
     this.leds = new LedState(this.layout.zones.length);
 
-    this.detector = new PokeDetector(this.layout, {
+    /*
+     * The detector sees only the pokeable zones.
+     *
+     * A Launchkey's faders sit between its keys and its pads, so a hand
+     * crossing the instrument passes over them constantly — a detector given
+     * the whole surface would fire a note every time, which is the ordinary
+     * path across the device rather than an edge case. The zones stay in the
+     * array so they are still drawn and still lit; only locating is masked.
+     */
+    this.continuous = continuousZones(this.layout);
+    this.detector = new PokeDetector(
+      this.continuous.size === 0
+        ? this.layout
+        : maskPokeable(this.layout, (i: number) => !this.continuous.has(i)),
+      {
       // A Launchpad's pads are small and close together, so sliding between
       // them mid-press is far more often a miss than an intended roll.
       glissando: false,
@@ -133,10 +200,62 @@ export class LaunchpadInstance implements NoteSink {
       velocityGamma: VelocityCurve.SOFT,
       // The hardware sends polyphonic aftertouch, so the detector should too.
       aftertouchInterval: spec.polyAftertouch ? 4 : 0,
-    });
+    },
+    );
 
     this.transform = surfaceTransform(this.layout, pose);
     this.syncDetector();
+    this.buildKnobs();
+  }
+
+  /**
+   * Register the knobs and faders with `KnobControl`, in world space.
+   *
+   * They are pinched and dragged rather than poked, so they do not go through
+   * the detector at all — `KnobControl` works from fingertip positions and a
+   * grab radius, and knows nothing about surfaces. Which is why they have to be
+   * repositioned whenever the device moves: nothing else would.
+   */
+  private buildKnobs(): void {
+    if (this.continuous.size === 0) return;
+    for (const zoneIndex of this.continuous) {
+      const zone = this.layout.zones[zoneIndex]!;
+      const world = localToWorld(
+        this.transform,
+        zone.rect.x + zone.rect.width / 2,
+        zone.rect.y + zone.rect.height / 2,
+        zone.raise,
+      );
+      this.knobZones.push(zoneIndex);
+      this.knobs.addKnob(world[0], world[1], world[2], 0.5);
+    }
+  }
+
+  /** Move every knob to follow the device. */
+  private placeKnobs(): void {
+    for (const [i, zoneIndex] of this.knobZones.entries()) {
+      const zone = this.layout.zones[zoneIndex]!;
+      const world = localToWorld(
+        this.transform,
+        zone.rect.x + zone.rect.width / 2,
+        zone.rect.y + zone.rect.height / 2,
+        zone.raise,
+      );
+      this.knobs.setKnobPosition(i, world[0], world[1], world[2]);
+    }
+  }
+
+  /**
+   * Advance the continuous controls.
+   *
+   * Separate from the detector's update because they consume the same fingertip
+   * frame in different ways — one looks for a surface crossing, the other for a
+   * pinch — and a hand can legitimately be doing both at once on a device this
+   * size.
+   */
+  updateContinuous(frame: FingerFrame): void {
+    if (this.knobZones.length === 0) return;
+    this.knobs.update(frame, this.knobSink);
   }
 
   /**
@@ -152,6 +271,9 @@ export class LaunchpadInstance implements NoteSink {
     this.pose = pose;
     this.transform = surfaceTransform(this.layout, pose);
     this.syncDetector();
+    // The knobs live in world space, so they do not follow the surface on their
+    // own. A device moved without this keeps its faders where it used to be.
+    this.placeKnobs();
     this.placed = true;
   }
 
@@ -269,6 +391,23 @@ function buildSurface(spec: DeviceSpec): DeviceSurface {
     ? new LaunchkeySurface(spec)
     : new LaunchpadLayout(spec);
 }
+
+/**
+ * Which zones are pinched rather than poked.
+ *
+ * Asked of the surface rather than assumed from the model, so a device that
+ * gains a fader row later needs no change here.
+ */
+function continuousZones(surface: DeviceSurface): ReadonlySet<number> {
+  if (!(surface instanceof LaunchkeySurface)) return EMPTY_ZONES;
+  const out = new Set<number>();
+  for (const zone of surface.zones) {
+    if (isContinuousPart(surface.partOf(zone.index))) out.add(zone.index);
+  }
+  return out;
+}
+
+const EMPTY_ZONES: ReadonlySet<number> = new Set<number>();
 
 /** Build an instance for a model, or null if the model is not emulated. */
 export function createLaunchpad(

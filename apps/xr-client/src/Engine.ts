@@ -814,6 +814,10 @@ export class Engine {
       // between a Launchpad and the keyboard without either losing track of it.
       for (const device of this.launchpads) {
         device.detector.update(this.fingers, device);
+        // A device with knobs or faders drives them from the same fingertip
+        // frame: one hand can be holding a fader while the other plays a key,
+        // and on an instrument this size that is ordinary rather than clever.
+        device.updateContinuous(this.fingers);
       }
       this.knobs.update(this.fingers, this.knobSink);
       // After the detectors, so a frame that both plays a pad and moves a

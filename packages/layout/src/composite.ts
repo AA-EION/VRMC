@@ -162,3 +162,37 @@ export function partBounds(part: SurfacePart): Rect {
     height: part.locator.height,
   };
 }
+
+/**
+ * A surface with some of its zones unpokeable.
+ *
+ * WHY NOT JUST LEAVE THEM OUT
+ * Because the zone index is the identity everything shares. The renderer draws
+ * `zones[i]`, the LED state lights `zones[i]`, and the poke detector answers
+ * with `i`. Removing the knobs from the array would renumber every zone after
+ * them, so the surface would draw one control and light another.
+ *
+ * So the zones stay and the *locating* is masked: a fingertip over a fader
+ * finds nothing, and the fader is still drawn, still lit, still there. What
+ * grabs it is `KnobControl`, which works in world space and does not consult a
+ * locator at all.
+ *
+ * A poke detector given the unmasked surface would fire a note every time a
+ * hand passed through a fader on its way to a key — the faders sit between the
+ * keys and the pads, so that is not an edge case but the ordinary path across
+ * the instrument.
+ */
+export function maskPokeable(
+  source: ZoneLocator,
+  isPokeable: (zoneIndex: number) => boolean,
+): ZoneLocator {
+  return {
+    zones: source.zones,
+    width: source.width,
+    height: source.height,
+    locate(x: number, y: number): number {
+      const hit = source.locate(x, y);
+      return hit >= 0 && isPokeable(hit) ? hit : -1;
+    },
+  };
+}
