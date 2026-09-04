@@ -30,6 +30,12 @@ static const CFStringRef kPorts1[] = {
     CFSTR("LPProMK3 DAW"),
 };
 
+// launchkey-mk3-49
+static const CFStringRef kPorts2[] = {
+    CFSTR("LKMK3 MIDI"),
+    CFSTR("LKMK3 DAW"),
+};
+
 struct DeviceSpec {
   const char *model;
   CFStringRef name;
@@ -41,6 +47,7 @@ struct DeviceSpec {
 inline const DeviceSpec kDevices[] = {
     {"launchpad-x", CFSTR("Launchpad X"), CFSTR("Focusrite - Novation"), kPorts0, 2},
     {"launchpad-pro-mk3", CFSTR("Launchpad Pro MK3"), CFSTR("Focusrite - Novation"), kPorts1, 3},
+    {"launchkey-mk3-49", CFSTR("Launchkey MK3 49"), CFSTR("Focusrite - Novation"), kPorts2, 2},
 };
 
 inline constexpr size_t kDeviceCount = sizeof(kDevices) / sizeof(kDevices[0]);

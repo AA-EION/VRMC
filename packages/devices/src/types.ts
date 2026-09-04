@@ -18,6 +18,8 @@ export const DeviceModel = {
   KEYBOARD: 'keyboard',
   LAUNCHPAD_X: 'launchpad-x',
   LAUNCHPAD_PRO_MK3: 'launchpad-pro-mk3',
+  /** Novation Launchkey MK3 49: keys, pads, knobs and faders. */
+  LAUNCHKEY_MK3_49: 'launchkey-mk3-49',
 } as const;
 export type DeviceModel = (typeof DeviceModel)[keyof typeof DeviceModel];
 
@@ -35,6 +37,14 @@ export const ButtonRole = {
   TRACK: 'track',
   /** The illuminated logo. Output only — it is not a button. */
   LOGO: 'logo',
+  /** A rotary control. Continuous, not a press. */
+  KNOB: 'knob',
+  /** A linear control. Continuous, not a press. */
+  FADER: 'fader',
+  /** A piano key. */
+  KEY: 'key',
+  /** Transport and mode buttons that are not on the grid. */
+  TRANSPORT: 'transport',
 } as const;
 export type ButtonRole = (typeof ButtonRole)[keyof typeof ButtonRole];
 
@@ -116,13 +126,42 @@ export interface DeviceSpec {
    * each spec to get right.
    */
   portNames: readonly string[];
+  /**
+   * Per-direction port names, when the hardware names them differently.
+   *
+   * The Launchpads call a port the same thing whichever way MIDI is flowing —
+   * `LPX DAW` is both the source and the destination. A Launchkey does not: its
+   * endpoints are `LKMK3 DAW Out` and `LKMK3 DAW In`, named from the *device's*
+   * point of view, so what a DAW lists as an input is the one called "Out".
+   *
+   * Absent means `portNames` is used for both, which is the common case. When
+   * present the arrays run parallel to `portNames`.
+   *
+   * `source` is what the device sends *from* — a host's input. `destination` is
+   * what it receives *on* — a host's output. Naming them by role rather than by
+   * direction is deliberate: "in" and "out" mean opposite things depending on
+   * which end of the cable you are standing at, and that ambiguity is exactly
+   * what makes these two arrays easy to swap.
+   */
+  portNamesByDirection?: {
+    readonly source: readonly string[];
+    readonly destination: readonly string[];
+  };
   /** Index into `portNames` of the port the DAW protocol runs on. */
   dawPortIndex: number;
 
   // --- Surface ---
   controls: readonly Control[];
-  /** Grid width and height in pads, excluding the surrounding buttons. */
+  /** Grid width in pads, excluding the surrounding buttons. */
   gridSize: number;
+  /**
+   * Grid height in pads, when it is not square.
+   *
+   * Absent means square, which every Launchpad is. A Launchkey's pads are two
+   * rows of eight, and anything reading only `gridSize` would draw it as an
+   * 8x8 — sixty-four pads where there are sixteen.
+   */
+  padRows?: number;
   /** Whether the pads report polyphonic aftertouch. */
   polyAftertouch: boolean;
   /** Whether the pads are velocity sensitive. */

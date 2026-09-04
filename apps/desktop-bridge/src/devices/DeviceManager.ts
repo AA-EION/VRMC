@@ -231,6 +231,16 @@ export class DeviceManager {
         loopbackPattern: this.options.loopbackPattern,
         model,
         portIndex: i,
+        // Only some hardware names the two halves differently; `portName`
+        // applies the same template to whichever names the spec gives.
+        sourceName:
+          spec?.portNamesByDirection === undefined
+            ? undefined
+            : this.portName(spec, spec.portNamesByDirection.source[i] ?? ''),
+        destinationName:
+          spec?.portNamesByDirection === undefined
+            ? undefined
+            : this.portName(spec, spec.portNamesByDirection.destination[i] ?? ''),
       } satisfies PortOptions);
       for (const note of result.notes)
         this.events.onLog(`[device ${deviceId}] ${note}`);

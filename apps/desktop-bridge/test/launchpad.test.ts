@@ -7,6 +7,7 @@ import {
   LAUNCHPAD_X,
   LaunchpadMode,
   buildModeMessage,
+  LAUNCHKEY_MK3_49,
 } from "@vrmc/devices";
 import {
   DeviceId,
@@ -39,10 +40,24 @@ import { WsServer } from "../src/net/WsServer.js";
  */
 class FakePorts {
   readonly opened: string[] = [];
+  /** What each opened port asked its two halves to be called. */
+  readonly directions: { source: string; destination: string }[] = [];
   readonly sinks = new Map<string, NullSink>();
   readonly sources = new Map<string, NullSource>();
 
-  open = async ({ name }: { name: string }) => {
+  open = async ({
+    name,
+    sourceName,
+    destinationName,
+  }: {
+    name: string;
+    sourceName?: string;
+    destinationName?: string;
+  }) => {
+    this.directions.push({
+      source: sourceName ?? name,
+      destination: destinationName ?? name,
+    });
     const sink = new NullSink(name, true);
     const source = new NullSource(name);
     this.sinks.set(name, sink);
@@ -690,5 +705,45 @@ describe("what an endpoint tells the host it is", () => {
     const devices = makeManager(ports as never);
     await devices.add(DeviceId.PADS, "VRMC");
     expect(ports.seen["VRMC"]).toBeNull();
+  });
+});
+
+
+/**
+ * Hardware that names the two halves of a port differently.
+ *
+ * A Launchpad calls its port the same thing whichever way MIDI flows. A
+ * Launchkey does not — its endpoints are `LKMK3 DAW Out` and `LKMK3 DAW In`,
+ * named from the *device's* point of view, so what Ableton lists as an input,
+ * and tells people to select, is the one called "Out".
+ *
+ * Worth a test because the field existed for a while and nothing read it: the
+ * spec described the hardware correctly and the ports were still opened under
+ * one name. A declaration nothing consumes is indistinguishable from no
+ * declaration at all.
+ */
+describe("directional port names", () => {
+  it("opens a Launchkey's halves under their own names", async () => {
+    const ports = new FakePorts();
+    const devices = makeManager(ports);
+    await devices.add(30, DeviceModel.LAUNCHKEY_MK3_49);
+
+    const daw = ports.directions.at(LAUNCHKEY_MK3_49.dawPortIndex)!;
+    expect(daw.source).toContain("LKMK3 DAW Out");
+    expect(daw.destination).toContain("LKMK3 DAW In");
+  });
+
+  it("does not swap them, which is the mistake that looks fine", () => {
+    // Both names exist either way round, so a swap produces a device that
+    // appears correct in every list and is wired backwards.
+    expect(LAUNCHKEY_MK3_49.portNamesByDirection!.source.join()).toContain("Out");
+    expect(LAUNCHKEY_MK3_49.portNamesByDirection!.destination.join()).toContain("In");
+  });
+
+  it("leaves a Launchpad's halves sharing one name", async () => {
+    const ports = new FakePorts();
+    const devices = makeManager(ports);
+    await devices.add(31, DeviceModel.LAUNCHPAD_X);
+    for (const d of ports.directions) expect(d.source).toBe(d.destination);
   });
 });

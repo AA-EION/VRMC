@@ -12,6 +12,7 @@ import {
   LightingType,
   PALETTE_SIZE,
   buildInquiryReply,
+  LAUNCHKEY_MK3_49,
   buildModeMessage,
   buildRgbLedMessage,
   colOf,
@@ -636,5 +637,96 @@ describe('text the DAW sends a device to display', () => {
     });
     emulator.handleHostMessage(textMessage(ascii('Session')));
     expect(seen).toEqual(['Session']);
+  });
+});
+
+/**
+ * The Launchkey MK3 49.
+ *
+ * Everything asserted here was read out of Ableton's own `Launchkey_MK3` remote
+ * script, and every one of these is a value that fails *silently* if it drifts:
+ * a wrong identity byte means Live logs "wrong product id" and never binds, a
+ * wrong port index means the control-surface protocol is spoken at a port
+ * expecting notes, and a missing fader means the script writes to a control
+ * that is not there.
+ */
+describe('Launchkey MK3 49', () => {
+  const spec = LAUNCHKEY_MK3_49;
+
+  it('replies with the seven bytes Live compares, for the 49 specifically', () => {
+    /*
+     * `00 20 29 36 01 00 00`. The 0x36 is the model byte — 54 — and the three
+     * models either side of it (25, 37, 61) differ only there, so this is the
+     * assertion that catches transcribing the wrong one of four.
+     */
+    expect([...buildInquiryReply(spec).slice(5, 12)]).toEqual([
+      0x00, 0x20, 0x29, 0x36, 0x01, 0x00, 0x00,
+    ]);
+  });
+
+  it('has a USB product id whose low byte is the model byte', () => {
+    // 0x136 and 0x36. Novation numbers them so, and it is a second, independent
+    // check on the same transcription.
+    expect(spec.usbProductId & 0xff).toBe(spec.familyCode[0]);
+  });
+
+  it('puts the DAW port second, which no other family here does', () => {
+    /*
+     * Live's capabilities: `inport(props=[NOTES_CC, REMOTE])` then
+     * `inport(props=[NOTES_CC, SCRIPT])`. Three Novation families, three
+     * orderings — the Launchpad X first of two, the Pro MK3 last of three,
+     * this second of two. There is no rule to infer, so it is pinned.
+     */
+    expect(spec.dawPortIndex).toBe(1);
+    expect(spec.portNames[spec.dawPortIndex]).toBe('LKMK3 DAW');
+  });
+
+  it('names its endpoints by direction, from the device\'s point of view', () => {
+    /*
+     * Unlike the Launchpads, whose port is called the same thing whichever way
+     * MIDI flows. What a host lists as an *input* is the port the device calls
+     * "Out", which is exactly the pair a careless implementation swaps.
+     */
+    const byDirection = spec.portNamesByDirection;
+    expect(byDirection).toBeDefined();
+    expect(byDirection!.source[spec.dawPortIndex]).toBe('LKMK3 DAW Out');
+    expect(byDirection!.destination[spec.dawPortIndex]).toBe('LKMK3 DAW In');
+    // Parallel to portNames, or the indices mean different things per array.
+    expect(byDirection!.source).toHaveLength(spec.portNames.length);
+    expect(byDirection!.destination).toHaveLength(spec.portNames.length);
+  });
+
+  it('has nine faders, not eight', () => {
+    // The ninth is the master. A spec that stopped at eight would leave Live
+    // writing to a control that does not exist, and a fader that is never moved
+    // looks exactly like one nobody touched.
+    const faders = spec.controls.filter((c) => c.role === ButtonRole.FADER);
+    expect(faders).toHaveLength(9);
+    expect(faders.at(-1)?.label).toBe('MASTER');
+    expect(faders.map((f) => f.index)).toEqual([41, 42, 43, 44, 45, 46, 47, 48, 49]);
+  });
+
+  it('has eight knobs, and they are continuous rather than pressed', () => {
+    // CC and not NOTE: a knob has no release, and note tracking must not try to
+    // send one for it when the device goes away.
+    const knobs = spec.controls.filter((c) => c.role === ButtonRole.KNOB);
+    expect(knobs).toHaveLength(8);
+    expect(knobs.every((k) => k.kind === ControlKind.CC)).toBe(true);
+  });
+
+  it('has 49 keys, spanning C2 to C6', () => {
+    const keys = spec.controls.filter((c) => c.role === ButtonRole.KEY);
+    expect(keys).toHaveLength(49);
+    expect(keys[0]!.index).toBe(36);
+    expect(keys.at(-1)!.index).toBe(84);
+  });
+
+  it('has sixteen pads in two rows, not sixty-four in eight', () => {
+    // `gridSize` is the width. Anything reading it as both dimensions draws an
+    // 8x8 where there are two rows of eight.
+    const pads = spec.controls.filter((c) => c.role === ButtonRole.GRID);
+    expect(pads).toHaveLength(16);
+    expect(spec.padRows).toBe(2);
+    expect(new Set(pads.map((p) => p.row)).size).toBe(2);
   });
 });

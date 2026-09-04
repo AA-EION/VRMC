@@ -20,6 +20,18 @@ export interface PortOptions {
   /** Name the DAW will display. */
   name: string;
   /**
+   * Endpoint names, when the hardware names the two halves differently.
+   *
+   * A Launchpad calls its port the same thing whichever way MIDI flows. A
+   * Launchkey does not: its endpoints are `LKMK3 DAW Out` and `LKMK3 DAW In`,
+   * named from the device's point of view — so what Ableton lists as an
+   * *input*, and tells the user to select, is the one called "Out".
+   *
+   * Both default to `name`, which is the common case and every Launchpad.
+   */
+  sourceName?: string;
+  destinationName?: string;
+  /**
    * The hardware identity to publish on the endpoint, on macOS.
    *
    * Null for the plain surfaces, which are not pretending to be anything. See
@@ -104,7 +116,17 @@ export async function openBidirectionalPort(options: PortOptions): Promise<PortR
     return { port: nullPort(options.name), ok: false, notes };
   }
 
-  const sink = await openVirtualOutput(options.name, options.identity);
+  /*
+   * The destination is what the *host* writes to, so it takes the destination
+   * name; the source is what the host reads. Which is the point at which the
+   * two are easy to swap, and swapping them puts "Out" on the port a DAW sends
+   * to — the exact thing Novation's own setup instructions tell people not to
+   * pick.
+   */
+  const destinationName = options.destinationName ?? options.name;
+  const sourceName = options.sourceName ?? options.name;
+
+  const sink = await openVirtualOutput(destinationName, options.identity);
   if (sink === null) {
     // The addon failing to load and the host having no MIDI system produce the
     // same missing port, and pointing at the wrong one costs a long detour:
@@ -115,7 +137,7 @@ export async function openBidirectionalPort(options: PortOptions): Promise<PortR
       loadError !== ''
         ? `The MIDI library did not load: ${loadError}`
         : process.platform === 'darwin'
-          ? `Could not create a CoreMIDI port named "${options.name}". Is one already open?`
+          ? `Could not create a CoreMIDI port named "${destinationName}". Is one already open?`
           : 'Could not create an ALSA port. This host may have no MIDI sequencer (/dev/snd/seq).',
     );
     return { port: nullPort(options.name), ok: false, notes };
@@ -123,12 +145,16 @@ export async function openBidirectionalPort(options: PortOptions): Promise<PortR
 
   // The input half is best-effort: without it the device plays but stays dark,
   // which is worth reporting and not worth failing over.
-  const source = await openVirtualInput(options.name, options.identity);
+  const source = await openVirtualInput(sourceName, options.identity);
   if (source === null) {
-    notes.push(`Created "${options.name}" as output only; LED feedback unavailable.`);
+    notes.push(`Created "${destinationName}" as output only; LED feedback unavailable.`);
   } else {
     const api = process.platform === 'darwin' ? 'CoreMIDI' : 'ALSA';
-    notes.push(`Created ${api} port "${options.name}" (in and out).`);
+    notes.push(
+      sourceName === destinationName
+        ? `Created ${api} port "${options.name}" (in and out).`
+        : `Created ${api} ports "${sourceName}" and "${destinationName}".`,
+    );
   }
 
   // Metadata, so its absence is a note rather than a failure — but a silent
