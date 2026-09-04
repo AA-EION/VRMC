@@ -1,6 +1,12 @@
 // SPDX-License-Identifier: GPL-3.0-only
 import { describe, it, expect, vi } from "vitest";
-import { DriverPorts } from "../src/midi/DriverPort.js";
+import {
+  DRIVER_MODEL,
+  DRIVER_PORT_COUNT,
+  DriverPorts,
+  driverAwareOpener,
+} from "../src/midi/DriverPort.js";
+import { LAUNCHPAD_PRO_MK3, specFor } from "@vrmc/devices";
 import type { DriverLink } from "../src/midi/DriverLink.js";
 
 /**
@@ -177,5 +183,100 @@ describe("what it tells the rest of the bridge", () => {
     expect(h.sent).toEqual([{ port: 1, data: [0x90, 60, 1] }]);
     h.ports.deliver(1, Uint8Array.of(0xb0, 7, 9));
     expect(onB).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * Choosing between the driver and a virtual port.
+ *
+ * The decision is per port and not once at startup, because MIDIServer loads
+ * the driver on demand and exits when idle — so "is it there" has a different
+ * answer minute to minute. A bridge that decided at startup would open virtual
+ * ports for a whole session because the driver happened to be asleep.
+ */
+describe("which route a port takes", () => {
+  const fallbackResult = {
+    port: { name: "virtual", sink: {}, source: null, close: () => {} },
+    ok: true,
+    notes: ["virtual"],
+  } as never;
+
+  function opener(connected: boolean) {
+    const h = harness();
+    const fallback = vi.fn(async () => fallbackResult);
+    return {
+      ...h,
+      fallback,
+      open: driverAwareOpener(h.ports, { connected }, fallback),
+    };
+  }
+
+  const options = (over: Record<string, unknown> = {}) =>
+    ({
+      name: "Launchpad Pro MK3 LPProMK3 DAW",
+      noMidi: false,
+      loopbackPattern: /never/,
+      model: DRIVER_MODEL,
+      portIndex: 2,
+      ...over,
+    }) as never;
+
+  it("uses the driver when it is connected and the model matches", async () => {
+    const o = opener(true);
+    const result = await o.open(options());
+    expect(o.fallback).not.toHaveBeenCalled();
+    expect(result.ok).toBe(true);
+    result.port.sink.send(0x90, 60, 1);
+    expect(o.sent).toEqual([{ port: 2, data: [0x90, 60, 1] }]);
+  });
+
+  it("falls back to a virtual port when the driver is not connected", async () => {
+    const o = opener(false);
+    await o.open(options());
+    expect(o.fallback).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back for a model the driver does not publish", async () => {
+    /*
+     * The driver creates one fixed device, so a Launchpad X has no entity to
+     * be carried on. Routing it through anyway would put an X's notes on a
+     * device a DAW has been told is a Pro MK3.
+     */
+    const o = opener(true);
+    await o.open(options({ model: "launchpad-x" }));
+    expect(o.fallback).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back for the plain surfaces, which have no model at all", async () => {
+    const o = opener(true);
+    await o.open(options({ model: undefined, portIndex: undefined }));
+    expect(o.fallback).toHaveBeenCalledTimes(1);
+  });
+
+  it("respects --no-midi, which must open nothing anywhere", async () => {
+    // Otherwise the flag that exists to test the network path without touching
+    // MIDI would publish a device and send real notes to a DAW.
+    const o = opener(true);
+    await o.open(options({ noMidi: true }));
+    expect(o.fallback).toHaveBeenCalledTimes(1);
+  });
+
+  it("falls back for a port index the driver's device does not have", async () => {
+    // A spec with more ports than the driver publishes would otherwise address
+    // an entity that is not there, and the MIDI would go nowhere silently.
+    const o = opener(true);
+    await o.open(options({ portIndex: DRIVER_PORT_COUNT }));
+    expect(o.fallback).toHaveBeenCalledTimes(1);
+  });
+
+  it("matches the port count of the spec it claims to carry", () => {
+    /*
+     * The bridge addresses the driver's entities by the *spec's* port index, so
+     * these two numbers being equal is what makes that addressing correct. They
+     * live in different files in different languages, so assert it rather than
+     * trusting both to be edited together.
+     */
+    expect(LAUNCHPAD_PRO_MK3.portNames).toHaveLength(DRIVER_PORT_COUNT);
+    expect(specFor(DRIVER_MODEL)).not.toBeNull();
   });
 });

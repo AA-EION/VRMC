@@ -31,6 +31,16 @@ export interface PortOptions {
   noMidi: boolean;
   /** Windows: pattern for the loopback port to fall back to. */
   loopbackPattern: RegExp;
+  /**
+   * Which emulated model this port belongs to, and which of its ports it is.
+   *
+   * Only the CoreMIDI driver route needs these, and it needs both: the driver
+   * publishes one specific device, so a port can only go through it if the
+   * model matches, and the entity to use is the port's index within that
+   * model's spec. Optional because the plain surfaces have neither.
+   */
+  model?: string;
+  portIndex?: number;
 }
 
 export interface PortResult {

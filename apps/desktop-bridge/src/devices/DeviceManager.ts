@@ -229,6 +229,8 @@ export class DeviceManager {
         identity: identities[i] ?? null,
         noMidi: this.options.noMidi,
         loopbackPattern: this.options.loopbackPattern,
+        model,
+        portIndex: i,
       } satisfies PortOptions);
       for (const note of result.notes)
         this.events.onLog(`[device ${deviceId}] ${note}`);

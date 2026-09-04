@@ -35,7 +35,9 @@ import {
   DeviceManager,
 } from "./devices/DeviceManager.js";
 import { PresenceGate } from "./core/PresenceGate.js";
-import { listPorts } from "./midi/openPort.js";
+import { listPorts, openBidirectionalPort } from "./midi/openPort.js";
+import { DriverLink } from "./midi/DriverLink.js";
+import { DriverPorts, driverAwareOpener } from "./midi/DriverPort.js";
 import {
   bundledDriver,
   currentDriverState,
@@ -196,6 +198,47 @@ async function main(): Promise<void> {
     saveTimer.unref();
   };
 
+  /*
+   * The link to the CoreMIDI driver, if one is installed.
+   *
+   * Started unconditionally on macOS rather than only when the driver is
+   * present: the driver is installed and removed while the bridge runs — from
+   * the tray menu, in this very process — and a listener that was only opened
+   * when a driver existed at startup would leave the newly installed one
+   * connecting to nothing until a restart.
+   *
+   * Never fatal. Every failure here means MIDI goes out through virtual ports
+   * instead, which is what it did before the driver existed.
+   */
+  // The two refer to each other — the link delivers into the ports, the ports
+  // send through the link — so one of them has to be built first and told about
+  // the other. The closure is only ever called from a socket callback, which is
+  // a later turn of the event loop than the assignment below.
+  let driverPorts: DriverPorts | null = null;
+  const driverLink = new DriverLink({
+    onMidi: (port, data) => driverPorts?.deliver(port, data),
+    onConnected: (connected) => {
+      log(
+        connected
+          ? "the CoreMIDI driver is connected; its device carries MIDI now"
+          : "the CoreMIDI driver went away; new ports will be virtual",
+      );
+      refreshTray();
+    },
+    onLog: log,
+  });
+  driverPorts = new DriverPorts(driverLink);
+  if (process.platform === "darwin") {
+    try {
+      await driverLink.start();
+    } catch (err) {
+      log(
+        `could not listen for the CoreMIDI driver (${err instanceof Error ? err.message : String(err)});` +
+          " MIDI will use virtual ports",
+      );
+    }
+  }
+
   const devices = new DeviceManager(
     {
       onLed: (deviceId, ledIndex, r, g, b, blink) => {
@@ -212,6 +255,10 @@ async function main(): Promise<void> {
       noMidi: config.noMidi,
       loopbackPattern: config.loopbackPattern,
       portNameTemplate: config.portNameTemplate,
+      // Decided per port, not once at startup: MIDIServer loads the driver on
+      // demand and exits when idle, so whether it is there right now changes
+      // minute to minute.
+      openPort: driverAwareOpener(driverPorts, driverLink, openBidirectionalPort),
       placementOf: (deviceId) => workspace.placementOf(deviceId),
     },
   );
@@ -732,6 +779,9 @@ async function main(): Promise<void> {
     // Through the gate rather than around it: a teardown may already be
     // scheduled, and the process must not exit with ports still published.
     presence.dispose();
+    // The socket file outlives the process otherwise, and a stale one is what
+    // the next run has to clear before it can bind.
+    await driverLink.stop();
     process.exit(0);
   };
 

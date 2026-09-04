@@ -24,6 +24,7 @@
 
 import type { DriverLink } from "./DriverLink.js";
 import type { MidiSink, MidiSource, VirtualPort } from "./MidiSink.js";
+import type { PortOptions, PortResult } from "./openPort.js";
 
 class DriverSink implements MidiSink {
   readonly backend = "coremidi-driver";
@@ -120,3 +121,58 @@ export class DriverPorts {
     this.sources.clear();
   }
 }
+
+/**
+ * The model the CoreMIDI driver publishes.
+ *
+ * The driver creates one fixed device — see native/coremidi-driver — so only
+ * this model can be carried through it. A Launchpad X spawned from the headset
+ * still gets virtual ports, and that is a real limitation rather than an
+ * oversight: publishing devices on demand needs `MIDIDeviceCreate` on
+ * MIDIServer's *main* thread, which the link's thread is not.
+ */
+export const DRIVER_MODEL = "launchpad-pro-mk3";
+
+/**
+ * Route a port through the driver when that is possible, and to a virtual port
+ * otherwise.
+ *
+ * Wrapping `openBidirectionalPort` rather than replacing it, because "is the
+ * driver installed and connected right now" is a question with a different
+ * answer minute to minute: MIDIServer loads the driver on demand and exits when
+ * idle. A bridge that decided once at startup would open virtual ports for a
+ * whole session because the driver happened to be asleep when it looked.
+ */
+export function driverAwareOpener(
+  ports: DriverPorts,
+  link: { readonly connected: boolean },
+  fallback: (options: PortOptions) => Promise<PortResult>,
+): (options: PortOptions) => Promise<PortResult> {
+  return async (options) => {
+    const index = options.portIndex;
+    if (
+      !link.connected ||
+      options.noMidi ||
+      options.model !== DRIVER_MODEL ||
+      index === undefined ||
+      index >= DRIVER_PORT_COUNT
+    ) {
+      return fallback(options);
+    }
+    return {
+      port: ports.open(options.name, index),
+      ok: true,
+      notes: [`through the CoreMIDI driver, as one device`],
+    };
+  };
+}
+
+/**
+ * Entities the driver's device has.
+ *
+ * Must equal the Pro MK3 spec's port count — the bridge addresses the driver's
+ * entities by the spec's port index, so a spec with more ports than the driver
+ * publishes would send to an entity that is not there. A test asserts it rather
+ * than trusting two files to be edited together.
+ */
+export const DRIVER_PORT_COUNT = 3;
