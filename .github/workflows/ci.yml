@@ -61,6 +61,11 @@ jobs:
           node-version: 22
           cache: pnpm
       - run: pnpm install --frozen-lockfile
+      # The bridge imports @vrmc/protocol and friends, and tsc resolves those
+      # through their built `dist` rather than their source. Without this the
+      # compile fails on "Cannot find module '@vrmc/protocol'" — which says
+      # nothing about the vectors this job exists to check.
+      - run: pnpm --filter @vrmc/protocol --filter @vrmc/layout --filter @vrmc/interaction --filter @vrmc/devices build
       - name: The committed frame vectors are current
         run: |
           set -euo pipefail
