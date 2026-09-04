@@ -25,6 +25,12 @@
 import type { DriverLink } from "./DriverLink.js";
 import type { MidiSink, MidiSource, VirtualPort } from "./MidiSink.js";
 import type { PortOptions, PortResult } from "./openPort.js";
+import {
+  FrameKind,
+  MAX_PORTS_PER_DEVICE,
+  encodeAddress,
+} from "./driverFraming.js";
+import { HARDWARE_MODELS } from "@vrmc/devices";
 
 class DriverSink implements MidiSink {
   readonly backend = "coremidi-driver";
@@ -41,7 +47,8 @@ class DriverSink implements MidiSink {
   constructor(
     readonly name: string,
     private readonly link: DriverLink,
-    private readonly port: number,
+    /** `(device << 4) | port` — see `encodeAddress`. */
+    private readonly address: number,
   ) {}
 
   /**
@@ -60,11 +67,11 @@ class DriverSink implements MidiSink {
     this.three[0] = status;
     this.three[1] = d1;
     this.three[2] = d2;
-    this.link.sendMidi(this.port, this.three.subarray(0, length));
+    this.link.sendMidi(this.address, this.three.subarray(0, length));
   }
 
   sendRaw(bytes: Uint8Array): void {
-    this.link.sendMidi(this.port, bytes);
+    this.link.sendMidi(this.address, bytes);
   }
 
   close(): void {
@@ -89,49 +96,98 @@ class DriverSourceEnd implements MidiSource {
  * carries only an index and something has to know which `onMessage` that is.
  */
 export class DriverPorts {
+  /** Keyed by the packed address, so two devices' port 0 stay apart. */
   private readonly sources = new Map<number, DriverSourceEnd>();
+  /** How many ports each device has open, so presence follows the last one. */
+  private readonly openPorts = new Map<number, number>();
 
   constructor(private readonly link: DriverLink) {}
 
   /** Hand incoming MIDI to whichever port it was addressed to. */
-  deliver(port: number, data: Uint8Array): void {
-    this.sources.get(port)?.onMessage?.(data);
+  deliver(address: number, data: Uint8Array): void {
+    this.sources.get(address)?.onMessage?.(data);
   }
 
-  /** A port backed by entity `index` of the driver's device. */
-  open(name: string, index: number): VirtualPort {
+  /** A port backed by entity `port` of the driver's device `device`. */
+  open(name: string, device: number, port: number): VirtualPort {
+    const address = encodeAddress(device, port);
     const source = new DriverSourceEnd(name);
-    this.sources.set(index, source);
-    const sink = new DriverSink(name, this.link, index);
+    this.sources.set(address, source);
+    const sink = new DriverSink(name, this.link, address);
+
+    /*
+     * The device appears to a DAW when its first port opens and goes away with
+     * its last, rather than on every port.
+     *
+     * A Launchpad Pro MK3 opens three ports in a row, and telling the driver
+     * three times would be three property writes and three moments where a DAW
+     * could see a half-built device. Counting is also what makes the closing
+     * side right: the device is only absent once every port has gone.
+     */
+    const before = this.openPorts.get(device) ?? 0;
+    this.openPorts.set(device, before + 1);
+    if (before === 0) this.setPresent(device, true);
+
     return {
       name,
       sink,
       source,
       close: () => {
-        this.sources.delete(index);
+        this.sources.delete(address);
+        const left = (this.openPorts.get(device) ?? 1) - 1;
+        if (left <= 0) {
+          this.openPorts.delete(device);
+          this.setPresent(device, false);
+        } else {
+          this.openPorts.set(device, left);
+        }
         source.close();
         sink.close();
       },
     };
   }
 
-  /** Forget every port, for when the device is torn down. */
+  /**
+   * Tell the driver whether a DAW should see this device at all.
+   *
+   * The driver publishes every model it supports at load and marks them
+   * absent; this is what turns one on. Without it a Mac with the driver
+   * installed would list every Launchpad VRMC can emulate, all the time,
+   * whether or not anybody was holding one — the same complaint the ports
+   * following the headset was built to answer.
+   */
+  private setPresent(device: number, present: boolean): void {
+    this.link.sendFrame(
+      FrameKind.DEVICE_STATE,
+      encodeAddress(device, 0),
+      Uint8Array.of(present ? 1 : 0),
+    );
+  }
+
+  /** Forget every port, for when everything is torn down. */
   clear(): void {
     for (const source of this.sources.values()) source.close();
     this.sources.clear();
+    for (const device of this.openPorts.keys()) this.setPresent(device, false);
+    this.openPorts.clear();
   }
 }
 
 /**
- * The model the CoreMIDI driver publishes.
+ * The models the driver publishes, in the order that is their device index.
  *
- * The driver creates one fixed device — see native/coremidi-driver — so only
- * this model can be carried through it. A Launchpad X spawned from the headset
- * still gets virtual ports, and that is a real limitation rather than an
- * oversight: publishing devices on demand needs `MIDIDeviceCreate` on
- * MIDIServer's *main* thread, which the link's thread is not.
+ * Generated into the driver from these same specs — see
+ * build/driverVectors.mjs, which writes native/coremidi-driver/src/Devices.h —
+ * so this list and the driver's are the same list rather than two that must be
+ * kept in step by hand. The index here is the device half of the address byte.
  */
-export const DRIVER_MODEL = "launchpad-pro-mk3";
+export const DRIVER_MODELS: readonly string[] = HARDWARE_MODELS;
+
+/** The device index for a model, or -1 if the driver does not publish it. */
+export function driverDeviceIndex(model: string | undefined): number {
+  if (model === undefined) return -1;
+  return DRIVER_MODELS.indexOf(model);
+}
 
 /**
  * Route a port through the driver when that is possible, and to a virtual port
@@ -149,30 +205,21 @@ export function driverAwareOpener(
   fallback: (options: PortOptions) => Promise<PortResult>,
 ): (options: PortOptions) => Promise<PortResult> {
   return async (options) => {
-    const index = options.portIndex;
+    const device = driverDeviceIndex(options.model);
+    const port = options.portIndex;
     if (
       !link.connected ||
       options.noMidi ||
-      options.model !== DRIVER_MODEL ||
-      index === undefined ||
-      index >= DRIVER_PORT_COUNT
+      device < 0 ||
+      port === undefined ||
+      port >= MAX_PORTS_PER_DEVICE
     ) {
       return fallback(options);
     }
     return {
-      port: ports.open(options.name, index),
+      port: ports.open(options.name, device, port),
       ok: true,
-      notes: [`through the CoreMIDI driver, as one device`],
+      notes: ["through the CoreMIDI driver, as one device"],
     };
   };
 }
-
-/**
- * Entities the driver's device has.
- *
- * Must equal the Pro MK3 spec's port count — the bridge addresses the driver's
- * entities by the spec's port index, so a spec with more ports than the driver
- * publishes would send to an entity that is not there. A test asserts it rather
- * than trusting two files to be edited together.
- */
-export const DRIVER_PORT_COUNT = 3;

@@ -162,6 +162,26 @@ void RefusesToEncodeTooMuch() {
         "short destination refused");
 }
 
+/// The packed address byte, at every corner.
+///
+/// A device index that bled into the port half would route silently to the
+/// wrong instrument — a Launchpad X's notes arriving on a Pro MK3's DAW port,
+/// with nothing anywhere to say so.
+void AddressPacking() {
+  std::printf("address packing\n");
+  for (uint8_t device = 0; device < 16; device++) {
+    for (uint8_t port = 0; port < 16; port++) {
+      const uint8_t address = vrmc::EncodeAddress(device, port);
+      Check(vrmc::DeviceOf(address) == device, "device survives the round trip");
+      Check(vrmc::PortOf(address) == port, "port survives the round trip");
+    }
+  }
+  // The halves must not be swapped: this is the mistake that still round-trips
+  // for every case where they happen to be equal.
+  Check(vrmc::EncodeAddress(1, 2) == 0x12, "device is the high nibble");
+  Check(vrmc::EncodeAddress(2, 1) == 0x21, "and the port the low one");
+}
+
 /// The constants themselves have to match, not just the bytes.
 void ConstantsAgree() {
   std::printf("constants\n");
@@ -177,6 +197,7 @@ int main() {
   std::printf("framing, against the TypeScript's own bytes (%zu vectors)\n\n",
               vrmc_vectors::kVectorCount);
   ConstantsAgree();
+  AddressPacking();
   EncodeMatchesTypeScript();
   DecodeMatchesTypeScript();
   SurvivesArbitrarySplitting();

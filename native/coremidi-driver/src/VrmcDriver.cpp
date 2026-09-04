@@ -37,12 +37,15 @@
 // server's main thread, which is the thread the driver is created on and the
 // one all of these entry points except Send() arrive on.
 
+#include "Devices.h"
 #include "Link.h"
 #include "Ump.h"
 
 #include <CoreMIDI/CoreMIDI.h>
 #include <CoreMIDI/MIDIDriver.h>
 #include <CoreFoundation/CoreFoundation.h>
+
+#include <atomic>
 
 // Must match CFPlugInFactories and CFPlugInTypes in Info.plist. Generated
 // once; changing it orphans any device MIDIServer has already persisted under
@@ -55,25 +58,20 @@
 namespace {
 
 /*
- * The three ports of a Launchpad Pro MK3, in the order the hardware presents
- * them. Kept in step with packages/devices/src/launchpadProMk3.ts — the DAW
- * port is last on this model, which is what Live's Launchpad_Pro_MK3
- * capabilities describe (REMOTE, then a propless port, then SCRIPT).
+ * Every model this driver can present, generated from the bridge's own device
+ * specs — see Devices.h. Each port becomes one entity with one source and one
+ * destination, which is how a real multi-port USB MIDI device appears.
  *
- * Each becomes one entity with one source and one destination, which is how a
- * real multi-port USB MIDI device appears: one device, three entities, six
- * endpoints.
+ * All of them are created at load and then marked *absent*. That is CoreMIDI's
+ * own prescription rather than a convenience: the header says a driver "should
+ * set the device's kMIDIPropertyOffline to 1 so that if the device reappears
+ * later, none of its properties are lost", instead of adding and removing
+ * devices from the setup. It also means a DAW's binding to a Launchpad
+ * survives the headset putting it away and fetching it back.
  */
-const CFStringRef kPortNames[] = {
-    CFSTR("LPProMK3 MIDI"),
-    CFSTR("LPProMK3 DIN"),
-    CFSTR("LPProMK3 DAW"),
-};
-const ItemCount kPortCount = sizeof(kPortNames) / sizeof(kPortNames[0]);
-
-const CFStringRef kDeviceName = CFSTR("Launchpad Pro MK3");
-const CFStringRef kManufacturer = CFSTR("Focusrite - Novation");
-const CFStringRef kModel = CFSTR("Launchpad Pro MK3");
+using vrmc_devices::kDeviceCount;
+using vrmc_devices::kDevices;
+using vrmc_devices::kMaxPortsPerDevice;
 
 /*
  * The device's endpoints, and the link to the bridge.
@@ -88,9 +86,46 @@ const CFStringRef kModel = CFSTR("Launchpad Pro MK3");
  * `MIDIReceived` is documented as callable from any thread, which is what lets
  * the link's own thread do it directly.
  */
-MIDIEndpointRef gSources[kPortCount] = {};
+MIDIEndpointRef gSources[kDeviceCount][kMaxPortsPerDevice] = {};
+MIDIDeviceRef gDevices[kDeviceCount] = {};
 vrmc::Link gLink;
-vrmc::UmpDecoder gDecoders[kPortCount];
+vrmc::UmpDecoder gDecoders[kDeviceCount][kMaxPortsPerDevice];
+
+/*
+ * Getting back to the server's main thread.
+ *
+ * CoreMIDI's rule is that MIDISend and MIDIReceived may be called from any
+ * thread and *every other* call must be on "the server's main thread, which is
+ * the thread on which the driver is created". Start() runs on that thread, so
+ * its run loop is the one to hand work back to — which is what lets the link's
+ * own thread ask for a device to be marked present without breaking the rule.
+ *
+ * A run loop *source* rather than a queued block, for two reasons. It needs no
+ * Objective-C blocks, so this file stays plain C++ and can be syntax-checked
+ * anywhere. And a source coalesces: a headset spawning and removing a device
+ * repeatedly signals the same source over and over and the main thread applies
+ * the final state once, where queued blocks would pile up one per change.
+ *
+ * The wanted state is a bitmask written by the link thread and read by the
+ * main one, which is why it is atomic. It is the whole of the shared state:
+ * there is no queue to overflow and nothing to free.
+ */
+CFRunLoopRef gMainLoop = nullptr;
+CFRunLoopSourceRef gPresenceSource = nullptr;
+std::atomic<uint32_t> gWantedPresent{0};
+
+/// Applies `gWantedPresent`, on the main thread. Signalled from the link.
+void ApplyPresence(void *) {
+  const uint32_t wanted = gWantedPresent.load(std::memory_order_acquire);
+  for (size_t d = 0; d < kDeviceCount; d++) {
+    if (gDevices[d] == 0) continue;
+    const bool present = (wanted & (1u << d)) != 0;
+    MIDIObjectSetIntegerProperty(gDevices[d], kMIDIPropertyOffline,
+                                 present ? 0 : 1);
+  }
+}
+
+void SetDevicePresent(uint8_t device, bool present);
 
 /*
  * Hand the host MIDI that arrived from the bridge.
@@ -102,10 +137,20 @@ vrmc::UmpDecoder gDecoders[kPortCount];
  * The packet list is a stack buffer: this path is per-note, and an allocation
  * per note is a garbage pile in the middle of a performance.
  */
-void OnMidiFromBridge(void *, uint8_t port, const uint8_t *data,
-                      size_t length) {
-  if (port >= kPortCount || length == 0) return;
-  const MIDIEndpointRef source = gSources[port];
+void OnFromBridge(void *, uint8_t kind, uint8_t address, const uint8_t *data,
+                  size_t length) {
+  const uint8_t device = vrmc::DeviceOf(address);
+  const uint8_t port = vrmc::PortOf(address);
+  if (device >= kDeviceCount) return;
+
+  if (kind == vrmc::kFrameDeviceState) {
+    // The bridge saying whether the headset is holding this instrument.
+    SetDevicePresent(device, length > 0 && data[0] != 0);
+    return;
+  }
+
+  if (port >= kMaxPortsPerDevice || length == 0) return;
+  const MIDIEndpointRef source = gSources[device][port];
   if (source == 0) return;
 
   // Room for the largest SysEx this accepts, plus the list's own header.
@@ -203,31 +248,6 @@ ULONG Release(void *instance) {
 // ---------------------------------------------------------------------------
 
 /*
- * Say the device is here.
- *
- * Without this it is *offline*: Audio MIDI Setup draws it greyed with
- * "Device is online" unchecked, and a host is entitled to skip an offline
- * device's endpoints entirely — which looks exactly like the driver having
- * loaded and done nothing useful. The header is explicit about whose job this
- * is: "1 = device is offline (is temporarily absent), 0 = present. Set by the
- * owning driver, on the device".
- *
- * On the device alone, because the same paragraph says the property "is
- * inherited from the device by its entities and endpoints" — setting it on
- * each of the three entities as well would be six redundant calls that could
- * disagree with each other.
- *
- * This is what a driver would toggle when its hardware is unplugged. Here the
- * device is emulated, so it is present from the moment the driver loads and
- * there is nothing that would ever make it absent — Stop() deliberately does
- * not set it back, because Stop() runs whenever MIDIServer goes idle.
- */
-void markPresent(MIDIDeviceRef device) {
-  if (device == 0) return;
-  MIDIObjectSetIntegerProperty(device, kMIDIPropertyOffline, 0);
-}
-
-/*
  * Note an entity's endpoints so MIDI can flow through them.
  *
  * Two things, and both are invisible if omitted. The source is remembered so
@@ -237,77 +257,157 @@ void markPresent(MIDIDeviceRef device) {
  * MIDI port. Those are different conversations: one is the control-surface
  * protocol, the other is notes.
  */
-void AdoptEntity(MIDIEntityRef entity, uint8_t port) {
-  if (entity == 0 || port >= kPortCount) return;
-  gSources[port] = MIDIEntityGetSource(entity, 0);
+void AdoptEntity(MIDIEntityRef entity, uint8_t device, uint8_t port) {
+  if (entity == 0 || device >= kDeviceCount || port >= kMaxPortsPerDevice) return;
+  gSources[device][port] = MIDIEntityGetSource(entity, 0);
   const MIDIEndpointRef destination = MIDIEntityGetDestination(entity, 0);
   if (destination != 0) {
-    MIDIEndpointSetRefCons(destination,
-                           reinterpret_cast<void *>(static_cast<uintptr_t>(port)),
-                           nullptr);
+    // The refCon is the packed address, because `Send` is handed only a refCon
+    // and has to know which port of which device a DAW is writing to.
+    MIDIEndpointSetRefCons(
+        destination,
+        reinterpret_cast<void *>(
+            static_cast<uintptr_t>(vrmc::EncodeAddress(device, port))),
+        nullptr);
   }
 }
 
 /*
- * Build the device, if the server is not already holding one for us.
+ * Mark one device present or absent, on the server's main thread.
+ *
+ * Called from the link's thread, so the property write is handed to the run
+ * loop captured in Start() rather than made here — `MIDIObjectSetIntegerProperty`
+ * is not one of the two calls CoreMIDI permits off the main thread.
+ *
+ * The block captures by value only. It may run after the caller's frame is
+ * gone, and a dangling reference inside MIDIServer is a crash for every
+ * application on the machine.
+ */
+void SetDevicePresent(uint8_t device, bool present) {
+  if (device >= kDeviceCount) return;
+  const uint32_t bit = 1u << device;
+  if (present) {
+    gWantedPresent.fetch_or(bit, std::memory_order_acq_rel);
+  } else {
+    gWantedPresent.fetch_and(~bit, std::memory_order_acq_rel);
+  }
+  if (gPresenceSource == nullptr || gMainLoop == nullptr) return;
+  CFRunLoopSourceSignal(gPresenceSource);
+  // Without the wake the source waits for the run loop to be poked by
+  // something else, which on an idle MIDIServer can be a long time — the
+  // device would appear seconds after the headset spawned it, or not until the
+  // next application touched MIDI.
+  CFRunLoopWakeUp(gMainLoop);
+}
+
+/*
+ * Which spec a persisted device is, by name.
+ *
+ * Not by position in `devList`. The setup's order is not something this process
+ * chose or can rely on, and a mismatch would put one Launchpad's ports under
+ * another's name — which no error reports and which looks, from a DAW, like a
+ * device that simply behaves wrongly.
+ */
+int IndexOfPersistedDevice(MIDIDeviceRef device) {
+  CFStringRef name = nullptr;
+  if (MIDIObjectGetStringProperty(device, kMIDIPropertyName, &name) != noErr ||
+      name == nullptr) {
+    return -1;
+  }
+  int found = -1;
+  for (size_t d = 0; d < kDeviceCount; d++) {
+    if (CFStringCompare(name, kDevices[d].name, 0) == kCFCompareEqualTo) {
+      found = static_cast<int>(d);
+      break;
+    }
+  }
+  CFRelease(name);
+  return found;
+}
+
+/*
+ * Build every device the driver publishes, or adopt the ones already there.
  *
  * MIDIServer persists a driver's devices in the MIDI setup across restarts and
  * hands them back in `devList`, so creating unconditionally would add a second
- * Launchpad on every launch. Finding one there means it is already built and
- * already in the setup — but not that there is nothing to do: it still has to
- * be marked present, or it comes back from the persisted setup offline.
+ * Launchpad on every launch. A persisted device is matched to its spec by
+ * *name*, because the setup preserves order no better than it preserves
+ * anything else this process assumed — and getting it wrong would put a
+ * Launchpad X's ports on a Pro MK3's device index, which is silent.
+ *
+ * Every device starts absent. The bridge says which are present as the headset
+ * spawns and puts them away; until then a DAW sees them greyed out rather than
+ * offering instruments nobody is holding.
  */
 OSStatus Start(MIDIDriverRef driver, MIDIDeviceListRef devList) {
-  const ItemCount existing = MIDIDeviceListGetNumberOfDevices(devList);
-  if (existing > 0) {
-    // Already built, on a previous run, and handed back from the persisted
-    // setup. Nothing to create — but it still has to be marked present, see
-    // `markPresent`.
-    for (ItemCount i = 0; i < existing; i++) {
-      const MIDIDeviceRef device = MIDIDeviceListGetDevice(devList, i);
-      markPresent(device);
-      // The endpoints come back with the device, but their refCons and our
-      // note of which source is which do not — those live in this process, and
-      // this process is new. Without re-adopting them, a device restored from
-      // the persisted setup looks perfect and carries nothing.
-      const ItemCount entities = MIDIDeviceGetNumberOfEntities(device);
-      for (ItemCount e = 0; e < entities && e < kPortCount; e++) {
-        AdoptEntity(MIDIDeviceGetEntity(device, e), static_cast<uint8_t>(e));
-      }
+  // Start() runs on the server's main thread — see the note on gMainLoop — so
+  // this is the run loop the link's thread hands work back to.
+  gMainLoop = CFRunLoopGetCurrent();
+  if (gPresenceSource == nullptr) {
+    CFRunLoopSourceContext context = {};
+    context.perform = &ApplyPresence;
+    gPresenceSource = CFRunLoopSourceCreate(nullptr, 0, &context);
+    if (gPresenceSource != nullptr) {
+      CFRunLoopAddSource(gMainLoop, gPresenceSource, kCFRunLoopCommonModes);
     }
-    gLink.Start(&OnMidiFromBridge, &OnLinkState, nullptr);
-    return noErr;
   }
 
-  MIDIDeviceRef device = 0;
-  OSStatus err =
-      MIDIDeviceCreate(driver, kDeviceName, kManufacturer, kModel, &device);
-  if (err != noErr) return err;
+  const ItemCount existing = MIDIDeviceListGetNumberOfDevices(devList);
+  for (ItemCount i = 0; i < existing; i++) {
+    const MIDIDeviceRef device = MIDIDeviceListGetDevice(devList, i);
+    const int index = IndexOfPersistedDevice(device);
+    if (index < 0) continue;  // not one of ours, or a model we no longer ship
+    gDevices[index] = device;
+    /*
+     * The endpoints come back with the device; their refCons and our note of
+     * which source is which do not, because those live in this process and
+     * this process is new. Without re-adopting them a device restored from the
+     * setup looks perfect and carries nothing.
+     */
+    const ItemCount entities = MIDIDeviceGetNumberOfEntities(device);
+    for (ItemCount e = 0; e < entities && e < kMaxPortsPerDevice; e++) {
+      AdoptEntity(MIDIDeviceGetEntity(device, e), static_cast<uint8_t>(index),
+                  static_cast<uint8_t>(e));
+    }
+    MIDIObjectSetIntegerProperty(device, kMIDIPropertyOffline, 1);
+  }
 
-  for (ItemCount i = 0; i < kPortCount; i++) {
-    MIDIEntityRef entity = 0;
-    // `embedded` true: these ports are part of the device rather than sockets
-    // it drives, which is what makes them show under one device instead of as
-    // separate ones. One source and one destination each, as a USB MIDI cable
-    // pair.
-    err = MIDIDeviceAddEntity(device, kPortNames[i], true, 1, 1, &entity);
-    if (err != noErr) {
+  for (size_t d = 0; d < kDeviceCount; d++) {
+    if (gDevices[d] != 0) continue;  // adopted above
+    const auto &spec = kDevices[d];
+
+    MIDIDeviceRef device = 0;
+    OSStatus err = MIDIDeviceCreate(driver, spec.name, spec.manufacturer,
+                                    spec.name, &device);
+    if (err != noErr) continue;  // one model failing must not take the rest
+
+    bool built = true;
+    for (size_t i = 0; i < spec.portCount && i < kMaxPortsPerDevice; i++) {
+      MIDIEntityRef entity = 0;
+      // `embedded` true: these ports are part of the device rather than
+      // sockets it drives, which is what makes them show under one device
+      // instead of as separate ones. One source and one destination each, as a
+      // USB MIDI cable pair.
+      if (MIDIDeviceAddEntity(device, spec.portNames[i], true, 1, 1, &entity) !=
+          noErr) {
+        built = false;
+        break;
+      }
+      AdoptEntity(entity, static_cast<uint8_t>(d), static_cast<uint8_t>(i));
+    }
+    if (!built || MIDISetupAddDevice(device) != noErr) {
       // Never leave a half-built device in the setup. It has not been added
       // yet, so disposing it is both allowed and the whole cleanup.
       MIDIDeviceDispose(device);
-      return err;
+      continue;
     }
-    AdoptEntity(entity, static_cast<uint8_t>(i));
+
+    gDevices[d] = device;
+    // Absent until the bridge says otherwise.
+    MIDIObjectSetIntegerProperty(device, kMIDIPropertyOffline, 1);
   }
 
-  err = MIDISetupAddDevice(device);
-  if (err != noErr) {
-    MIDIDeviceDispose(device);
-    return err;
-  }
-
-  markPresent(device);
-  gLink.Start(&OnMidiFromBridge, &OnLinkState, nullptr);
+  gLink.Start(&OnFromBridge, &OnLinkState, nullptr);
   return noErr;
 }
 
@@ -359,11 +459,12 @@ OSStatus Configure(MIDIDriverRef, MIDIDeviceRef) { return noErr; }
 OSStatus Send(MIDIDriverRef, const MIDIPacketList *packets, void *destRefCon1,
               void *) {
   if (packets == nullptr) return noErr;
-  const uint8_t port = static_cast<uint8_t>(
+  // The refCon is the packed address, set when the endpoints were adopted.
+  const uint8_t address = static_cast<uint8_t>(
       reinterpret_cast<uintptr_t>(destRefCon1) & 0xff);
   const MIDIPacket *packet = &packets->packet[0];
   for (UInt32 i = 0; i < packets->numPackets; i++) {
-    gLink.SendMidi(port, packet->data, packet->length);
+    gLink.SendMidi(address, packet->data, packet->length);
     packet = MIDIPacketNext(packet);
   }
   return noErr;
@@ -371,9 +472,9 @@ OSStatus Send(MIDIDriverRef, const MIDIPacketList *packets, void *destRefCon1,
 
 /* Each MIDI 1.0 message the decoder completes, on its way to the bridge. */
 void OnDecodedMidi(void *context, const uint8_t *data, size_t length) {
-  const uint8_t port =
+  const uint8_t address =
       static_cast<uint8_t>(reinterpret_cast<uintptr_t>(context) & 0xff);
-  gLink.SendMidi(port, data, length);
+  gLink.SendMidi(address, data, length);
 }
 
 /*
@@ -388,22 +489,27 @@ void OnDecodedMidi(void *context, const uint8_t *data, size_t length) {
 OSStatus SendPackets(MIDIDriverRef, const MIDIEventList *events,
                      void *destRefCon1, void *) {
   if (events == nullptr) return noErr;
-  const uint8_t port = static_cast<uint8_t>(
+  // The refCon is the packed address, set when the endpoints were adopted.
+  const uint8_t address = static_cast<uint8_t>(
       reinterpret_cast<uintptr_t>(destRefCon1) & 0xff);
-  if (port >= kPortCount) return noErr;
+  const uint8_t device = vrmc::DeviceOf(address);
+  const uint8_t port = vrmc::PortOf(address);
+  if (device >= kDeviceCount || port >= kMaxPortsPerDevice) return noErr;
 
   /*
-   * One decoder per port, because SysEx spans packets and the two ports carry
-   * unrelated conversations — a grid update in flight on the DAW port must not
-   * be spliced with anything arriving on the MIDI port.
+   * One decoder per port of per device, because SysEx spans packets and every
+   * port carries an unrelated conversation — a grid update in flight on a Pro
+   * MK3's DAW port must not be spliced with anything arriving on a Launchpad
+   * X's.
    *
    * No locking, and there must not be any: this is MIDIServer's I/O thread,
    * shared with every other MIDI device on the machine.
    */
   const MIDIEventPacket *packet = &events->packet[0];
   for (UInt32 i = 0; i < events->numPackets; i++) {
-    gDecoders[port].Decode(packet->words, packet->wordCount, &OnDecodedMidi,
-                           reinterpret_cast<void *>(static_cast<uintptr_t>(port)));
+    gDecoders[device][port].Decode(
+        packet->words, packet->wordCount, &OnDecodedMidi,
+        reinterpret_cast<void *>(static_cast<uintptr_t>(address)));
     packet = MIDIEventPacketNext(packet);
   }
   return noErr;

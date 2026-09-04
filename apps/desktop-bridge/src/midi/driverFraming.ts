@@ -54,6 +54,33 @@ export const MAX_PAYLOAD_BYTES = 8192;
 /** Total size of the largest legal frame. */
 export const MAX_FRAME_BYTES = HEADER_BYTES + MAX_PAYLOAD_BYTES;
 
+/**
+ * How a frame names one port of one device.
+ *
+ * The driver publishes several devices — a Launchpad X and a Launchpad Pro
+ * MK3 — so a port index alone is ambiguous. Both halves are packed into the
+ * header's one address byte as `(device << 4) | port`, which fits because
+ * neither exceeds fifteen: the driver's device table is short and the widest
+ * Launchpad has three ports.
+ *
+ * Packed rather than given a byte each so the header stays four bytes. It is
+ * on the per-note path, and a header is a cost paid per message.
+ */
+export const MAX_DEVICES = 16;
+export const MAX_PORTS_PER_DEVICE = 16;
+
+export function encodeAddress(device: number, port: number): number {
+  return ((device & 0x0f) << 4) | (port & 0x0f);
+}
+
+export function deviceOf(address: number): number {
+  return (address >>> 4) & 0x0f;
+}
+
+export function portOf(address: number): number {
+  return address & 0x0f;
+}
+
 export const FrameKind = {
   /**
    * The first frame either side sends. Payload is one byte: the protocol
@@ -71,15 +98,36 @@ export const FrameKind = {
    */
   PING: 2,
   PONG: 3,
+  /**
+   * Whether a device should appear present to a DAW.
+   *
+   * Payload is one byte: non-zero for present. The address byte names the
+   * device; its port half is unused.
+   *
+   * The driver publishes every model it supports once, at load, and then marks
+   * them absent. This is what turns one on. That is CoreMIDI's own prescription
+   * — the header says drivers "should set the device's kMIDIPropertyOffline to
+   * 1 so that if the device reappears later, none of its properties are lost",
+   * rather than adding and removing devices from the setup — and it means a
+   * DAW's binding to a Launchpad survives the headset putting it away and
+   * fetching it back.
+   */
+  DEVICE_STATE: 4,
 } as const;
 
 export type FrameKindValue = (typeof FrameKind)[keyof typeof FrameKind];
 
-/** The version in the HELLO payload. Bump when the meaning of a frame changes. */
-export const PROTOCOL_VERSION = 1;
+/**
+ * The version in the HELLO payload. Bump when the meaning of a frame changes.
+ *
+ * 2 packs a device index into the address byte, where 1 carried a bare port
+ * index and could describe only one device.
+ */
+export const PROTOCOL_VERSION = 2;
 
 export interface Frame {
   kind: number;
+  /** `(device << 4) | port` — see `encodeAddress`. */
   port: number;
   payload: Uint8Array;
 }

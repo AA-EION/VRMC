@@ -188,8 +188,13 @@ export class DriverLink {
    * @returns false when nothing is connected, which is the ordinary state when
    *   the driver is not installed — callers fall back to virtual ports.
    */
-  sendMidi(port: number, data: Uint8Array): boolean {
-    return this.send(FrameKind.MIDI, port, data);
+  sendMidi(address: number, data: Uint8Array): boolean {
+    return this.send(FrameKind.MIDI, address, data);
+  }
+
+  /** Send any frame. For device presence, which is not MIDI. */
+  sendFrame(kind: number, address: number, payload: Uint8Array): boolean {
+    return this.send(kind, address, payload);
   }
 
   private send(kind: number, port: number, payload: Uint8Array): boolean {

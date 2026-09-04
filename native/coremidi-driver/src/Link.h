@@ -44,7 +44,7 @@
 namespace vrmc {
 
 /// Called on the link's own thread when MIDI arrives from the bridge.
-using LinkMidiHandler = void (*)(void *context, uint8_t port,
+using LinkMidiHandler = void (*)(void *context, uint8_t kind, uint8_t address,
                                  const uint8_t *data, size_t length);
 /// Called on the link's own thread when the link comes up or goes down.
 using LinkStateHandler = void (*)(void *context, bool connected);
@@ -170,7 +170,12 @@ class Link {
     auto *self = static_cast<Link *>(context);
     switch (kind) {
       case kFrameMidi:
-        if (self->onMidi_) self->onMidi_(self->context_, port, payload, length);
+      case kFrameDeviceState:
+        // Both are addressed to a device, and both are the driver's to act on;
+        // the handler tells them apart by `kind`.
+        if (self->onMidi_) {
+          self->onMidi_(self->context_, kind, port, payload, length);
+        }
         break;
       case kFramePing: {
         const int fd = self->fd_.load(std::memory_order_acquire);

@@ -132,12 +132,38 @@ sudo killall MIDIServer 2>/dev/null || true
 then remove the leftover device in *Audio MIDI Setup* → *MIDI Studio* → select
 it → **Remove**. That button makes the same `MIDISetupRemoveDevice` call.
 
-## What it deliberately does not do
+## What it carries, and how
 
-`Send()` discards MIDI and nothing connects this to the bridge. Wiring the two
-together is the next step and only worth taking if the above works. Note also
-that this runs **inside MIDIServer** — a crash here takes MIDI down for every
-application on the machine, which is why the spike does as little as it can.
+Every model the bridge can emulate — a Launchpad X and a Launchpad Pro MK3 —
+each as its own device with its own ports. The device table in `src/Devices.h`
+is **generated** from the bridge's own device specs, so the driver's devices and
+the bridge's are the same list rather than two that must be kept in step.
+
+MIDI crosses a Unix socket in the user's Application Support directory. Each
+frame carries a one-byte address, `(device << 4) | port`, so a note can name
+which port of which instrument it belongs to.
+
+Every device is created at load and marked **absent**. The bridge says which are
+present as the headset spawns instruments and puts them away. That is CoreMIDI's
+own prescription rather than a convenience — the header says a driver "should
+set the device's kMIDIPropertyOffline to 1 so that if the device reappears
+later, none of its properties are lost", instead of adding and removing devices
+— and it means a DAW's binding survives an instrument being put away and
+fetched back. It is also what stops a Mac with the driver installed from listing
+every Launchpad VRMC can emulate, all the time, whether or not anybody is
+holding one.
+
+Marking a device present is a CoreMIDI call, and CoreMIDI permits only
+`MIDISend` and `MIDIReceived` off the server's main thread. The request arrives
+on the link's own thread, so it is handed back to the run loop captured in
+`Start()` — which runs on the main thread by definition — through a run loop
+*source*. A source rather than a queued block because it coalesces: a headset
+spawning and removing an instrument repeatedly signals the same source, and the
+main thread applies the final state once.
+
+This runs **inside MIDIServer**, so a crash here takes MIDI down for every
+application on the machine. That is why `Send()` does one non-blocking write and
+nothing else, and why nothing on that path allocates.
 
 ## One thing a driver will not fix
 
