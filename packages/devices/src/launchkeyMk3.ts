@@ -13,6 +13,20 @@ import {
   type DeviceSpec,
 } from './types.js';
 
+/*
+ * Control ids, disjoint by construction.
+ *
+ * A Launchpad's controls all live in one XY namespace, so its id and its MIDI
+ * byte are the same number. This device has both notes and CCs, and they
+ * overlap: key 41 and fader 6 both send 41, and seventeen such pairs exist. An
+ * id space with gaps between the regions costs nothing — the lookup is an array
+ * indexed by id — and makes a collision impossible rather than unlikely.
+ */
+const KEY_ID = 0;
+const PAD_ID = 100;
+const KNOB_ID = 200;
+const FADER_ID = 300;
+
 /**
  * The 16 pads, two rows of eight.
  *
@@ -25,8 +39,12 @@ function padControls(): Control[] {
   const out: Control[] = [];
   for (let row = 1; row <= 2; row++) {
     for (let col = 1; col <= 8; col++) {
+      const n = (row - 1) * 8 + (col - 1);
       out.push({
-        index: row * 10 + col,
+        index: PAD_ID + n,
+        // Notes 96..111, which is what the hardware sends and what Live's
+        // script reads positionally.
+        data1: 96 + n,
         kind: ControlKind.NOTE,
         role: ButtonRole.GRID,
         col: col - 1,
@@ -47,7 +65,8 @@ function padControls(): Control[] {
  */
 function knobControls(): Control[] {
   return Array.from({ length: 8 }, (_, i) => ({
-    index: 21 + i,
+    index: KNOB_ID + i,
+    data1: 21 + i,
     kind: ControlKind.CC,
     role: ButtonRole.KNOB,
     col: i,
@@ -66,7 +85,8 @@ function knobControls(): Control[] {
  */
 function faderControls(): Control[] {
   return Array.from({ length: 9 }, (_, i) => ({
-    index: 41 + i,
+    index: FADER_ID + i,
+    data1: 41 + i,
     kind: ControlKind.CC,
     role: ButtonRole.FADER,
     col: i,
@@ -78,7 +98,9 @@ function faderControls(): Control[] {
 /** The 49 keys, C2 to C6, as MIDI notes 36..84. */
 function keyControls(): Control[] {
   return Array.from({ length: 49 }, (_, i) => ({
-    index: 36 + i,
+    index: KEY_ID + i,
+    // C2 to C6.
+    data1: 36 + i,
     kind: ControlKind.NOTE,
     role: ButtonRole.KEY,
     col: i,

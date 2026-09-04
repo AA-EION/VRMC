@@ -1,5 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
+import type { TriggerZone, ZoneLocator } from '@vrmc/layout';
+import { ButtonRole, type DeviceSpec } from './types.js';
 import {
   ControlStripLayout,
   CompositeLayout,
@@ -61,7 +63,7 @@ const LAUNCHKEY_PADS = {
  * not a cosmetic matter in XR — somebody reaching for a fader by memory finds
  * whatever is actually there.
  */
-export function buildLaunchkeyLayout(): CompositeLayout {
+export function buildLaunchkeyLayout(spec: DeviceSpec): CompositeLayout {
   const keys = new KeyboardLayout(LAUNCHKEY_49);
   const pads = new PadGridLayout(LAUNCHKEY_PADS);
   const knobs = new ControlStripLayout(KNOB_ROW_8);
@@ -84,10 +86,113 @@ export function buildLaunchkeyLayout(): CompositeLayout {
     { id: LaunchkeyPart.KNOBS, locator: knobs, x: 0, y: controlsY + faders.height + 0.012 },
     { id: LaunchkeyPart.FADERS, locator: faders, x: 0, y: controlsY },
   ];
-  return new CompositeLayout(parts);
+  /*
+   * The zones carry control *ids*, not MIDI numbers.
+   *
+   * The sub-layouts number theirs with MIDI values — a keyboard's notes, a
+   * strip's CCs — because that is what they are for elsewhere. Here those are
+   * the wrong numbers: a zone's `note` is what the headset sends back as a
+   * control index, and the bridge looks it up in the spec. With MIDI values it
+   * would look up key 41 and find fader 6, or the reverse, depending on which
+   * the lookup table happened to hold. Seventeen controls on this device
+   * collide that way.
+   *
+   * Matched by position within a region, because both lists are built in the
+   * same ascending order. A length mismatch throws rather than truncating: a
+   * keyboard whose top octave silently sent nothing would be very hard to spot.
+   */
+  const idsByRole = new Map<string, number[]>();
+  for (const control of spec.controls) {
+    const list = idsByRole.get(control.role) ?? [];
+    list.push(control.index);
+    idsByRole.set(control.role, list);
+  }
+  const roleOfPart: Readonly<Record<string, string>> = {
+    [LaunchkeyPart.KEYS]: ButtonRole.KEY,
+    [LaunchkeyPart.PADS]: ButtonRole.GRID,
+    [LaunchkeyPart.KNOBS]: ButtonRole.KNOB,
+    [LaunchkeyPart.FADERS]: ButtonRole.FADER,
+  };
+
+  return new CompositeLayout(parts, (_zone, origin) => {
+    const ids = idsByRole.get(roleOfPart[origin.part] ?? '') ?? [];
+    const id = ids[origin.localIndex];
+    if (id === undefined) {
+      throw new Error(
+        `the ${origin.part} layout has ${origin.localIndex + 1} zones but the ` +
+          `spec declares ${ids.length} controls for it`,
+      );
+    }
+    return id;
+  });
 }
 
 /** True for the regions that are pinched and dragged rather than poked. */
 export function isContinuousPart(part: string): boolean {
   return part === LaunchkeyPart.KNOBS || part === LaunchkeyPart.FADERS;
+}
+
+/**
+ * The Launchkey's surface, wearing the interface the renderer already speaks.
+ *
+ * `LaunchpadLayout` offers three things beyond a bare `ZoneLocator` — the spec
+ * it was built from, a device-index-to-zone lookup for LED addressing, and the
+ * logo's position — and the renderer uses all three. Providing them here means
+ * one renderer draws both devices rather than two that drift apart.
+ */
+export class LaunchkeySurface implements ZoneLocator {
+  readonly zones: readonly TriggerZone[];
+  readonly width: number;
+  readonly height: number;
+  readonly spec: DeviceSpec;
+  readonly composite: CompositeLayout;
+
+  /**
+   * Device index -> zone, for the pads only.
+   *
+   * WHY ONLY THE PADS
+   * Because the numbers collide otherwise, and silently. A zone carries the
+   * number it sends in `note`: a key sends note 41, and fader 6 sends CC 41.
+   * One map over every part would have the second overwrite the first, and an
+   * LED meant for a pad could light a key.
+   *
+   * Only the pads are addressable — they are the only lit controls on this
+   * device — so the map covers them and everything else answers -1. That is
+   * the honest answer rather than a lucky one: there is no zone for "CC 41 as
+   * opposed to note 41" to return.
+   */
+  private readonly padZoneByNote: ReadonlyMap<number, number>;
+
+  constructor(spec: DeviceSpec) {
+    this.spec = spec;
+    this.composite = buildLaunchkeyLayout(spec);
+    this.zones = this.composite.zones;
+    this.width = this.composite.width;
+    this.height = this.composite.height;
+
+    const pads = new Map<number, number>();
+    for (const zone of this.composite.zonesOf(LaunchkeyPart.PADS)) {
+      pads.set(zone.note, zone.index);
+    }
+    this.padZoneByNote = pads;
+  }
+
+  locate(x: number, y: number): number {
+    return this.composite.locate(x, y);
+  }
+
+  /** The zone an LED message addresses, or -1. See `padZoneByNote`. */
+  zoneForIndex(deviceIndex: number): number {
+    return this.padZoneByNote.get(deviceIndex) ?? -1;
+  }
+
+  /** Which region a zone belongs to, so callers can route it. */
+  partOf(zoneIndex: number): string {
+    return this.composite.originOf(zoneIndex)?.part ?? '';
+  }
+
+  /** No illuminated logo on this one. */
+  logoPosition(): { x: number; y: number } | null {
+    return null;
+  }
 }

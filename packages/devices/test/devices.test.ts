@@ -703,7 +703,9 @@ describe('Launchkey MK3 49', () => {
     const faders = spec.controls.filter((c) => c.role === ButtonRole.FADER);
     expect(faders).toHaveLength(9);
     expect(faders.at(-1)?.label).toBe('MASTER');
-    expect(faders.map((f) => f.index)).toEqual([41, 42, 43, 44, 45, 46, 47, 48, 49]);
+    // The MIDI bytes, which is what a DAW sees. The ids are separate — see the
+    // collision test below.
+    expect(faders.map((f) => f.data1)).toEqual([41, 42, 43, 44, 45, 46, 47, 48, 49]);
   });
 
   it('has eight knobs, and they are continuous rather than pressed', () => {
@@ -717,8 +719,28 @@ describe('Launchkey MK3 49', () => {
   it('has 49 keys, spanning C2 to C6', () => {
     const keys = spec.controls.filter((c) => c.role === ButtonRole.KEY);
     expect(keys).toHaveLength(49);
-    expect(keys[0]!.index).toBe(36);
-    expect(keys.at(-1)!.index).toBe(84);
+    expect(keys[0]!.data1).toBe(36);
+    expect(keys.at(-1)!.data1).toBe(84);
+  });
+
+  it('gives every control a unique id, though their MIDI bytes overlap', () => {
+    /*
+     * The bug this device found. A Launchpad's controls live in one XY
+     * namespace, so its id and its MIDI byte are the same number and nothing
+     * had to say otherwise. Here they cannot be: key 41 sends note 41 and the
+     * sixth fader sends CC 41, and seventeen such pairs existed — so the
+     * emulator's id lookup returned whichever was built first, and pressing a
+     * pad could emit a knob's CC.
+     *
+     * Ids are now disjoint by region and `data1` carries the wire value.
+     */
+    const ids = spec.controls.map((c) => c.index);
+    expect(new Set(ids).size, 'control ids collide').toBe(ids.length);
+
+    // And the overlap that caused it is still there in the MIDI bytes, which
+    // is correct — it is the hardware's numbering, not ours to change.
+    const midi = spec.controls.map((c) => c.data1 ?? c.index);
+    expect(new Set(midi).size).toBeLessThan(midi.length);
   });
 
   it('has sixteen pads in two rows, not sixty-four in eight', () => {

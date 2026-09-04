@@ -451,11 +451,25 @@ export function App(): React.ReactElement {
         live: () => focus,
         run: () => handleFocus(!focus),
       },
+      /*
+       * One row per instrument rather than a single "+ DEVICE" that cycles.
+       *
+       * The menu is read at arm's length, mid-session, by someone who already
+       * knows which instrument they want — so naming them costs two rows and
+       * saves guessing what the next press will produce.
+       */
       {
-        id: 'add',
+        id: 'add-launchpad',
         label: () => '+ LAUNCHPAD',
         run: () => {
           engine.addDevice(DeviceModel.LAUNCHPAD_X);
+        },
+      },
+      {
+        id: 'add-launchkey',
+        label: () => '+ KEYBOARD',
+        run: () => {
+          engine.addDevice(DeviceModel.LAUNCHKEY_MK3_49);
         },
       },
       {

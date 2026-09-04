@@ -1,6 +1,20 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-import { LaunchpadLayout, specFor, type DeviceSpec } from '@vrmc/devices';
+import {
+  DeviceModel,
+  LaunchkeySurface,
+  LaunchpadLayout,
+  specFor,
+  type DeviceSpec,
+} from '@vrmc/devices';
+
+/**
+ * What the renderer needs of a surface, beyond locating a zone.
+ *
+ * The two implementations answer these identically and nothing else has to
+ * know which it is holding.
+ */
+export type DeviceSurface = LaunchpadLayout | LaunchkeySurface;
 import { PokeDetector, type NoteSink } from '@vrmc/interaction';
 import {
   DeviceStatus,
@@ -33,7 +47,16 @@ import { LedState } from './LedState.js';
 export class LaunchpadInstance implements NoteSink {
   readonly deviceId: number;
   readonly spec: DeviceSpec;
-  readonly layout: LaunchpadLayout;
+  /**
+   * The surface, which is not always a Launchpad's.
+   *
+   * A `LaunchpadLayout` for the grids, a `LaunchkeySurface` for the keyboard —
+   * both answer the same three questions beyond a bare locator (the spec, the
+   * LED index lookup, the logo), so one renderer draws either. Typed as the
+   * union rather than as a bare `ZoneLocator` because the renderer needs those
+   * three, and widening it here would only move the problem.
+   */
+  readonly layout: DeviceSurface;
   readonly leds: LedState;
   readonly detector: PokeDetector;
   /**
@@ -97,7 +120,7 @@ export class LaunchpadInstance implements NoteSink {
     this.spec = spec;
     this.link = link;
     this.pose = pose;
-    this.layout = new LaunchpadLayout(spec);
+    this.layout = buildSurface(spec);
     this.leds = new LedState(this.layout.zones.length);
 
     this.detector = new PokeDetector(this.layout, {
@@ -231,6 +254,20 @@ export class LaunchpadInstance implements NoteSink {
     this.detector.releaseAll(this);
     this.leds.clear();
   }
+}
+
+/**
+ * The surface a spec describes.
+ *
+ * A Launchpad is one uniform grid, so its controls' rows and columns are
+ * enough. A Launchkey is four regions at different scales and cannot be
+ * described that way at all — 49 keys and 8 pads on one pitch would put them
+ * in the same row, at the same size.
+ */
+function buildSurface(spec: DeviceSpec): DeviceSurface {
+  return spec.model === DeviceModel.LAUNCHKEY_MK3_49
+    ? new LaunchkeySurface(spec)
+    : new LaunchpadLayout(spec);
 }
 
 /** Build an instance for a model, or null if the model is not emulated. */

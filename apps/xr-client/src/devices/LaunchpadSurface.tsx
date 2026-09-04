@@ -17,6 +17,7 @@ import type { LaunchpadLayout } from '@vrmc/devices';
 import type { LedState } from './LedState.js';
 import type { LaunchpadInstance } from './LaunchpadInstance.js';
 import { buildTextTexture } from './labels.js';
+import type { DeviceSurface } from './LaunchpadInstance.js';
 
 /**
  * Build a rounded-square pad, extruded to a shallow depth.
@@ -56,7 +57,15 @@ const LABEL_HEIGHT = 0.022;
 const LABEL_LIFT = 0.028;
 
 export interface LaunchpadSurfaceProps {
-  layout: LaunchpadLayout;
+  /**
+   * Either device's surface.
+   *
+   * Deliberately not `LaunchpadLayout`: this component draws zones from their
+   * rectangles and reads only the spec, the LED lookup and the logo, all of
+   * which a Launchkey's surface answers too. Narrowing it here would mean a
+   * second renderer for a device that needs none.
+   */
+  layout: DeviceSurface;
   leds: LedState;
   /**
    * The device itself, so the mesh can follow a pose that moves.

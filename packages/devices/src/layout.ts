@@ -134,10 +134,27 @@ export function logoControl(): Control {
  * integer.
  */
 export function controlLookup(controls: readonly Control[]): Int16Array {
-  const table = new Int16Array(110).fill(-1);
+  /*
+   * Sized to the ids actually present, not to a fixed 110.
+   *
+   * 110 was one past a Launchpad's highest XY index — 99 for the logo, with
+   * room — and it silently discarded anything above. That was invisible while
+   * every device numbered its controls in one XY namespace, and became a
+   * Launchkey whose knobs, faders and half its pads did nothing at all: their
+   * ids start at 100, the table stopped at 109, and `controlAt` returned null
+   * for a control that was right there in the spec.
+   *
+   * A device is free to number its controls however it likes, so the table
+   * follows the spec rather than the spec being expected to fit the table.
+   */
+  let highest = -1;
+  for (const control of controls) {
+    if (control.index > highest) highest = control.index;
+  }
+  const table = new Int16Array(highest + 1).fill(-1);
   for (let i = 0; i < controls.length; i++) {
     const index = controls[i]!.index;
-    if (index >= 0 && index < table.length) table[index] = i;
+    if (index >= 0) table[index] = i;
   }
   return table;
 }

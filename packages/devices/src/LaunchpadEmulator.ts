@@ -289,7 +289,9 @@ export class LaunchpadEmulator {
     const v = velocity < 1 ? 1 : velocity > 127 ? 127 : velocity;
     this.emit(
       control.kind === ControlKind.CC ? 0xb0 : 0x90,
-      ledIndex,
+      // The byte the hardware sends, which is the id only when the device has
+      // one namespace for everything — see `Control.data1`.
+      control.data1 ?? ledIndex,
       control.kind === ControlKind.CC ? 127 : v,
     );
   }
@@ -301,7 +303,11 @@ export class LaunchpadEmulator {
     this.pressed[ledIndex] = 0;
     // The hardware sends Note On with velocity 0 for pad releases, not Note
     // Off. Some host scripts match on that exact shape.
-    this.emit(control.kind === ControlKind.CC ? 0xb0 : 0x90, ledIndex, 0);
+    this.emit(
+      control.kind === ControlKind.CC ? 0xb0 : 0x90,
+      control.data1 ?? ledIndex,
+      0,
+    );
   }
 
   /** Polyphonic aftertouch from sustained finger pressure, 0..127. */

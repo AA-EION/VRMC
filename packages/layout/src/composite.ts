@@ -54,7 +54,21 @@ export class CompositeLayout implements ZoneLocator {
   /** Part index -> the composite index its zone 0 became. */
   private readonly base: readonly number[];
 
-  constructor(parts: readonly SurfacePart[]) {
+  /**
+   * @param renumber optional: given a zone and where it came from, the number
+   *   it should carry in `note`.
+   *
+   *   The sub-layouts number their zones with MIDI values, because that is what
+   *   they are for elsewhere. A composite device may need something else — a
+   *   Launchkey's zones carry control *ids*, since its notes and CCs overlap
+   *   and the id is what the headset sends back. Applying it here rather than
+   *   afterwards means there is one array of zones and no second class that
+   *   has to keep agreeing with this one.
+   */
+  constructor(
+    parts: readonly SurfacePart[],
+    renumber?: (zone: TriggerZone, origin: ZoneOrigin) => number,
+  ) {
     this.parts = parts;
 
     const zones: TriggerZone[] = [];
@@ -66,13 +80,15 @@ export class CompositeLayout implements ZoneLocator {
     for (const [partIndex, part] of parts.entries()) {
       base.push(zones.length);
       for (const zone of part.locator.zones) {
-        origins.push({
+        const origin: ZoneOrigin = {
           part: part.id,
           partIndex,
           localIndex: zone.index,
-        });
+        };
+        origins.push(origin);
         zones.push({
           ...zone,
+          note: renumber === undefined ? zone.note : renumber(zone, origin),
           // Renumbered so `zones[i].index === i` holds for the composite, which
           // everything downstream relies on when it indexes the array directly.
           index: zones.length,

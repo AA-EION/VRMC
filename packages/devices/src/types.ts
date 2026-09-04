@@ -68,8 +68,24 @@ export type ControlKind = (typeof ControlKind)[keyof typeof ControlKind];
  * scheme worth keeping rather than translating to a dense array.
  */
 export interface Control {
-  /** Device LED/button number. */
+  /**
+   * The control's id on this device: what an LED addresses and what the
+   * headset sends back when it is touched.
+   *
+   * On a Launchpad this is also the MIDI data byte, because its controls live
+   * in one XY namespace and the hardware sends that number directly. On a
+   * device with both notes and CCs it cannot be: a Launchkey's key 41 and its
+   * sixth fader both send 41, one as a note and one as a CC, and seventeen
+   * such pairs collide. Ids are unique; `data1` is what goes on the wire.
+   */
   index: number;
+  /**
+   * The MIDI data byte this control sends, when that differs from its id.
+   *
+   * Absent means they are the same, which is every Launchpad control and is
+   * why nothing had to say so until a keyboard arrived.
+   */
+  data1?: number;
   kind: ControlKind;
   role: ButtonRole;
   /** Column 0..8 from the left, for layout. */
