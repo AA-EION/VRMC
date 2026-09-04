@@ -13,19 +13,21 @@
 //
 // A driver is the thing that has a MIDIDriverRef. This is that driver.
 //
-// WHAT IT IS NOT, YET
-// This is a spike, and it answers exactly one question: will MIDIServer on
-// macOS 26 load a third-party MIDI driver plugin that carries only an ad-hoc
-// signature? That question decides the whole approach, because the modern
-// replacement — a MIDIDriverKit .dext — needs the restricted entitlement
-// com.apple.developer.driverkit.family.midi, which Apple grants per developer
-// account and which cannot be ad-hoc signed at all. If MIDIServer loads this,
-// the device can present as hardware with no Apple Developer account and no
-// change to how the app is distributed. If it refuses, no free path exists and
-// we have spent days rather than weeks finding out.
+// WHY THIS KIND OF DRIVER
+// The modern replacement — a MIDIDriverKit .dext — needs the restricted
+// entitlement com.apple.developer.driverkit.family.midi, which Apple grants per
+// developer account and which cannot be ad-hoc signed at all. This older
+// CFPlugIn interface needs no entitlement, and has been confirmed loading on
+// macOS 26 carrying nothing but an ad-hoc signature. That is what lets the
+// device present as hardware with no Apple Developer account and no change to
+// how the app is distributed.
 //
-// So Send() throws MIDI away and nothing connects this to the bridge. Adding
-// that is the next step, and only worth taking if this one succeeds.
+// WHERE THE MIDI GOES
+// Nowhere by itself. This half owns the device a DAW sees; the bridge owns the
+// headset, the emulator and the LED state, and the two are joined by a Unix
+// socket — see Link.h. When the bridge is not running the device is marked
+// offline, which is exactly what kMIDIPropertyOffline is for and what a DAW
+// reads to grey it out.
 //
 // LIFETIME AND THREADING
 // This code runs inside MIDIServer, not inside the bridge — a crash here takes
@@ -34,6 +36,9 @@
 // called from any thread; every other CoreMIDI call must be made on the
 // server's main thread, which is the thread the driver is created on and the
 // one all of these entry points except Send() arrive on.
+
+#include "Link.h"
+#include "Ump.h"
 
 #include <CoreMIDI/CoreMIDI.h>
 #include <CoreMIDI/MIDIDriver.h>
@@ -69,6 +74,61 @@ const ItemCount kPortCount = sizeof(kPortNames) / sizeof(kPortNames[0]);
 const CFStringRef kDeviceName = CFSTR("Launchpad Pro MK3");
 const CFStringRef kManufacturer = CFSTR("Focusrite - Novation");
 const CFStringRef kModel = CFSTR("Launchpad Pro MK3");
+
+/*
+ * The device's endpoints, and the link to the bridge.
+ *
+ * File-scope rather than per-instance because MIDIServer creates exactly one
+ * driver instance per plugin, and the alternative — threading a context
+ * pointer through a C function table and two callbacks that the server calls
+ * with no context of their own — would be more machinery than the thing it
+ * protects.
+ *
+ * `gSources[i]` is where MIDI *from* the headset is injected for port i;
+ * `MIDIReceived` is documented as callable from any thread, which is what lets
+ * the link's own thread do it directly.
+ */
+MIDIEndpointRef gSources[kPortCount] = {};
+vrmc::Link gLink;
+vrmc::UmpDecoder gDecoders[kPortCount];
+
+/*
+ * Hand the host MIDI that arrived from the bridge.
+ *
+ * Runs on the link's thread. `MIDIReceived` is one of the two CoreMIDI calls
+ * the header permits from any thread — everything else in this file has to be
+ * on the server's main thread, which is why nothing else happens here.
+ *
+ * The packet list is a stack buffer: this path is per-note, and an allocation
+ * per note is a garbage pile in the middle of a performance.
+ */
+void OnMidiFromBridge(void *, uint8_t port, const uint8_t *data,
+                      size_t length) {
+  if (port >= kPortCount || length == 0) return;
+  const MIDIEndpointRef source = gSources[port];
+  if (source == 0) return;
+
+  // Room for the largest SysEx this accepts, plus the list's own header.
+  uint8_t storage[vrmc::kMaxSysExBytes + 128];
+  MIDIPacketList *list = reinterpret_cast<MIDIPacketList *>(storage);
+  MIDIPacket *packet = MIDIPacketListInit(list);
+  packet = MIDIPacketListAdd(list, sizeof(storage), packet, 0, length, data);
+  if (packet == nullptr) return;  // did not fit; dropping beats corrupting
+  MIDIReceived(source, list);
+}
+
+/*
+ * The link came up or went away.
+ *
+ * Deliberately does *not* touch kMIDIPropertyOffline. Two reasons, and the
+ * first is a rule: every CoreMIDI call other than MIDISend and MIDIReceived
+ * must be made on the server's main thread, and this runs on the link's. The
+ * second is that it would be wrong anyway — the device is the driver's own
+ * emulation and is present whenever the driver is loaded. A bridge that is not
+ * running is a Launchpad with nothing plugged into its DIN sockets, not a
+ * Launchpad that has been unplugged.
+ */
+void OnLinkState(void *, bool) {}
 
 /*
  * A CFPlugIn instance.
@@ -168,6 +228,27 @@ void markPresent(MIDIDeviceRef device) {
 }
 
 /*
+ * Note an entity's endpoints so MIDI can flow through them.
+ *
+ * Two things, and both are invisible if omitted. The source is remembered so
+ * `MIDIReceived` has somewhere to put MIDI from the headset. The destination is
+ * stamped with its port index as a refCon, which is how `Send` — handed only a
+ * refCon by the server — knows whether a DAW is writing to the DAW port or the
+ * MIDI port. Those are different conversations: one is the control-surface
+ * protocol, the other is notes.
+ */
+void AdoptEntity(MIDIEntityRef entity, uint8_t port) {
+  if (entity == 0 || port >= kPortCount) return;
+  gSources[port] = MIDIEntityGetSource(entity, 0);
+  const MIDIEndpointRef destination = MIDIEntityGetDestination(entity, 0);
+  if (destination != 0) {
+    MIDIEndpointSetRefCons(destination,
+                           reinterpret_cast<void *>(static_cast<uintptr_t>(port)),
+                           nullptr);
+  }
+}
+
+/*
  * Build the device, if the server is not already holding one for us.
  *
  * MIDIServer persists a driver's devices in the MIDI setup across restarts and
@@ -183,8 +264,18 @@ OSStatus Start(MIDIDriverRef driver, MIDIDeviceListRef devList) {
     // setup. Nothing to create — but it still has to be marked present, see
     // `markPresent`.
     for (ItemCount i = 0; i < existing; i++) {
-      markPresent(MIDIDeviceListGetDevice(devList, i));
+      const MIDIDeviceRef device = MIDIDeviceListGetDevice(devList, i);
+      markPresent(device);
+      // The endpoints come back with the device, but their refCons and our
+      // note of which source is which do not — those live in this process, and
+      // this process is new. Without re-adopting them, a device restored from
+      // the persisted setup looks perfect and carries nothing.
+      const ItemCount entities = MIDIDeviceGetNumberOfEntities(device);
+      for (ItemCount e = 0; e < entities && e < kPortCount; e++) {
+        AdoptEntity(MIDIDeviceGetEntity(device, e), static_cast<uint8_t>(e));
+      }
     }
+    gLink.Start(&OnMidiFromBridge, &OnLinkState, nullptr);
     return noErr;
   }
 
@@ -206,6 +297,7 @@ OSStatus Start(MIDIDriverRef driver, MIDIDeviceListRef devList) {
       MIDIDeviceDispose(device);
       return err;
     }
+    AdoptEntity(entity, static_cast<uint8_t>(i));
   }
 
   err = MIDISetupAddDevice(device);
@@ -215,6 +307,7 @@ OSStatus Start(MIDIDriverRef driver, MIDIDeviceListRef devList) {
   }
 
   markPresent(device);
+  gLink.Start(&OnMidiFromBridge, &OnLinkState, nullptr);
   return noErr;
 }
 
@@ -233,24 +326,86 @@ OSStatus FindDevices(MIDIDriverRef, MIDIDeviceListRef) { return noErr; }
  * the Launchpad disappear and reappear underneath whatever had it open, and
  * a DAW that sees a control surface vanish unbinds its script.
  */
-OSStatus Stop(MIDIDriverRef) { return noErr; }
+OSStatus Stop(MIDIDriverRef) {
+  // The link's thread must be joined before the plugin can be unloaded — a
+  // thread still running inside code that has been dlclosed is a crash in
+  // MIDIServer, which takes MIDI down for every application on the machine.
+  gLink.Stop();
+  return noErr;
+}
 
 OSStatus Configure(MIDIDriverRef, MIDIDeviceRef) { return noErr; }
 
 /*
- * Where MIDI bound for the device arrives, on the server's I/O thread.
+ * Where MIDI bound for the device arrives, on MIDIServer's I/O thread.
  *
- * Discarded, because nothing is behind this device yet — see the note at the
- * top. Returning noErr rather than an error is deliberate: an error here is
- * reported to whichever application sent the MIDI, and the spike is not a
- * reason for a DAW to show a write failure.
+ * That thread is shared with every other MIDI device on the machine, so this
+ * does one non-blocking write and nothing else — no allocation, no lock held
+ * across a syscall, no waiting for a bridge that may not be running.
+ *
+ * `destRefCon1` is the port index, set when the endpoints were created. It is
+ * how a DAW writing to `LPProMK3 DAW` is told apart from one writing to
+ * `LPProMK3 MIDI`, which are different conversations: the first is the control
+ * surface protocol, the second is notes.
+ *
+ * A packet list can hold several packets, and each is sent as its own frame —
+ * they are separate MIDI messages that merely arrived together, and a reader
+ * on the far side has no way to split a concatenation back up.
+ *
+ * Always noErr. An error here is reported to whichever application sent the
+ * MIDI, and "the headset is not connected" is not a write failure for a DAW to
+ * show.
  */
-OSStatus Send(MIDIDriverRef, const MIDIPacketList *, void *, void *) {
+OSStatus Send(MIDIDriverRef, const MIDIPacketList *packets, void *destRefCon1,
+              void *) {
+  if (packets == nullptr) return noErr;
+  const uint8_t port = static_cast<uint8_t>(
+      reinterpret_cast<uintptr_t>(destRefCon1) & 0xff);
+  const MIDIPacket *packet = &packets->packet[0];
+  for (UInt32 i = 0; i < packets->numPackets; i++) {
+    gLink.SendMidi(port, packet->data, packet->length);
+    packet = MIDIPacketNext(packet);
+  }
   return noErr;
 }
 
-/* The version 3 form of Send, taking a MIDIEventList. Discarded likewise. */
-OSStatus SendPackets(MIDIDriverRef, const MIDIEventList *, void *, void *) {
+/* Each MIDI 1.0 message the decoder completes, on its way to the bridge. */
+void OnDecodedMidi(void *context, const uint8_t *data, size_t length) {
+  const uint8_t port =
+      static_cast<uint8_t>(reinterpret_cast<uintptr_t>(context) & 0xff);
+  gLink.SendMidi(port, data, length);
+}
+
+/*
+ * The version 3 form of Send, taking a MIDIEventList.
+ *
+ * This is the one that actually runs on macOS 12 and later, because the server
+ * asks for the version 3 interface first. A MIDIEventList carries Universal
+ * MIDI Packets — 32-bit words, not bytes — so MIDI 1.0 messages arrive wrapped
+ * in a UMP and have to be unwrapped before they mean anything to a Launchpad.
+ * `MIDIEventListForEachEvent` is not available here, so the walk is explicit.
+ */
+OSStatus SendPackets(MIDIDriverRef, const MIDIEventList *events,
+                     void *destRefCon1, void *) {
+  if (events == nullptr) return noErr;
+  const uint8_t port = static_cast<uint8_t>(
+      reinterpret_cast<uintptr_t>(destRefCon1) & 0xff);
+  if (port >= kPortCount) return noErr;
+
+  /*
+   * One decoder per port, because SysEx spans packets and the two ports carry
+   * unrelated conversations — a grid update in flight on the DAW port must not
+   * be spliced with anything arriving on the MIDI port.
+   *
+   * No locking, and there must not be any: this is MIDIServer's I/O thread,
+   * shared with every other MIDI device on the machine.
+   */
+  const MIDIEventPacket *packet = &events->packet[0];
+  for (UInt32 i = 0; i < events->numPackets; i++) {
+    gDecoders[port].Decode(packet->words, packet->wordCount, &OnDecodedMidi,
+                           reinterpret_cast<void *>(static_cast<uintptr_t>(port)));
+    packet = MIDIEventPacketNext(packet);
+  }
   return noErr;
 }
 

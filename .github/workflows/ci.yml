@@ -26,6 +26,49 @@ jobs:
       - run: pnpm --filter @vrmc/xr-client exec playwright install --with-deps chromium
       - run: pnpm test
 
+  # The driver's portable halves: the wire format and the UMP decoder.
+  #
+  # Neither touches CoreMIDI, so both compile and run on a Linux runner in
+  # about a second — and a check that only ran on the macOS runner would be a
+  # check that ran less often. The framing test is the one that matters most:
+  # it is what stops the C++ and the TypeScript implementations of the same
+  # wire format from drifting apart, by requiring the C++ to produce and parse
+  # exactly the bytes the TypeScript encoder emitted.
+  driver-logic:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The wire format agrees with the bridge's
+        run: |
+          set -euo pipefail
+          g++ -std=c++17 -O1 -Wall -Wextra -Werror \
+            -o /tmp/framing_test native/coremidi-driver/test/framing_test.cpp
+          /tmp/framing_test
+      - name: UMP decodes to the MIDI a Launchpad speaks
+        run: |
+          set -euo pipefail
+          g++ -std=c++17 -O1 -Wall -Wextra -Werror \
+            -o /tmp/ump_test native/coremidi-driver/test/ump_test.cpp
+          /tmp/ump_test
+
+      # The vectors are generated from the TypeScript encoder and committed, so
+      # that a change to the format is visible in review. If the committed copy
+      # is stale the C++ is being checked against a format the bridge no longer
+      # speaks, which is worse than not checking it at all.
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: The committed frame vectors are current
+        run: |
+          set -euo pipefail
+          pnpm --filter @vrmc/desktop-bridge exec tsc -p tsconfig.json --outDir dist
+          node apps/desktop-bridge/build/driverVectors.mjs
+          git diff --exit-code native/coremidi-driver/test/vectors.h \
+            || { echo "vectors.h is stale; run node apps/desktop-bridge/build/driverVectors.mjs"; exit 1; }
+
   # Compiles the CoreMIDI driver plugin against a real macOS SDK.
   #
   # It is one translation unit and cannot be built or run anywhere else, so

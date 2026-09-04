@@ -25,6 +25,7 @@ cp "$here/Info.plist" "$bundle/Contents/Info.plist"
 # that does not match MIDIServer's architecture is simply not loaded — with no
 # error anywhere the user will see.
 clang++ -std=c++17 -bundle -O2 \
+  -pthread \
   -arch arm64 -arch x86_64 \
   -mmacosx-version-min=11.0 \
   -fvisibility=hidden \
