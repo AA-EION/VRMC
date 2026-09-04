@@ -392,3 +392,26 @@ export async function driverScopes(): Promise<DriverScope[]> {
   }
   return found;
 }
+
+/**
+ * What the menu should offer: install, remove, or nothing.
+ *
+ * `unavailable` covers two different situations that call for the same answer —
+ * a platform with no such thing as a CoreMIDI driver, and a macOS build
+ * assembled without one. Neither is an error, and in both the honest menu is
+ * one that does not mention the driver at all rather than one offering an
+ * action that cannot happen.
+ *
+ * A system-wide install outranks a per-user one when somehow both exist,
+ * because that is the one whose removal needs a password and therefore the one
+ * worth naming.
+ */
+export async function currentDriverState(): Promise<
+  "unavailable" | "absent" | "user" | "system"
+> {
+  if (process.platform !== "darwin") return "unavailable";
+  const scopes = await driverScopes();
+  if (scopes.includes("system")) return "system";
+  if (scopes.includes("user")) return "user";
+  return (await bundledDriver()) === null ? "unavailable" : "absent";
+}

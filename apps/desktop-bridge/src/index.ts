@@ -22,6 +22,7 @@ import { PairingPublisher } from "./setup/pairing.js";
 import { copyToClipboard, openUrl } from "./tray/desktop.js";
 import {
   buildMenu,
+  type DriverState,
   buildTooltip,
   TrayAction,
   type TrayState,
@@ -35,6 +36,7 @@ import { PresenceGate } from "./core/PresenceGate.js";
 import { listPorts } from "./midi/openPort.js";
 import {
   bundledDriver,
+  currentDriverState,
   installDriver,
   uninstallDriver,
 } from "./midi/driverInstall.js";
@@ -535,6 +537,16 @@ async function main(): Promise<void> {
 
   let autostart = await autostartState();
 
+  /*
+   * Where the driver stands, refreshed rather than polled.
+   *
+   * Read once at startup and again after an install or a removal, not on the
+   * tray's two-second rebuild: it is two `stat` calls, and doing them thirty
+   * times a minute forever to catch a change only this process makes would be
+   * work for nothing.
+   */
+  let driver: DriverState = await currentDriverState();
+
   const trayState = (): TrayState => ({
     pairingCode: pairing?.displayCode ?? "",
     pairingRegistered: pairing?.isRegistered ?? false,
@@ -543,6 +555,7 @@ async function main(): Promise<void> {
     midiReady: devices.roster().some((d) => d.status === DeviceStatus.READY),
     dashboardUrl,
     autostart,
+    driver,
   });
 
   let tray: TrayController | null = null;
@@ -578,6 +591,25 @@ async function main(): Promise<void> {
         );
         refreshTray();
         return;
+      case TrayAction.INSTALL_DRIVER: {
+        const source = await bundledDriver();
+        if (source === null) {
+          log("this build has no CoreMIDI driver bundled with it");
+          return;
+        }
+        const result = await installDriver({ source, scope: "user" });
+        for (const note of result.notes) log(`driver: ${note}`);
+        driver = await currentDriverState();
+        refreshTray();
+        return;
+      }
+      case TrayAction.UNINSTALL_DRIVER: {
+        const result = await uninstallDriver();
+        for (const note of result.notes) log(`driver: ${note}`);
+        driver = await currentDriverState();
+        refreshTray();
+        return;
+      }
       case TrayAction.QUIT:
         await shutdown("menu");
         return;

@@ -23,7 +23,13 @@ const READY: TrayState = {
   midiReady: true,
   dashboardUrl: 'http://127.0.0.1:7401/',
   autostart: 'off',
+  driver: 'absent',
 };
+
+/** The ids of the rows that are actually pressable. */
+function ids(items: ReturnType<typeof buildMenu>): string[] {
+  return items.filter((i) => i.separator !== true && i.enabled !== false).map((i) => i.id);
+}
 
 function labels(state: TrayState): string[] {
   return buildMenu(state)
@@ -219,6 +225,7 @@ function onCommand(command) {
     expect(events.clicks).toEqual([
       TrayAction.COPY_CODE,
       TrayAction.DASHBOARD,
+      TrayAction.INSTALL_DRIVER,
       TrayAction.AUTOSTART,
       TrayAction.QUIT,
     ]);
@@ -302,5 +309,61 @@ describe('what gets registered to start at login', () => {
       Object.defineProperty(process, 'execPath', original);
       Object.defineProperty(process, 'platform', platform);
     }
+  });
+});
+
+
+/**
+ * The row that installs and removes the CoreMIDI driver.
+ *
+ * One row, never two: "Install" and "Uninstall" side by side would put a
+ * destructive action one slip from the one people want, and the state is known
+ * so the menu can simply say what the next step is.
+ */
+describe('the driver row', () => {
+  it('offers to install when there is a driver to install', () => {
+    const items = buildMenu({ ...READY, driver: 'absent' });
+    expect(ids(items)).toContain(TrayAction.INSTALL_DRIVER);
+    expect(ids(items)).not.toContain(TrayAction.UNINSTALL_DRIVER);
+  });
+
+  it('says what installing is for, because the words do not', () => {
+    // "Install the MIDI driver" reads as an optional extra nobody would
+    // choose. What it buys — the ports appearing as one device, the way the
+    // hardware does — is the whole reason and is not guessable.
+    expect(labels({ ...READY, driver: 'absent' }).join('\n')).toContain(
+      'one device',
+    );
+  });
+
+  it('offers to remove when one is installed', () => {
+    const items = buildMenu({ ...READY, driver: 'user' });
+    expect(ids(items)).toContain(TrayAction.UNINSTALL_DRIVER);
+    expect(ids(items)).not.toContain(TrayAction.INSTALL_DRIVER);
+  });
+
+  it('marks a system-wide removal as the one that will ask for a password', () => {
+    // The ellipsis is the platform convention for "this will ask you
+    // something", and here the something is an administrator password.
+    expect(labels({ ...READY, driver: 'system' }).join('\n')).toContain(
+      'Remove the MIDI driver (all users)…',
+    );
+  });
+
+  it('says nothing at all on a build that has no driver', () => {
+    const items = ids(buildMenu({ ...READY, driver: 'unavailable' }));
+    expect(items).not.toContain(TrayAction.INSTALL_DRIVER);
+    expect(items).not.toContain(TrayAction.UNINSTALL_DRIVER);
+  });
+
+  it('never offers removal for a state it does not recognise', () => {
+    /*
+     * The first version tested `!== 'unavailable'`, so an unset field — or a
+     * value written by a newer build — fell through to offering *removal*. An
+     * unrecognised state must not put a destructive action in front of
+     * somebody; saying nothing is the safe direction.
+     */
+    const unknown = { ...READY, driver: 'something-new' as never };
+    expect(ids(buildMenu(unknown))).not.toContain(TrayAction.UNINSTALL_DRIVER);
   });
 });
