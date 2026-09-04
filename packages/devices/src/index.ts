@@ -9,3 +9,4 @@ export * from './launchpadProMk3.js';
 export * from './LaunchpadEmulator.js';
 export * from './registry.js';
 export * from './LaunchpadLayout.js';
+export * from './LaunchkeyLayout.js';
