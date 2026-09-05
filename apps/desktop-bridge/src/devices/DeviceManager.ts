@@ -10,6 +10,7 @@ import {
 import {
   DeviceStatus,
   EventType,
+  MAX_ACTIVE_DEVICES,
   MidiStatus,
   statusForEventType,
   type DevicePlacement,
@@ -170,6 +171,35 @@ export class DeviceManager {
    */
   async add(deviceId: number, model: string): Promise<void> {
     if (this.devices.has(deviceId)) return;
+
+    /*
+     * A ceiling on how many exist at once.
+     *
+     * Every device publishes its ports system-wide, so an unbounded roster is
+     * an unbounded number of instruments in every DAW on the machine — and the
+     * id being one byte bounds the numbering, not the count. Refused loudly
+     * rather than ignored: the roster carries a FAILED device saying what
+     * happened, because a spawn that produces silence is indistinguishable
+     * from one the bridge never received.
+     */
+    if (this.devices.size >= MAX_ACTIVE_DEVICES) {
+      this.devices.set(deviceId, {
+        id: deviceId,
+        model,
+        spec: null,
+        ports: [],
+        dawPort: null,
+        emulator: null,
+        notes: new NoteTracker(),
+        status: DeviceStatus.FAILED,
+        detail: `only ${MAX_ACTIVE_DEVICES} devices can be open at once`,
+      });
+      this.events.onLog(
+        `[device ${deviceId}] refused (${model}): at the ${MAX_ACTIVE_DEVICES}-device limit`,
+      );
+      this.events.onRosterChange();
+      return;
+    }
 
     const spec = specFor(model);
     const instance: DeviceInstance = {

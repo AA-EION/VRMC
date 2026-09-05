@@ -242,6 +242,21 @@ export const FIRST_DYNAMIC_DEVICE_ID = 16;
 /** Highest device instance id. The field is one byte. */
 export const MAX_DEVICE_ID = 255;
 
+/**
+ * Devices that may be open at once.
+ *
+ * `MAX_DEVICE_ID` is not a bound on this — it bounds the *numbering*, and 240
+ * dynamic ids at up to three MIDI ports each is over seven hundred virtual
+ * endpoints published system-wide, in every DAW's port list, from a client
+ * that sends nothing more unusual than a lot of DEVICE_ADD.
+ *
+ * Sixteen because nobody plays sixteen instruments, and because a limit that
+ * is never reached in use is one whose refusal always means something went
+ * wrong. The bridge answers with a device that stays FAILED and says why,
+ * rather than dropping the request silently.
+ */
+export const MAX_ACTIVE_DEVICES = 16;
+
 /** MIDI status nibbles, for the bridge's encoder. */
 export const MidiStatus = {
   NOTE_OFF: 0x80,

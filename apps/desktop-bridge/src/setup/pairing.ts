@@ -83,6 +83,12 @@ export class PairingPublisher {
     try {
       await fetch(new URL('/api/pair', this.options.serviceUrl), {
         method: 'DELETE',
+        // The registration is posted with this header and withdrawn without
+        // it, which is the kind of asymmetry a body parser refuses on: most
+        // reject a JSON body that does not say it is JSON, and the withdrawal
+        // then fails silently and the code lingers until it expires — which is
+        // exactly the outcome the comment above says this avoids.
+        headers: { 'content-type': 'application/json' },
         body: JSON.stringify({ code: this.code }),
         signal: AbortSignal.timeout(2000),
       });
