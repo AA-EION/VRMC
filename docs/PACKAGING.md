@@ -88,23 +88,73 @@ Windows runner.
 
 ## Signing
 
-Both builds are unsigned, which is a real limitation rather than an oversight:
+### macOS: ad-hoc, and why that is not optional
 
-- **macOS** quarantines an unsigned app downloaded from the internet. The first
-  launch is refused outright; the user must right-click the app and choose
-  Open. Distributing without that step needs an Apple Developer ID, a signature
-  and notarisation.
-- **Windows** SmartScreen warns on an unsigned executable until it has built
-  reputation. An EV code-signing certificate avoids it.
+The app bundle is ad-hoc signed — `codesign --sign -`, a signature with no
+identity behind it. This is not a nicety on Apple Silicon: the kernel refuses to
+map an unsigned Mach-O at all, and when Gatekeeper finds a quarantined bundle
+whose code it cannot validate, the message it shows is **"damaged and can't be
+opened. You should move it to the Bin."** It is the same dialog as a genuinely
+corrupt download, which is why it sends people looking for one.
 
-Both are commercial prerequisites, not code changes. The release workflow builds
-macOS on macOS runners specifically so signing can be added there later without
-restructuring anything.
+`@yao-pkg/pkg` already ad-hoc signs the executable it produces, so the bridge
+binary was never the problem. What was unsigned was everything assembled around
+it: the `@julusian/midi`, `koffi` and `node-datachannel` addons and the Swift
+tray helper are copied in afterwards, and the bundle they sit in was never
+sealed.
+
+`build/codesign.mjs` signs it inside-out — every nested binary first, the bundle
+last — because a signature seals what is beneath it and signing the bundle first
+means the next nested signature silently invalidates it. `codesign` never
+complains about that order; only `--verify` does, which is why the release
+workflow verifies as a separate step and fails on it. `--deep` is deliberately
+not used to sign: Apple deprecated it, and it papers over exactly that question.
+
+**Where the addons live, and why it is not beside the executable.**
+`Contents/MacOS` does not mean "next to the program" to macOS. It means
+executables, and `codesign` enforces that literally: sealing the bundle, it
+treats every file in there as a code object that must already carry a
+signature. Staging `node_modules` in it fails the seal with *"code object is
+not signed at all — In subcomponent: …/@julusian/midi/binding.gyp"*, naming
+whichever ordinary text file it reached first, and there is no way to satisfy
+that because nothing will sign a `.gyp`.
+
+So the staged tree lives in `Contents/Resources`, whose contents are sealed
+wholesale into `CodeResources` while the `.node` binaries inside still get
+their own signatures — the same place Electron puts unpacked native modules,
+for the same reason. `Contents/MacOS` holds two things: the bridge and the tray
+helper. `stagedPaths` in `src/native.ts` is the other half of this and has its
+own tests, because getting it wrong produces a bridge that starts cleanly,
+shows a pairing code, and can open no MIDI port.
+
+**What ad-hoc buys, and what it does not.** It makes the code loadable and the
+bundle internally consistent, which turns "damaged" into the ordinary
+unverified-developer prompt. It is not notarisation: a downloaded build is still
+quarantined and still needs one deliberate approval. On macOS 15 and later,
+right-click → Open is no longer a bypass — the person installing has to open it
+once, let it be refused, then press **Open Anyway** in System Settings → Privacy
+& Security. If a build ever does report itself as damaged, the download lost its
+signature in transit and `xattr -dr com.apple.quarantine` on the installed app
+clears it.
+
+The day a Developer ID exists, `identity` in `signBundle` is the only thing that
+changes; the order of operations is already what notarisation requires. Hardened
+runtime is deliberately *not* enabled: it is a notarisation prerequisite, and
+turning it on without notarising would only add the JIT and
+unsigned-executable-memory entitlements a pkg binary needs, for no benefit.
+
+### Windows
+
+The executable is unsigned. SmartScreen warns until it has built reputation; an
+EV code-signing certificate avoids it. That is a commercial prerequisite rather
+than a code change.
 
 ## CI
 
-`.github/workflows/release.yml` builds each target on its own runner and smoke
-tests the artifact on the OS it targets — `--list-ports` exits after
+`.github/workflows/release.yml` builds each target on its own runner, verifies
+the macOS signature (both on the assembled bundle and again on the copy inside
+the mounted `.dmg`, since copying a bundle can lose the extended attributes that
+carry it), and smoke tests the artifact on the OS it targets — `--list-ports` exits after
 enumerating, which proves both that the executable runs and that the native
 MIDI addon loaded. Those are the two things packaging is most likely to break,
 and neither shows up in a typecheck.

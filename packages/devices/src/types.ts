@@ -18,6 +18,16 @@ export const DeviceModel = {
   KEYBOARD: 'keyboard',
   LAUNCHPAD_X: 'launchpad-x',
   LAUNCHPAD_PRO_MK3: 'launchpad-pro-mk3',
+  /** Novation Launchkey MK3 49: keys, pads, knobs and faders. */
+  LAUNCHKEY_MK3_49: 'launchkey-mk3-49',
+  /**
+   * The VRMC surface: 25 keys, 16 pads and 4 knobs, claiming no hardware.
+   *
+   * Emulated in the sense that it has a spec and a layout, but not hardware:
+   * no DAW ships a script for it, so it opens one plain port and passes plain
+   * MIDI. `HARDWARE_MODELS` is what tells the two apart.
+   */
+  VRMC: 'vrmc',
 } as const;
 export type DeviceModel = (typeof DeviceModel)[keyof typeof DeviceModel];
 
@@ -35,6 +45,14 @@ export const ButtonRole = {
   TRACK: 'track',
   /** The illuminated logo. Output only — it is not a button. */
   LOGO: 'logo',
+  /** A rotary control. Continuous, not a press. */
+  KNOB: 'knob',
+  /** A linear control. Continuous, not a press. */
+  FADER: 'fader',
+  /** A piano key. */
+  KEY: 'key',
+  /** Transport and mode buttons that are not on the grid. */
+  TRANSPORT: 'transport',
 } as const;
 export type ButtonRole = (typeof ButtonRole)[keyof typeof ButtonRole];
 
@@ -58,8 +76,24 @@ export type ControlKind = (typeof ControlKind)[keyof typeof ControlKind];
  * scheme worth keeping rather than translating to a dense array.
  */
 export interface Control {
-  /** Device LED/button number. */
+  /**
+   * The control's id on this device: what an LED addresses and what the
+   * headset sends back when it is touched.
+   *
+   * On a Launchpad this is also the MIDI data byte, because its controls live
+   * in one XY namespace and the hardware sends that number directly. On a
+   * device with both notes and CCs it cannot be: a Launchkey's key 41 and its
+   * sixth fader both send 41, one as a note and one as a CC, and seventeen
+   * such pairs collide. Ids are unique; `data1` is what goes on the wire.
+   */
   index: number;
+  /**
+   * The MIDI data byte this control sends, when that differs from its id.
+   *
+   * Absent means they are the same, which is every Launchpad control and is
+   * why nothing had to say so until a keyboard arrived.
+   */
+  data1?: number;
   kind: ControlKind;
   role: ButtonRole;
   /** Column 0..8 from the left, for layout. */
@@ -90,20 +124,68 @@ export interface DeviceSpec {
   firmwareVersion: readonly [number, number, number];
 
   /**
+   * The USB manufacturer string, as the hardware reports it.
+   *
+   * Not decoration: on macOS this is published as the endpoint's
+   * `kMIDIPropertyManufacturer`, which is one of the few identity fields a
+   * virtual endpoint is allowed to carry. Taken from CoreFW's per-model
+   * `usb.rs`, where it is the same for every Launchpad.
+   */
+  manufacturer: string;
+
+  /**
    * MIDI port names, in the order the hardware presents them.
    *
    * Real Launchpads expose two ports: a "DAW" port carrying the session
    * protocol and a "MIDI" port behaving as a plain instrument. Ableton looks
    * for both by name, so the emulation creates both.
+   *
+   * The order is not presentational. A USB-MIDI device's ports are cables on
+   * one endpoint pair, and a host enumerates them by cable index — so this
+   * array is a claim about the descriptor, and it was wrong: it had MIDI first
+   * until it was checked against
+   * [CoreFW](https://github.com/anthonyhfm/launchpad-core-firmware), whose jack
+   * table puts the DAW jack on cable 0 for all six models. `dawPortIndex` is
+   * therefore 0 everywhere, and a test asserts that rather than leaving it to
+   * each spec to get right.
    */
   portNames: readonly string[];
+  /**
+   * Per-direction port names, when the hardware names them differently.
+   *
+   * The Launchpads call a port the same thing whichever way MIDI is flowing —
+   * `LPX DAW` is both the source and the destination. A Launchkey does not: its
+   * endpoints are `LKMK3 DAW Out` and `LKMK3 DAW In`, named from the *device's*
+   * point of view, so what a DAW lists as an input is the one called "Out".
+   *
+   * Absent means `portNames` is used for both, which is the common case. When
+   * present the arrays run parallel to `portNames`.
+   *
+   * `source` is what the device sends *from* — a host's input. `destination` is
+   * what it receives *on* — a host's output. Naming them by role rather than by
+   * direction is deliberate: "in" and "out" mean opposite things depending on
+   * which end of the cable you are standing at, and that ambiguity is exactly
+   * what makes these two arrays easy to swap.
+   */
+  portNamesByDirection?: {
+    readonly source: readonly string[];
+    readonly destination: readonly string[];
+  };
   /** Index into `portNames` of the port the DAW protocol runs on. */
   dawPortIndex: number;
 
   // --- Surface ---
   controls: readonly Control[];
-  /** Grid width and height in pads, excluding the surrounding buttons. */
+  /** Grid width in pads, excluding the surrounding buttons. */
   gridSize: number;
+  /**
+   * Grid height in pads, when it is not square.
+   *
+   * Absent means square, which every Launchpad is. A Launchkey's pads are two
+   * rows of eight, and anything reading only `gridSize` would draw it as an
+   * 8x8 — sixty-four pads where there are sixteen.
+   */
+  padRows?: number;
   /** Whether the pads report polyphonic aftertouch. */
   polyAftertouch: boolean;
   /** Whether the pads are velocity sensitive. */

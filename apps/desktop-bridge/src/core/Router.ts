@@ -6,11 +6,15 @@ import {
   PacketReader,
   describeDecodeError,
   readDeviceAdd,
+  readDevicePose,
   readDeviceRemove,
+  readLayoutName,
+  readLayoutSave,
   readSysEx,
   type EventVisitor,
 } from '@vrmc/protocol';
 import type { DeviceManager } from '../devices/DeviceManager.js';
+import type { Workspace } from './Workspace.js';
 import { LinkStats } from './Stats.js';
 
 /**
@@ -36,6 +40,8 @@ export interface RouterEvents {
   onMalformed?: (reason: string) => void;
   /** A device was added or removed; the roster should be pushed back. */
   onRosterChange?: () => void;
+  /** A placement or a named arrangement changed; the headset should be told. */
+  onWorkspaceChange?: () => void;
 }
 
 /**
@@ -54,6 +60,7 @@ export class Router {
   readonly stats = new LinkStats();
   private readonly reader = new PacketReader();
   private readonly devices: DeviceManager;
+  private readonly workspace: Workspace | null;
   private readonly events: RouterEvents;
 
   /**
@@ -64,8 +71,9 @@ export class Router {
    */
   private readonly visitor: EventVisitor;
 
-  constructor(devices: DeviceManager, events: RouterEvents = {}) {
+  constructor(devices: DeviceManager, events: RouterEvents = {}, workspace: Workspace | null = null) {
     this.devices = devices;
+    this.workspace = workspace;
     this.events = events;
     this.visitor = (type, channel, data1, data2, value14, deviceId) => {
       this.devices.handleEvent(deviceId, type, channel, data1, data2, value14);
@@ -146,6 +154,57 @@ export class Router {
           return;
         }
         this.devices.sendSysEx(message.deviceId, message.bytes);
+        break;
+      }
+
+      // --- v3: where things are ---
+
+      case PacketKind.DEVICE_POSE: {
+        const placement = readDevicePose(this.reader.bodyView());
+        if (placement === null) {
+          this.stats.onMalformed();
+          return;
+        }
+        // A rejected placement is counted as malformed rather than ignored:
+        // it means the headset sent numbers no room can contain, and a run of
+        // them is worth seeing in the log.
+        if (this.workspace?.place(placement) === false) this.stats.onMalformed();
+        break;
+      }
+
+      case PacketKind.LAYOUT_SAVE: {
+        const layout = readLayoutSave(this.reader.bodyView());
+        if (layout === null) {
+          this.stats.onMalformed();
+          return;
+        }
+        const saved = this.workspace?.save(layout);
+        if (saved !== undefined && !saved.ok) {
+          this.events.onMalformed?.(`layout not saved: ${saved.reason ?? 'unknown'}`);
+        }
+        break;
+      }
+
+      case PacketKind.LAYOUT_DELETE: {
+        const name = readLayoutName(this.reader.bodyView());
+        if (name === null) {
+          this.stats.onMalformed();
+          return;
+        }
+        this.workspace?.delete(name);
+        break;
+      }
+
+      case PacketKind.LAYOUT_APPLY: {
+        const name = readLayoutName(this.reader.bodyView());
+        if (name === null) {
+          this.stats.onMalformed();
+          return;
+        }
+        // The headset has already applied it locally; this only records which
+        // arrangement is current, so the next connection hands back the same
+        // one. That is the whole reason layouts live here.
+        this.workspace?.apply(name);
         break;
       }
 

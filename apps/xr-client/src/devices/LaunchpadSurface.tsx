@@ -5,6 +5,7 @@ import { useFrame } from '@react-three/fiber';
 import {
   DoubleSide,
   ExtrudeGeometry,
+  type Group,
   InstancedMesh,
   Matrix4,
   MeshStandardMaterial,
@@ -12,8 +13,11 @@ import {
   Shape,
   Vector3,
 } from 'three';
-import type { LaunchpadLayout } from '@vrmc/devices';
+import { ButtonRole, CompositeSurface, type LaunchpadLayout } from '@vrmc/devices';
 import type { LedState } from './LedState.js';
+import type { LaunchpadInstance } from './LaunchpadInstance.js';
+import { buildTextTexture } from './labels.js';
+import type { DeviceSurface } from './LaunchpadInstance.js';
 
 /**
  * Build a rounded-square pad, extruded to a shallow depth.
@@ -48,12 +52,30 @@ function roundedPadGeometry(size: number, radiusFraction: number, depth: number)
   return geometry;
 }
 
+/** How tall a floating label is, in metres, and how far it stands off the top. */
+const LABEL_HEIGHT = 0.022;
+const LABEL_LIFT = 0.028;
+
 export interface LaunchpadSurfaceProps {
-  layout: LaunchpadLayout;
+  /**
+   * Either device's surface.
+   *
+   * Deliberately not `LaunchpadLayout`: this component draws zones from their
+   * rectangles and reads only the spec, the LED lookup and the logo, all of
+   * which a Launchkey's surface answers too. Narrowing it here would mean a
+   * second renderer for a device that needs none.
+   */
+  layout: DeviceSurface;
   leds: LedState;
-  /** World position of the surface's local origin (its bottom-left corner). */
-  position: [number, number, number];
-  quaternion: [number, number, number, number];
+  /**
+   * The device itself, so the mesh can follow a pose that moves.
+   *
+   * The transform is read in the frame loop rather than taken as props,
+   * because a held device's pose changes ninety times a second and routing
+   * that through React would put a component render on the same frame as note
+   * dispatch. It is the same reason the knobs are driven this way.
+   */
+  device: LaunchpadInstance;
 }
 
 /**
@@ -66,10 +88,10 @@ export interface LaunchpadSurfaceProps {
 export function LaunchpadSurface({
   layout,
   leds,
-  position,
-  quaternion,
+  device,
 }: LaunchpadSurfaceProps): React.ReactElement {
   const meshRef = useRef<InstancedMesh>(null);
+  const groupRef = useRef<Group>(null);
   const spec = layout.spec;
 
   const geometry = useMemo(
@@ -123,11 +145,21 @@ export function LaunchpadSurface({
         zone.rect.y + zone.rect.height / 2,
         zone.raise,
       );
-      // The surrounding function buttons are physically smaller and rounder
-      // than the grid pads. Scaling the shared geometry down is enough to read
-      // as that distinction without a second mesh.
-      const s = zone.accidental ? 0.74 : 1;
-      scale.set(s, s, 1);
+      /*
+       * Every zone is the shape its own rectangle says it is.
+       *
+       * The geometry is a rounded square of `spec.padSize`, so this scales it
+       * to each zone. On a Launchpad every zone is exactly that size and the
+       * scale is 1 throughout. On a keyboard it is not remotely: a white key is
+       * 22.5 mm across and 125 mm long, and drawing it as a 22 mm square — as
+       * one fixed size did — gives a row of buttons where the keys should be,
+       * on the device whose whole point is that you can play it.
+       */
+      scale.set(
+        zone.rect.width / spec.padSize,
+        zone.rect.height / spec.padSize,
+        1,
+      );
       matrix.compose(translation, rotation, scale);
       mesh.setMatrixAt(zone.index, matrix);
     }
@@ -148,7 +180,29 @@ export function LaunchpadSurface({
 
   useFrame((state, delta) => {
     leds.update(delta, state.clock.elapsedTime);
+
+    // Follow the pose. Written every frame rather than on change: a held device
+    // moves continuously, and comparing first would cost more than the six
+    // writes it saves.
+    const group = groupRef.current;
+    if (group !== null) {
+      const { origin, quaternion } = device.transform;
+      group.position.set(origin[0], origin[1], origin[2]);
+      group.quaternion.set(quaternion[0], quaternion[1], quaternion[2], quaternion[3]);
+    }
   });
+
+  /*
+   * The DAW's own words, above the device.
+   *
+   * Rebuilt only when the text changes, which is when somebody switches a view
+   * in their DAW — human speed, and nowhere near the frame path.
+   */
+  const label = useMemo(
+    () => buildTextTexture(device.displayText),
+    [device.displayText],
+  );
+  useEffect(() => () => label?.dispose(), [label]);
 
   const margin = 0.008;
   const bodyW = layout.width + margin * 2;
@@ -156,7 +210,7 @@ export function LaunchpadSurface({
   const logo = layout.logoPosition();
 
   return (
-    <group position={position} quaternion={quaternion}>
+    <group ref={groupRef}>
       {/* The chassis. Slightly translucent so the desk shows through and the
           device sits in the room rather than on top of it. */}
       <mesh position={[layout.width / 2, layout.height / 2, -0.005]} material={bodyMaterial}>
@@ -168,6 +222,23 @@ export function LaunchpadSurface({
         args={[geometry, material, layout.zones.length]}
         frustumCulled={false}
       />
+
+      {label !== null && (
+        // Sized from the texture so the glyphs never stretch, and stood off the
+        // top edge rather than over the grid: a label across the pads is a
+        // label in the way of the thing it is describing.
+        <mesh
+          position={[layout.width / 2, layout.height + LABEL_LIFT, 0.01]}
+          renderOrder={1}
+        >
+          <planeGeometry
+            args={[LABEL_HEIGHT * (label.image.width / label.image.height), LABEL_HEIGHT]}
+          />
+          <meshBasicMaterial map={label} transparent depthWrite={false} />
+        </mesh>
+      )}
+
+      <ContinuousControls device={device} />
 
       {logo !== null && (
         <mesh position={[logo.x, logo.y, 0.002]}>
@@ -183,3 +254,106 @@ export function LaunchpadSurface({
     </group>
   );
 }
+
+/**
+ * The knobs and faders, drawn as objects rather than as pads.
+ *
+ * They are not poked, so they are not lit and a flat rectangle says nothing
+ * about where they are set. A knob turns and a fader travels, which is the
+ * whole readout: on hardware you know a fader's position by looking at it, and
+ * a virtual one that cannot be read has to be checked in the DAW instead.
+ *
+ * Positions and values come from the device, not from a copy: the knob you see
+ * and the knob the pinch test looks for are the same zone, and on a control
+ * with no edge to feel a discrepancy is invisible until it will not grab.
+ */
+function ContinuousControls({
+  device,
+}: {
+  device: LaunchpadInstance;
+}): React.ReactElement | null {
+  const groupRef = useRef<Group>(null);
+  const surface = device.layout;
+  const zones = device.continuousZoneIndices;
+
+  useFrame(() => {
+    const group = groupRef.current;
+    if (group === null) return;
+    for (const [i, child] of group.children.entries()) {
+      const zoneIndex = zones[i];
+      if (zoneIndex === undefined) continue;
+      const zone = surface.zones[zoneIndex];
+      if (zone === undefined) continue;
+      const value = device.valueOfZone(zoneIndex);
+      if (child.userData.fader === true) {
+        // The cap slides along the slot, inset by its own height so it stays
+        // on the track at both ends.
+        const travel = zone.rect.height - FADER_CAP_HEIGHT;
+        child.position.y = zone.rect.y + FADER_CAP_HEIGHT / 2 + value * travel;
+      } else {
+        // 300 degrees, the usual throw of a hardware pot, centred on zero.
+        child.rotation.y = (0.5 - value) * ((300 * Math.PI) / 180);
+      }
+    }
+  });
+
+  if (zones.length === 0 || !(surface instanceof CompositeSurface)) return null;
+
+  return (
+    <group ref={groupRef}>
+      {zones.map((zoneIndex) => {
+        const zone = surface.zones[zoneIndex]!;
+        const cx = zone.rect.x + zone.rect.width / 2;
+        const isFader = surface.roleOf(zoneIndex) === ButtonRole.FADER;
+        if (isFader) {
+          return (
+            <group
+              key={zoneIndex}
+              position={[cx, zone.rect.y + FADER_CAP_HEIGHT / 2, zone.raise + 0.006]}
+              userData={{ fader: true }}
+            >
+              <mesh>
+                <boxGeometry
+                  args={[zone.rect.width * 2.4, FADER_CAP_HEIGHT, 0.012]}
+                />
+                <meshStandardMaterial color="#39405c" roughness={0.5} metalness={0.3} />
+              </mesh>
+              <mesh position={[0, 0, 0.007]}>
+                <boxGeometry args={[zone.rect.width * 2.1, 0.0022, 0.002]} />
+                <meshStandardMaterial
+                  color="#63e0ff"
+                  emissive="#1d6f88"
+                  emissiveIntensity={0.8}
+                />
+              </mesh>
+            </group>
+          );
+        }
+        const radius = Math.min(zone.rect.width, zone.rect.height) / 2;
+        return (
+          <group
+            key={zoneIndex}
+            position={[cx, zone.rect.y + zone.rect.height / 2, zone.raise + 0.008]}
+          >
+            <mesh rotation={[Math.PI / 2, 0, 0]}>
+              <cylinderGeometry args={[radius * 0.9, radius, 0.016, 24]} />
+              <meshStandardMaterial color="#39405c" roughness={0.5} metalness={0.3} />
+            </mesh>
+            {/* Indicator, so the knob's setting is readable at a glance. */}
+            <mesh position={[0, radius * 0.65, 0.009]}>
+              <boxGeometry args={[0.0025, radius * 0.6, 0.002]} />
+              <meshStandardMaterial
+                color="#63e0ff"
+                emissive="#1d6f88"
+                emissiveIntensity={0.8}
+              />
+            </mesh>
+          </group>
+        );
+      })}
+    </group>
+  );
+}
+
+/** Height of a fader cap, in metres. Its travel is the slot less this. */
+const FADER_CAP_HEIGHT = 0.014;

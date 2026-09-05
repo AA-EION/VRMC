@@ -66,9 +66,21 @@ describe('DEVICE_REMOVE', () => {
 describe('DEVICE_STATE', () => {
   it('round-trips several devices with their status and detail', () => {
     const entries = [
-      { deviceId: 16, status: DeviceStatus.READY, model: 'launchpad-x', detail: 'LPX MIDI, LPX DAW' },
-      { deviceId: 17, status: DeviceStatus.FAILED, model: 'launchpad-pro-mk3', detail: 'no driver' },
-      { deviceId: 18, status: DeviceStatus.PENDING, model: 'keyboard', detail: '' },
+      {
+        deviceId: 16,
+        status: DeviceStatus.READY,
+        model: 'launchpad-x',
+        detail: 'LPX MIDI, LPX DAW',
+        placement: null,
+      },
+      {
+        deviceId: 17,
+        status: DeviceStatus.FAILED,
+        model: 'launchpad-pro-mk3',
+        detail: 'no driver',
+        placement: null,
+      },
+      { deviceId: 18, status: DeviceStatus.PENDING, model: 'keyboard', detail: '', placement: null },
     ];
     const body = roundTrip(PacketKind.DEVICE_STATE, (w) => {
       expect(writeDeviceState(w, entries)).toBe(true);
@@ -81,11 +93,25 @@ describe('DEVICE_STATE', () => {
   });
 
   it('stops cleanly at a truncated entry instead of throwing', () => {
-    // Claims three devices but only carries one.
-    const body = Uint8Array.of(3, 16, DeviceStatus.READY, 1, 0x78, 0);
+    // Claims three devices but only carries one. The trailing 0 is v3's
+    // placement-presence byte, without which the single complete entry is
+    // itself truncated — which is the format working, not the test drifting.
+    const body = Uint8Array.of(3, 16, DeviceStatus.READY, 1, 0x78, 0, 0);
     const out = readDeviceState(body);
     expect(out).toHaveLength(1);
     expect(out[0]!.model).toBe('x');
+    expect(out[0]!.placement).toBeNull();
+  });
+
+  it('drops a v2 entry rather than reading it as a v3 one', () => {
+    /*
+     * The same body without the presence byte. A receiver rejects a version
+     * mismatch outright, so this can only be reached by a hand-built buffer —
+     * but the shape of the answer matters: an entry whose placement cannot be
+     * determined is left out, never reported with an invented pose.
+     */
+    const v2 = Uint8Array.of(1, 16, DeviceStatus.READY, 1, 0x78, 0);
+    expect(readDeviceState(v2)).toHaveLength(0);
   });
 });
 

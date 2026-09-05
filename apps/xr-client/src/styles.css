@@ -1,21 +1,19 @@
 /*
- * The flat-screen UI. Only ever seen outside the headset — once an immersive
- * session starts the browser stops compositing the page and the whole view is
- * the 3D scene.
+ * The flat-screen UI, set in EION Studios' identity.
+ *
+ * Only ever seen outside the headset — once an immersive session starts the
+ * browser stops compositing the page and the whole view is the 3D scene. So
+ * this is the setup surface and the setup surface only, and it is styled the
+ * way the studio styles a page: two inks, a ramp between them, one hairline
+ * weight, no radius worth the name, and a 4 px grid.
+ *
+ * Nothing below holds a hex value. Every colour is a semantic token from
+ * brand/theme.css, every measure a step from brand/brand.css. That is the point
+ * of the token layer: a stylesheet with its own palette is a second brand.
  */
 
-:root {
-  color-scheme: dark;
-  --bg: #0a0c12;
-  --panel: rgba(24, 28, 40, 0.82);
-  --border: rgba(126, 142, 190, 0.22);
-  --text: #e8ecf6;
-  --muted: #9aa4bf;
-  --accent: #63e0ff;
-  --ok: #6ee7a8;
-  --bad: #ff8189;
-  font-family: system-ui, -apple-system, 'Segoe UI', sans-serif;
-}
+@import './brand/brand.css';
+@import './brand/theme.css';
 
 * {
   box-sizing: border-box;
@@ -29,8 +27,13 @@ body,
 }
 
 body {
-  background: radial-gradient(1200px 800px at 70% -10%, #16203a 0%, var(--bg) 60%);
-  color: var(--text);
+  background: var(--surface);
+  color: var(--ink);
+  font-family: var(--eion-font-text);
+  line-height: var(--eion-leading-body);
+  /* The identity is set tight and even; the browser's default synthesis of a
+     missing weight is the one thing that would coarsen it. */
+  -webkit-font-smoothing: antialiased;
 }
 
 /*
@@ -52,115 +55,197 @@ body {
   height: 100%;
 }
 
+/*
+ * The reading column, and it is paper.
+ *
+ * The 3D preview is fixed behind the whole viewport, and once the sections
+ * stopped being tinted cards there was nothing between it and the type: a
+ * Launchpad's navy chassis passed under a line of Sumi text and took the
+ * contrast to nothing, which is the one thing a monochrome system cannot
+ * absorb. The studio solves the same problem in its own room by having panels
+ * write depth so the galaxy is never drawn behind them; the flat equivalent is
+ * simply that the column is opaque. The instruments show in the margins either
+ * side of it, which is where a preview belongs — beside what you are reading,
+ * not under it.
+ */
 .overlay {
   position: relative;
   z-index: 1;
-  max-width: 40rem;
+  max-width: 42rem;
   margin: 0 auto;
-  padding: 2rem 1.25rem 4rem;
+  padding: var(--s-6) var(--s-5) var(--s-8);
   display: grid;
-  gap: 1rem;
+  gap: var(--s-5);
+  background: var(--surface);
 }
 
-header h1 {
+/* ---- The head -------------------------------------------------------------
+   Mark, wordmark, seal and one line. The rule under it is the same hairline
+   that divides everything else; there is no second weight to reach for. */
+
+.masthead {
+  display: grid;
+  grid-template-columns: auto 1fr auto;
+  align-items: center;
+  gap: var(--s-4);
+  /* No rule of its own: the first section's own top rule is directly below it,
+     and two hairlines a grid step apart read as a mistake rather than as a
+     division. */
+  padding-bottom: 0;
+}
+
+.masthead .mark {
+  display: block;
+  width: 2.25rem;
+  height: auto;
+  color: var(--ink);
+}
+
+.masthead h1 {
   margin: 0;
-  font-size: 2.25rem;
-  letter-spacing: 0.14em;
-  font-weight: 700;
+  font-size: 1.5rem;
+  font-weight: 300;
+  letter-spacing: var(--eion-track-display);
+  line-height: var(--eion-leading-display);
 }
 
-.tagline {
-  margin: 0.15rem 0 0;
-  color: var(--muted);
-  letter-spacing: 0.04em;
+.masthead .tagline {
+  margin: var(--s-1) 0 0;
+  color: var(--ink-3);
+  font-size: 0.75rem;
+  font-weight: 500;
+  letter-spacing: var(--eion-track-eyebrow);
+  text-transform: uppercase;
+  line-height: 1.4;
 }
+
+/* ---- Sections -------------------------------------------------------------
+   Not cards. A card is a container with a shadow and a radius, and 2026.2 has
+   neither; a section is a rule, an index, a title and its contents. */
 
 .card {
-  background: var(--panel);
-  border: 1px solid var(--border);
-  border-radius: 0.9rem;
-  padding: 1.1rem 1.15rem;
-  backdrop-filter: blur(12px);
+  background: none;
+  border: 0;
+  border-top: var(--rule) solid var(--line);
+  padding: var(--s-4) 0 0;
 }
 
 .card h2 {
-  margin: 0 0 0.6rem;
-  font-size: 0.82rem;
+  margin: 0 0 var(--s-3);
+  font-size: 0.72rem;
+  font-weight: 500;
   text-transform: uppercase;
-  letter-spacing: 0.12em;
-  color: var(--muted);
-  font-weight: 600;
+  letter-spacing: var(--eion-track-eyebrow);
+  color: var(--ink-3);
 }
 
 .hint {
-  margin: 0 0 0.75rem;
-  color: var(--muted);
-  font-size: 0.9rem;
-  line-height: 1.5;
+  margin: 0 0 var(--s-3);
+  color: var(--ink-2);
+  font-size: 0.875rem;
+}
+
+.hint.spaced {
+  margin-top: var(--s-3);
+  margin-bottom: 0;
 }
 
 .list {
-  padding-left: 1.1rem;
+  padding-left: var(--s-4);
 }
 
 .list li {
-  margin-bottom: 0.3rem;
+  margin-bottom: var(--s-1);
 }
 
 .row {
   display: flex;
-  gap: 0.5rem;
+  gap: var(--s-2);
+  align-items: stretch;
 }
+
+.row.wrap {
+  flex-wrap: wrap;
+}
+
+/* ---- Controls -------------------------------------------------------------
+   Cut, not rounded. A control is a hairline box; the solid one is the ink
+   itself inverted, which is the only emphasis the palette has left and
+   therefore the one that has to mean something. */
 
 input[type='text'] {
   flex: 1;
   min-width: 0;
-  padding: 0.6rem 0.7rem;
-  border-radius: 0.55rem;
-  border: 1px solid var(--border);
-  background: rgba(10, 12, 18, 0.7);
-  color: var(--text);
-  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
-  font-size: 0.9rem;
+  padding: var(--s-2) var(--s-3);
+  border: var(--rule) solid var(--line);
+  border-radius: var(--r);
+  background: var(--surface-raise);
+  color: var(--ink);
+  font-family: var(--eion-font-mono);
+  font-size: 0.875rem;
 }
 
 input[type='text']:focus-visible,
-button:focus-visible {
-  outline: 2px solid var(--accent);
+button:focus-visible,
+summary:focus-visible {
+  /* Monochrome, like everything else. A coloured focus ring would be the one
+     hue on the page and would therefore read as the brand's accent — which the
+     identity does not have. */
+  outline: 2px solid var(--ink);
   outline-offset: 2px;
 }
 
 button {
-  padding: 0.6rem 1rem;
-  border-radius: 0.55rem;
-  border: 1px solid var(--border);
-  background: rgba(60, 70, 100, 0.5);
-  color: var(--text);
-  font-size: 0.9rem;
-  font-weight: 600;
+  padding: var(--s-2) var(--s-4);
+  border: var(--rule) solid var(--line-2);
+  border-radius: var(--r);
+  background: none;
+  color: var(--ink);
+  font-family: inherit;
+  font-size: 0.8rem;
+  font-weight: 500;
+  letter-spacing: var(--eion-track-dato);
   cursor: pointer;
-  transition: background 120ms ease;
+  transition:
+    background-color 160ms var(--eion-theme-ease),
+    border-color 160ms var(--eion-theme-ease);
 }
 
 button:hover:not(:disabled) {
-  background: rgba(80, 94, 134, 0.6);
+  background: var(--surface-inset);
+  border-color: var(--ink-4);
 }
 
 button:disabled {
-  opacity: 0.5;
+  color: var(--ink-4);
+  border-color: var(--line);
   cursor: default;
 }
 
 button.primary {
   width: 100%;
-  background: var(--accent);
-  border-color: transparent;
-  color: #06222c;
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--surface);
+  text-transform: uppercase;
+  letter-spacing: var(--eion-track-eyebrow);
+  padding: var(--s-3) var(--s-4);
+}
+
+button.primary:hover:not(:disabled) {
+  background: var(--ink-2);
+  border-color: var(--ink-2);
+}
+
+button.primary:disabled {
+  background: var(--ink-4);
+  border-color: var(--ink-4);
+  color: var(--surface);
 }
 
 /*
  * A primary button inside a flex row must not take the full width, or it
- * squashes whatever it sits beside — which is how the pairing code field
+ * squashes whatever it sits beside — which is how the pairing code field once
  * collapsed to a few pixels.
  */
 .row button.primary {
@@ -168,56 +253,91 @@ button.primary {
   flex: none;
 }
 
-button.primary:hover:not(:disabled) {
-  background: #8aeaff;
-}
-
+/*
+ * Panic. The one destructive control, and in a monochrome system it cannot be
+ * red — so it is the one control drawn with the heavier rule, which is what
+ * `line-2` is for.
+ */
 button.danger {
   width: 100%;
-  margin-top: 0.5rem;
-  background: rgba(120, 40, 50, 0.5);
-  border-color: rgba(255, 129, 137, 0.35);
-  color: var(--bad);
+  margin-top: var(--s-2);
+  border-color: var(--ink-3);
+  color: var(--ink);
+  text-transform: uppercase;
+  letter-spacing: var(--eion-track-eyebrow);
 }
+
+/* ---- The theme control ----------------------------------------------------
+   Three states, named the way the identity names them. It sits in the masthead
+   because it is a property of the page rather than of anything on it. */
+
+button.theme {
+  border-color: var(--line);
+  color: var(--ink-3);
+  font-size: 0.68rem;
+  text-transform: uppercase;
+  letter-spacing: var(--eion-track-eyebrow);
+  padding: var(--s-1) var(--s-2);
+  white-space: nowrap;
+}
+
+/* ---- Data -----------------------------------------------------------------
+   Numbers that have to line up, and a label that never competes with them. */
 
 .stats {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(7rem, 1fr));
-  gap: 0.6rem;
-  margin: 0.9rem 0 0;
+  gap: var(--s-3);
+  margin: var(--s-4) 0 0;
+  padding-top: var(--s-3);
+  border-top: var(--rule) solid var(--line);
 }
 
 .stats dt {
-  font-size: 0.7rem;
+  font-size: 0.65rem;
   text-transform: uppercase;
-  letter-spacing: 0.09em;
-  color: var(--muted);
+  letter-spacing: var(--eion-track-eyebrow);
+  color: var(--ink-3);
 }
 
 .stats dd {
-  margin: 0.15rem 0 0;
-  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  margin: var(--s-1) 0 0;
+  font-family: var(--eion-font-mono);
   font-size: 0.95rem;
   font-variant-numeric: tabular-nums;
+  letter-spacing: var(--eion-track-dato);
+  color: var(--ink-2);
 }
 
+/*
+ * State, without colour.
+ *
+ * The palette has no green and no red, and inventing one for a status line
+ * would put the only hue on the page next to the least important sentence on
+ * it. So a live value is set in full ink and a dead one is ghosted — the same
+ * two steps of the ramp the rest of the hierarchy uses, and the words
+ * themselves ("Connected", "Connection failed") carry the meaning.
+ */
 .stats dd.ok {
-  color: var(--ok);
+  color: var(--ink);
+  font-weight: 500;
 }
 
 .stats dd.bad {
-  color: var(--bad);
+  color: var(--ink);
+  font-weight: 500;
+  /* The one place a rule is used as emphasis rather than as a division. */
+  border-left: 2px solid var(--ink);
+  padding-left: var(--s-2);
+  margin-left: calc(var(--s-2) * -1 - 2px);
 }
 
 .warn {
-  margin: 0.75rem 0 0;
-  padding: 0.6rem 0.7rem;
-  border-radius: 0.5rem;
-  background: rgba(120, 40, 50, 0.28);
-  border: 1px solid rgba(255, 129, 137, 0.3);
-  color: #ffc4c8;
+  margin: var(--s-3) 0 0;
+  padding: var(--s-2) 0 var(--s-2) var(--s-3);
+  border-left: 2px solid var(--ink-3);
+  color: var(--ink-2);
   font-size: 0.85rem;
-  line-height: 1.5;
 }
 
 .banner {
@@ -225,51 +345,40 @@ button.danger {
 }
 
 code {
-  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  font-family: var(--eion-font-mono);
   font-size: 0.86em;
-  background: rgba(10, 12, 18, 0.6);
+  background: var(--surface-inset);
   padding: 0.1em 0.35em;
-  border-radius: 0.3em;
+  border-radius: var(--r);
 }
 
-.row.wrap {
-  flex-wrap: wrap;
-}
+/* ---- The device roster ---------------------------------------------------- */
 
-.hint.spaced {
-  margin-top: 0.75rem;
-  margin-bottom: 0;
-}
-
-/* Emulated device roster. */
 .devices {
   list-style: none;
-  margin: 0.9rem 0 0;
+  margin: var(--s-4) 0 0;
   padding: 0;
   display: grid;
-  gap: 0.5rem;
 }
 
 .devices li {
   display: grid;
   grid-template-columns: 1fr auto auto;
   align-items: center;
-  gap: 0.6rem;
-  padding: 0.55rem 0.65rem;
-  border: 1px solid var(--border);
-  border-radius: 0.55rem;
-  background: rgba(10, 12, 18, 0.55);
+  gap: var(--s-3);
+  padding: var(--s-3) 0;
+  border-top: var(--rule) solid var(--line);
   font-size: 0.85rem;
 }
 
 .devices .device-name {
-  font-weight: 600;
+  font-weight: 500;
 }
 
 .devices span:nth-child(2) {
-  color: var(--muted);
-  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
-  font-size: 0.76rem;
+  color: var(--ink-3);
+  font-family: var(--eion-font-mono);
+  font-size: 0.72rem;
   overflow: hidden;
   text-overflow: ellipsis;
   white-space: nowrap;
@@ -277,51 +386,156 @@ code {
 }
 
 .devices .ok {
-  color: var(--ok);
+  color: var(--ink-2);
 }
 
 .devices .bad {
-  color: var(--bad);
+  color: var(--ink);
+  font-weight: 500;
 }
 
 .devices button {
-  padding: 0.35rem 0.7rem;
-  font-size: 0.78rem;
+  padding: var(--s-1) var(--s-3);
+  font-size: 0.72rem;
 }
 
-/* Pairing code entry. Sized to be typed on a floating keyboard in a headset. */
+/* ---- Pairing --------------------------------------------------------------
+   The first thing a first-time user meets, and the one field that has to be
+   legible while typed on a floating keyboard in a headset. It is set in the
+   full ink at display size for exactly that reason. */
+
 .code-input {
   flex: 1 1 auto;
   /* Wide enough that six characters and the placeholder are always legible. */
   min-width: 9rem;
-  padding: 0.7rem 0.8rem;
-  border-radius: 0.55rem;
-  border: 1px solid var(--border);
-  background: rgba(10, 12, 18, 0.7);
-  color: var(--accent);
-  font-family: ui-monospace, 'SF Mono', Menlo, monospace;
+  padding: var(--s-3);
+  border: var(--rule) solid var(--line-2);
+  border-radius: var(--r);
+  background: var(--surface-raise);
+  color: var(--ink);
+  font-family: var(--eion-font-mono);
   font-size: 1.5rem;
-  font-weight: 700;
+  font-weight: 500;
   letter-spacing: 0.16em;
   text-align: center;
   text-transform: uppercase;
 }
 
 .code-input::placeholder {
-  color: rgba(154, 164, 191, 0.4);
+  color: var(--ink-4);
   letter-spacing: 0.16em;
 }
 
 .advanced {
-  margin-top: 0.9rem;
+  margin-top: var(--s-3);
 }
 
 .advanced summary {
   cursor: pointer;
-  color: var(--muted);
-  font-size: 0.82rem;
+  color: var(--ink-3);
+  font-size: 0.75rem;
+  text-transform: uppercase;
+  letter-spacing: var(--eion-track-eyebrow);
 }
 
 .advanced[open] summary {
-  margin-bottom: 0.7rem;
+  margin-bottom: var(--s-3);
+}
+
+/* ---- The foot -------------------------------------------------------------
+   The seal, and nothing beside it. */
+
+.colophon {
+  display: flex;
+  align-items: center;
+  gap: var(--s-3);
+  padding-top: var(--s-4);
+  border-top: var(--rule) solid var(--line);
+  color: var(--ink-3);
+  font-size: 0.7rem;
+  letter-spacing: var(--eion-track-eyebrow);
+  text-transform: uppercase;
+}
+
+/* ---- A pair of exclusive choices -----------------------------------------
+   Two cut boxes sharing one rule between them, and the chosen one inverted to
+   the ink. There is no third state and no tint: with the palette monochrome,
+   «selected» has to be the strongest mark the system owns, and the solid ink
+   is exactly that — the same emphasis `button.primary` spends, for the same
+   reason. */
+
+.segmented {
+  display: flex;
+  margin-top: var(--s-2);
+}
+
+.segmented button {
+  flex: 1;
+  border-radius: 0;
+  text-transform: uppercase;
+  letter-spacing: var(--eion-track-eyebrow);
+  font-size: 0.7rem;
+}
+
+/* The shared edge is drawn once, not twice — two abutting hairlines read as
+   one heavy rule, which is a weight this system does not have. */
+.segmented button + button {
+  border-left: 0;
+}
+
+/* «On», wherever it appears. Solid ink is the strongest mark a monochrome
+   system owns, so it is what «selected» and «pinned» both are. */
+.segmented button.on,
+button.on {
+  background: var(--ink);
+  border-color: var(--ink);
+  color: var(--surface);
+}
+
+.segmented button.on:hover,
+button.on:hover:not(:disabled) {
+  background: var(--ink-2);
+  border-color: var(--ink-2);
+}
+
+/* The roster gained a surface control and a pin, so its rows are five columns.
+   On a narrow viewport they wrap rather than squeezing the port names, which
+   are what tells you the DAW can actually see the device. */
+.devices li {
+  grid-template-columns: 1fr auto auto auto auto;
+}
+
+@media (max-width: 34rem) {
+  .devices li {
+    grid-template-columns: 1fr auto;
+  }
+
+  .devices li > span:nth-child(2) {
+    grid-column: 1 / -1;
+    max-width: none;
+  }
+}
+
+/* ---- A switch, set as a line of text -------------------------------------
+   The checkbox is the browser's own, in the current ink. A custom control here
+   would be a new object the identity does not have, drawn to look like a
+   control the platform already provides and already makes accessible. */
+
+.toggle {
+  display: flex;
+  align-items: baseline;
+  gap: var(--s-2);
+  margin-top: var(--s-3);
+  font-size: 0.875rem;
+  color: var(--ink-2);
+  cursor: pointer;
+}
+
+.toggle input {
+  accent-color: var(--ink);
+  margin: 0;
+}
+
+.toggle:hover span {
+  color: var(--ink);
 }

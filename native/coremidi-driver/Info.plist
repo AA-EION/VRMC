@@ -1,0 +1,44 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleDevelopmentRegion</key>
+	<string>en</string>
+	<key>CFBundleExecutable</key>
+	<string>VRMC</string>
+	<!-- MIDIServer uses this as the driver's persistent id in the MIDI setup,
+	     so changing it orphans any device already stored under the old one. -->
+	<key>CFBundleIdentifier</key>
+	<string>studios.eion.vrmc.midi.driver</string>
+	<key>CFBundleInfoDictionaryVersion</key>
+	<string>6.0</string>
+	<key>CFBundleName</key>
+	<string>VRMC</string>
+	<key>CFBundlePackageType</key>
+	<string>BNDL</string>
+	<key>CFBundleShortVersionString</key>
+	<string>0.1.0</string>
+	<key>CFBundleVersion</key>
+	<string>0.1.0</string>
+	<key>CFBundleSignature</key>
+	<string>????</string>
+	<!-- The factory is looked up by name at load time, not registered at
+	     runtime. -->
+	<key>CFPlugInDynamicRegistration</key>
+	<string>NO</string>
+	<key>CFPlugInFactories</key>
+	<dict>
+		<key>A8869348-1A3B-4F2A-8A7C-2A4F31ADD0EB</key>
+		<string>VrmcDriverFactory</string>
+	</dict>
+	<key>CFPlugInTypes</key>
+	<dict>
+		<!-- kMIDIDriverTypeID, from CoreMIDI/MIDIDriver.h. This is what makes
+		     MIDIServer consider the bundle at all. -->
+		<key>ECDE9574-0FE4-11D4-BB1A-0050E4CEA526</key>
+		<array>
+			<string>A8869348-1A3B-4F2A-8A7C-2A4F31ADD0EB</string>
+		</array>
+	</dict>
+</dict>
+</plist>

@@ -16,8 +16,7 @@ import { dirname, join } from 'node:path';
  * that is SMAppService, which is Swift-only and needs a bundle to point at,
  * and this executable is already inside one.
  */
-export function helperCandidates(): string[] {
-  const name = process.platform === 'win32' ? 'vrmc-tray.exe' : 'vrmc-tray';
+export function helperCandidates(name = defaultHelperName()): string[] {
   const beside = dirname(process.execPath);
   const out: string[] = [join(beside, name)];
 
@@ -32,7 +31,24 @@ export function helperCandidates(): string[] {
   return out;
 }
 
+function defaultHelperName(): string {
+  return process.platform === 'win32' ? 'vrmc-tray.exe' : 'vrmc-tray';
+}
+
 /** The helper's path, or null when this build has none. */
-export function findHelper(): string | null {
-  return helperCandidates().find((p) => existsSync(p)) ?? null;
+export function findHelper(name = defaultHelperName()): string | null {
+  return helperCandidates(name).find((p) => existsSync(p)) ?? null;
+}
+
+/**
+ * The native dashboard, or null on a build or platform without one.
+ *
+ * Same two places as the tray helper, for the same reasons — beside the
+ * executable when packaged, in the build output when running from source. A
+ * build without it is not broken: the web dashboard is still served, and the
+ * caller falls back to opening that.
+ */
+export function findDashboard(): string | null {
+  if (process.platform !== 'darwin') return null;
+  return findHelper('vrmc-dashboard');
 }

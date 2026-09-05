@@ -26,6 +26,123 @@ jobs:
       - run: pnpm --filter @vrmc/xr-client exec playwright install --with-deps chromium
       - run: pnpm test
 
+  # The driver's portable halves: the wire format and the UMP decoder.
+  #
+  # Neither touches CoreMIDI, so both compile and run on a Linux runner in
+  # about a second — and a check that only ran on the macOS runner would be a
+  # check that ran less often. The framing test is the one that matters most:
+  # it is what stops the C++ and the TypeScript implementations of the same
+  # wire format from drifting apart, by requiring the C++ to produce and parse
+  # exactly the bytes the TypeScript encoder emitted.
+  driver-logic:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: The wire format agrees with the bridge's
+        run: |
+          set -euo pipefail
+          g++ -std=c++17 -O1 -Wall -Wextra -Werror \
+            -o /tmp/framing_test native/coremidi-driver/test/framing_test.cpp
+          /tmp/framing_test
+      - name: UMP decodes to the MIDI a Launchpad speaks
+        run: |
+          set -euo pipefail
+          g++ -std=c++17 -O1 -Wall -Wextra -Werror \
+            -o /tmp/ump_test native/coremidi-driver/test/ump_test.cpp
+          /tmp/ump_test
+
+      # The vectors are generated from the TypeScript encoder and committed, so
+      # that a change to the format is visible in review. If the committed copy
+      # is stale the C++ is being checked against a format the bridge no longer
+      # speaks, which is worse than not checking it at all.
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      # The bridge imports @vrmc/protocol and friends, and tsc resolves those
+      # through their built `dist` rather than their source. Without this the
+      # compile fails on "Cannot find module '@vrmc/protocol'" — which says
+      # nothing about the vectors this job exists to check.
+      - run: pnpm --filter @vrmc/protocol --filter @vrmc/layout --filter @vrmc/interaction --filter @vrmc/devices build
+      - name: The committed frame vectors are current
+        run: |
+          set -euo pipefail
+          pnpm --filter @vrmc/desktop-bridge exec tsc -p tsconfig.json --outDir dist
+          node apps/desktop-bridge/build/driverVectors.mjs
+          git diff --exit-code native/coremidi-driver/test/vectors.h \
+            || { echo "vectors.h is stale; run node apps/desktop-bridge/build/driverVectors.mjs"; exit 1; }
+
+  # Compiles the Swift helpers against a real macOS SDK.
+  #
+  # Neither the tray icon nor the dashboard window can be built anywhere else,
+  # and both fail *silently* when they are wrong — a helper that will not
+  # compile is simply absent, and the bridge carries on headless. So a compile
+  # error here has to be a failed build rather than a warning nobody reads.
+  swift-helpers:
+    runs-on: macos-26
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the tray helper and the dashboard
+        run: node native/build.mjs
+        working-directory: apps/desktop-bridge
+      - name: Both must exist, and the dashboard must be universal
+        run: |
+          set -euo pipefail
+          cd apps/desktop-bridge/native/build
+          test -x vrmc-tray || { echo "no tray helper"; exit 1; }
+          test -x vrmc-dashboard || { echo "no dashboard"; exit 1; }
+          archs=$(lipo -archs vrmc-dashboard)
+          echo "dashboard: $archs"
+          grep -q arm64 <<<"$archs" || { echo "no arm64 slice"; exit 1; }
+          grep -q x86_64 <<<"$archs" || { echo "no x86_64 slice"; exit 1; }
+
+  # Compiles the CoreMIDI driver plugin against a real macOS SDK.
+  #
+  # It is one translation unit and cannot be built or run anywhere else, so
+  # without this a mistake in it is invisible until somebody with a Mac tries.
+  # `-Werror` is in build.sh, so this is a real check rather than a smoke test.
+  # It does not prove the driver *loads* — only MIDIServer on a real machine
+  # can say that, which is what the spike is for.
+  coremidi-driver:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build the driver
+        run: native/coremidi-driver/build.sh
+      - name: Check the bundle is what CFBundle expects
+        run: |
+          set -euo pipefail
+          bundle=native/coremidi-driver/build/VRMC.plugin
+          # The factory named in Info.plist must exist in the binary, or
+          # MIDIServer finds the bundle, fails to resolve the symbol and loads
+          # nothing — with no error the user ever sees.
+          nm -gU "$bundle/Contents/MacOS/VRMC" | grep -q VrmcDriverFactory
+          plutil -lint "$bundle/Contents/Info.plist"
+          factory=$(plutil -extract CFPlugInTypes.ECDE9574-0FE4-11D4-BB1A-0050E4CEA526.0 raw -o - "$bundle/Contents/Info.plist")
+          plutil -extract "CFPlugInFactories.$factory" raw -o - "$bundle/Contents/Info.plist" | grep -qx VrmcDriverFactory
+          # Both architectures, or the driver silently does not load on one of
+          # them.
+          lipo -archs "$bundle/Contents/MacOS/VRMC" | tee /dev/stderr | grep -q arm64
+          lipo -archs "$bundle/Contents/MacOS/VRMC" | grep -q x86_64
+      # Tarred, not uploaded as a directory.
+      #
+      # upload-artifact zips whatever it is given, and a zip of the bundle
+      # *directory* arrives as a bare `Contents/` with the `VRMC.plugin` name
+      # gone, and with no guarantee the executable bit on Contents/MacOS/VRMC
+      # survives. Either would make MIDIServer ignore the plugin for a reason
+      # that has nothing to do with its signature — which is the one thing this
+      # spike exists to measure, so a false negative here would be worse than
+      # no result at all.
+      - name: Pack the bundle
+        run: tar -czf vrmc-coremidi-driver.tar.gz -C native/coremidi-driver/build VRMC.plugin
+      - uses: actions/upload-artifact@v4
+        with:
+          name: vrmc-coremidi-driver
+          path: vrmc-coremidi-driver.tar.gz
+          if-no-files-found: error
+
   # Builds the web image and proves it actually serves the client.
   #
   # The Dockerfile and the nginx config cannot be checked by a typecheck or a

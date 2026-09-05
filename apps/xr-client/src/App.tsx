@@ -1,15 +1,27 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { Canvas } from '@react-three/fiber';
 import type { WebGLRenderer } from 'three';
+import { DeviceModel } from '@vrmc/devices';
 import { Engine } from './Engine.js';
 import type { LaunchpadInstance } from './devices/LaunchpadInstance.js';
 import { Scene } from './Scene.js';
 import { Overlay } from './ui/Overlay.js';
 import type { LinkStatus } from './net/BridgeLink.js';
-import { detectSupport, isBlending, startSession, type XrSupport } from './xr/session.js';
+import type { LayoutState } from '@vrmc/protocol';
+import {
+  detectSupport,
+  isBlending,
+  startSession,
+  type XrMode,
+  type XrSupport,
+} from './xr/session.js';
 import { PairingError, resolvePairingCode } from './net/pairing.js';
 import { rtcTransport, webSocketTransport } from './net/Transport.js';
 import { KeypadController } from './ui/KeypadController.js';
+import { WristMenu, type WristMenuState } from './ui/WristMenu.js';
+import { Calibration, CALIBRATION_PROMPT, HITS_PER_STEP } from './ui/Calibration.js';
+import { preloadHands } from './xr/Hands.js';
+import type { DepthSensingState } from './xr/Occlusion.js';
 
 /**
  * Remember the pairing code between visits.
@@ -22,6 +34,30 @@ const CODE_STORAGE_KEY = 'vrmc.pairingCode';
 
 /** Remember a manually entered address, for the advanced path. */
 const URL_STORAGE_KEY = 'vrmc.bridgeUrl';
+
+/**
+ * Remember which room the player likes.
+ *
+ * Someone who works in the full room wants the full room the next time too,
+ * and the alternative is asking them to make the same choice at the start of
+ * every session — which is the kind of thing this project exists not to do.
+ */
+const MODE_STORAGE_KEY = 'vrmc.xrMode';
+
+/** Remember whether environment occlusion was asked for. */
+const DEPTH_STORAGE_KEY = 'vrmc.depthOcclusion';
+
+/** …and focus mode. */
+const FOCUS_STORAGE_KEY = 'vrmc.focus';
+
+/**
+ * The velocity curve fitted to whoever uses this headset.
+ *
+ * Local rather than on the bridge, deliberately: a layout describes a room
+ * and belongs with the computer that room is in, but a velocity curve
+ * describes a pair of hands and belongs with the headset those hands put on.
+ */
+const VELOCITY_STORAGE_KEY = 'vrmc.velocityCurve';
 
 /** Read a remembered value, tolerating storage being unavailable. */
 function recall(key: string): string {
@@ -65,7 +101,15 @@ export function App(): React.ReactElement {
   const [support, setSupport] = useState<XrSupport | null>(null);
   // The engine mutates its device array in place, which React cannot observe,
   // so it publishes a snapshot whenever the roster changes.
-  const [devices, setDevices] = useState<readonly LaunchpadInstance[]>([]);
+  //
+  // Seeded from the engine rather than from an empty array: the VRMC surface is
+  // created in the constructor, before this component can subscribe, so an
+  // empty initial state would leave it played but not drawn until the next
+  // change happened to publish one.
+  const [devices, setDevices] = useState<readonly LaunchpadInstance[]>(() => [
+    ...engine.launchpads,
+  ]);
+  const [layouts, setLayouts] = useState<LayoutState>(() => engine.layouts);
   const [pairingBusy, setPairingBusy] = useState(false);
   const [pairingNote, setPairingNote] = useState('');
   /** Name of the paired computer, once one is known. */
@@ -77,6 +121,29 @@ export function App(): React.ReactElement {
   const [status, setStatus] = useState<LinkStatus>(() => engine.link.status());
   const [sessionActive, setSessionActive] = useState(false);
   const [passthrough, setPassthrough] = useState(false);
+  /*
+   * Which room is showing. Not which session — see xr/session.ts and
+   * xr/Backdrop.tsx. This flips freely at any point, in or out of a session,
+   * and nothing about the link, the roster or a sounding note depends on it.
+   */
+  const [mode, setMode] = useState<XrMode>(() =>
+    recall(MODE_STORAGE_KEY) === 'immersive' ? 'immersive' : 'passthrough',
+  );
+  /*
+   * Environment occlusion, off unless asked for.
+   *
+   * The hand silhouette is not covered by this and is not optional — it is how
+   * passthrough is supposed to look. This is the room's own depth, which is
+   * best-effort on every runtime that has it. See xr/Occlusion.tsx.
+   */
+  const [depthOcclusion, setDepthOcclusion] = useState(
+    () => recall(DEPTH_STORAGE_KEY) === 'on',
+  );
+  const [depthState, setDepthState] = useState<DepthSensingState>('off');
+  /** Quiet everything around the instrument. See xr/FocusVignette.tsx. */
+  const [focus, setFocus] = useState(() => recall(FOCUS_STORAGE_KEY) === 'on');
+  /** What the wrist console is showing, so its labels can be redrawn. */
+  const [wristState, setWristState] = useState<WristMenuState | null>(null);
   const [error, setError] = useState('');
 
   useEffect(() => {
@@ -85,8 +152,19 @@ export function App(): React.ReactElement {
 
   useEffect(() => {
     engine.onDevicesChanged = () => setDevices([...engine.launchpads]);
+    // A grab changes what the roster should say about a device without changing
+    // which devices exist, so it publishes a fresh snapshot too.
+    engine.onGrabChanged = () => setDevices([...engine.launchpads]);
+    engine.onLayoutsChanged = () => setLayouts(engine.layouts);
+    // A drop that finds nothing has to say so: silence reads as a broken
+    // button, and «look around your desk for a moment» is something a person
+    // can actually act on.
+    engine.onAnchorFailed = (_deviceId, reason) => setError(reason);
     return () => {
       engine.onDevicesChanged = null;
+      engine.onGrabChanged = null;
+      engine.onLayoutsChanged = null;
+      engine.onAnchorFailed = null;
     };
   }, [engine]);
 
@@ -163,12 +241,33 @@ export function App(): React.ReactElement {
       renderer.xr.setReferenceSpaceType('local-floor');
       await renderer.xr.setSession(session);
 
+      // Both hand files, now rather than when the room is first entered: a
+      // hand that arrives three frames after you look for it is a hand you
+      // noticed arriving.
+      preloadHands();
+
       setSessionActive(true);
       setPassthrough(blending || isBlending(session));
       setError('');
       engine.onSessionStart(session);
 
-      const onInputSourcesChange = (): void => engine.tracker.syncInputSources(session);
+      /*
+       * The viewer space a hit test is cast from.
+       *
+       * Asked for once, here, because it is the session's to give and the
+       * engine deliberately knows nothing about XR plumbing. A runtime that
+       * refuses it leaves plane detection as the only route to a surface,
+       * which is a degradation rather than a failure.
+       */
+      void session
+        .requestReferenceSpace('viewer')
+        .then((viewerSpace) => engine.surfaces.ensureHitTest(session, viewerSpace))
+        .catch(() => {});
+
+      const onInputSourcesChange = (): void => {
+        engine.tracker.syncInputSources(session);
+        engine.skeleton.syncInputSources(session);
+      };
       session.addEventListener('inputsourceschange', onInputSourcesChange);
 
       session.addEventListener(
@@ -178,6 +277,7 @@ export function App(): React.ReactElement {
           // The session is gone but the notes it started are not: release them
           // before anything else, or the DAW holds them until it is restarted.
           engine.allNotesOff();
+          engine.drawHands = false;
           setSessionActive(false);
           setPassthrough(false);
         },
@@ -192,6 +292,88 @@ export function App(): React.ReactElement {
   }, [engine]);
 
   const handlePanic = useCallback(() => engine.allNotesOff(), [engine]);
+
+  /*
+   * The calibration this headset already has, if any.
+   *
+   * Applied before anything is played rather than when the routine next runs:
+   * somebody who calibrated yesterday should find their own curve today
+   * without being asked again.
+   */
+  useEffect(() => {
+    const stored = recall(VELOCITY_STORAGE_KEY);
+    if (stored === '') return;
+    try {
+      const fit = JSON.parse(stored) as { gamma: number; minSpeed: number; maxSpeed: number };
+      if ([fit.gamma, fit.minSpeed, fit.maxSpeed].every((v) => Number.isFinite(v))) {
+        engine.setVelocityFit(fit);
+      }
+    } catch {
+      // A stored curve that will not parse is one preset kept, which plays.
+    }
+  }, [engine]);
+
+  const calibration = useMemo(() => new Calibration(), []);
+  const [calibrating, setCalibrating] = useState(false);
+
+  /** True when every emulated device is pinned; drives the console's label. */
+  const allPinned = devices.length > 0 && devices.every((d) => d.pinned);
+
+  const handleFocus = useCallback((next: boolean) => {
+    setFocus(next);
+    remember(FOCUS_STORAGE_KEY, next ? 'on' : 'off');
+  }, []);
+
+  /*
+   * The guided routine, driven from the wrist.
+   *
+   * Every measured strike on any surface feeds it, so somebody calibrates on
+   * whichever instrument is in front of them rather than on a nominated one —
+   * and the prompts go in the console's own readout line, which is already
+   * read at the right distance. A second floating panel saying «hit five pads
+   * gently» would be a second thing to find while your hands are busy.
+   */
+  const startCalibration = useCallback(() => {
+    calibration.onChange = (state) => {
+      if (state.step !== null) {
+        const done = state.collected;
+        engine.wrist?.setNotice(
+          `${CALIBRATION_PROMPT[state.step]} (${done}/${HITS_PER_STEP})`,
+        );
+        return;
+      }
+      engine.listenForStrikes(null);
+      setCalibrating(false);
+      if (state.fit === null) {
+        engine.wrist?.setNotice(state.problem);
+        return;
+      }
+      engine.setVelocityFit(state.fit);
+      remember(VELOCITY_STORAGE_KEY, JSON.stringify(state.fit));
+      engine.wrist?.setNotice('Calibrated. Your soft, medium and hard now mean what you meant.');
+    };
+    setCalibrating(true);
+    calibration.start();
+    engine.listenForStrikes((speed) => calibration.record(speed));
+  }, [calibration, engine]);
+
+  const stopCalibration = useCallback(() => {
+    calibration.cancel();
+    engine.listenForStrikes(null);
+    setCalibrating(false);
+    engine.wrist?.setNotice('');
+  }, [calibration, engine]);
+
+
+  const handleMode = useCallback((next: XrMode) => {
+    setMode(next);
+    remember(MODE_STORAGE_KEY, next);
+  }, []);
+
+  const handleDepthOcclusion = useCallback((next: boolean) => {
+    setDepthOcclusion(next);
+    remember(DEPTH_STORAGE_KEY, next ? 'on' : 'off');
+  }, []);
 
   /**
    * Turn a pairing code into a live connection.
@@ -233,6 +415,108 @@ export function App(): React.ReactElement {
     },
     [engine],
   );
+
+  /*
+   * The console worn on the wrist.
+   *
+   * Built once and re-labelled as state changes, rather than rebuilt: it owns a
+   * poke detector and a highlighter, and throwing those away every time
+   * somebody toggles focus mode would drop whatever a finger was resting on.
+   *
+   * The actions here are the ones you want *while playing*, which is a
+   * different list from the setup page's: nothing about pairing, nothing about
+   * MIDI ports, and everything about the room you are standing in.
+   */
+  const wrist = useMemo(() => new WristMenu([]), []);
+
+  useEffect(() => {
+    engine.wrist = wrist;
+    wrist.onChange = setWristState;
+    setWristState(wrist.state);
+    return () => {
+      engine.wrist = null;
+      wrist.onChange = null;
+    };
+  }, [engine, wrist]);
+
+  // Kept in a ref so the item list — which is rebuilt whenever a label would
+  // change — does not have to be rebuilt whenever a *handler* changes.
+  const actions = useRef({ mode, focus, depthOcclusion });
+  actions.current = { mode, focus, depthOcclusion };
+
+  useEffect(() => {
+    wrist.setItems([
+      {
+        id: 'room',
+        label: () => (mode === 'immersive' ? 'ROOM · GALAXY' : 'ROOM · YOURS'),
+        live: () => mode === 'immersive',
+        run: () => handleMode(mode === 'immersive' ? 'passthrough' : 'immersive'),
+      },
+      {
+        id: 'focus',
+        label: () => (focus ? 'FOCUS · ON' : 'FOCUS · OFF'),
+        live: () => focus,
+        run: () => handleFocus(!focus),
+      },
+      /*
+       * One row per instrument rather than a single "+ DEVICE" that cycles.
+       *
+       * The menu is read at arm's length, mid-session, by someone who already
+       * knows which instrument they want — so naming them costs two rows and
+       * saves guessing what the next press will produce.
+       */
+      {
+        id: 'add-launchpad',
+        label: () => '+ LAUNCHPAD',
+        run: () => {
+          engine.addDevice(DeviceModel.LAUNCHPAD_X);
+        },
+      },
+      {
+        id: 'add-launchkey',
+        label: () => '+ KEYBOARD',
+        run: () => {
+          engine.addDevice(DeviceModel.LAUNCHKEY_MK3_49);
+        },
+      },
+      {
+        id: 'add-vrmc',
+        label: () => '+ VRMC',
+        run: () => {
+          engine.addDevice(DeviceModel.VRMC);
+        },
+      },
+      {
+        id: 'pin',
+        label: () => (allPinned ? 'UNPIN ALL' : 'PIN ALL'),
+        live: () => allPinned,
+        run: () => {
+          for (const device of engine.launchpads) engine.pinDevice(device.deviceId, !allPinned);
+        },
+      },
+      {
+        id: 'surface',
+        label: () => 'DROP TO DESK',
+        run: () => {
+          for (const device of engine.launchpads) engine.dropToSurface(device.deviceId);
+        },
+      },
+      {
+        id: 'calibrate',
+        label: () => (calibrating ? 'STOP' : 'CALIBRATE'),
+        live: () => calibrating,
+        run: () => (calibrating ? stopCalibration() : startCalibration()),
+      },
+    ]);
+    // Labels are captured by value here, so the list is rebuilt whenever one of
+    // them would read differently — which is at human speed.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [wrist, mode, focus, allPinned, calibrating]);
+
+  // The link's own figures, at the rate they are readable rather than per frame.
+  useEffect(() => {
+    wrist.setLink(status.rttMs, status.quality);
+  }, [wrist, status.rttMs, status.quality]);
 
   /*
    * The keypad the user types a code on with their hands.
@@ -320,7 +604,15 @@ export function App(): React.ReactElement {
         // It still has to frame the instruments, or the page looks broken
         // before you put the headset on: aimed straight down -Z from standing
         // height, the panels sit below the frustum and nothing is visible.
-        camera={{ fov: 60, near: 0.01, far: 20, position: PREVIEW_CAMERA }}
+        /*
+         * far reaches 100 m because the galaxy's far field lives between 26
+         * and 60 (see xr/galaxy.ts). At 20 that shell was not dimmed but
+         * clipped, in the projection, before any depth test ran. The precision
+         * cost is nil at the range that matters: with near at 1 cm the depth
+         * buffer still resolves to about a micron half a metre out, and the
+         * pads are five millimetres apart.
+         */
+        camera={{ fov: 60, near: 0.01, far: 100, position: PREVIEW_CAMERA }}
         onCreated={({ gl, scene, camera }) => {
           rendererRef.current = gl;
           gl.setClearAlpha(0);
@@ -334,6 +626,12 @@ export function App(): React.ReactElement {
         <Scene
           engine={engine}
           devices={devices}
+          mode={mode}
+          depthOcclusion={depthOcclusion}
+          focus={focus}
+          onDepthState={setDepthState}
+          wrist={wrist}
+          wristState={wristState}
           keypad={
             keypadVisible
               ? {
@@ -359,9 +657,20 @@ export function App(): React.ReactElement {
         onConnect={handleConnect}
         onEnterXR={() => void handleEnterXR()}
         onPanic={handlePanic}
+        mode={mode}
+        onModeChange={handleMode}
+        depthOcclusion={depthOcclusion}
+        onDepthOcclusionChange={handleDepthOcclusion}
+        depthState={depthState}
         devices={devices}
         onAddDevice={(model) => engine.addDevice(model)}
         onRemoveDevice={(id) => engine.removeDevice(id)}
+        onPinDevice={(id, pinned) => engine.pinDevice(id, pinned)}
+        onDropDevice={(id) => engine.dropToSurface(id)}
+        layouts={layouts}
+        onSaveLayout={(name) => engine.saveLayout(name)}
+        onApplyLayout={(name) => engine.applyLayout(name)}
+        onDeleteLayout={(name) => engine.deleteLayout(name)}
         onPair={(code) => void handlePair(code)}
         pairingBusy={pairingBusy}
         pairingNote={pairingNote}

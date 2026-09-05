@@ -65,3 +65,79 @@ export function clamp14(v: number): number {
   const n = v | 0;
   return n < 0 ? 0 : n > 16383 ? 16383 : n;
 }
+
+/* ---- Fitting the curve to a particular pair of hands --------------------- */
+
+/**
+ * The three strikes a calibration asks for, as peak approach speeds in m/s.
+ */
+export interface VelocitySamples {
+  soft: number;
+  medium: number;
+  hard: number;
+}
+
+/** A curve fitted to one person, as `speedToVelocity` takes it. */
+export interface VelocityFit {
+  minSpeed: number;
+  maxSpeed: number;
+  gamma: number;
+}
+
+/** Where a medium strike should land. Mezzo-forte, the middle of the range. */
+const MEDIUM_TARGET = 80;
+
+/**
+ * Bounds on the fitted exponent.
+ *
+ * Outside these the curve stops being a curve: below 0.2 almost any contact
+ * reaches full velocity, above 3 nothing but a slam does. A fit that wants a
+ * number outside the band is a fit built on bad samples, and clamping it is
+ * kinder than accepting an instrument that only plays one dynamic.
+ */
+const GAMMA_RANGE = { low: 0.2, high: 3 } as const;
+
+/**
+ * Fit the velocity curve to how somebody actually hits a pad.
+ *
+ * `VelocityCurve`'s presets are a guess at an average hand, and hand tracking
+ * makes the spread between people much wider than it is on hardware: there is
+ * no physical surface to stop against, so how fast a finger is travelling when
+ * it crosses the plane is a matter of personal style rather than of the
+ * instrument. Somebody who plays lightly can be a factor of three below
+ * somebody who does not, and both of them find the presets wrong in opposite
+ * directions.
+ *
+ * Three strikes are enough because the shape has three degrees of freedom and
+ * each sample pins one: soft sets the floor, hard sets the ceiling, and medium
+ * decides how the range in between is distributed.
+ *
+ * Returns null when the samples do not describe a usable range — the strikes
+ * were not in order, or two of them were effectively the same hit. A refusal
+ * here is a preset kept, which is a working instrument; a fit forced out of bad
+ * samples is one that plays nothing but ghost notes.
+ */
+export function fitVelocityCurve(samples: VelocitySamples): VelocityFit | null {
+  const { soft, medium, hard } = samples;
+  if (![soft, medium, hard].every((v) => Number.isFinite(v) && v > 0)) return null;
+  // Strictly increasing, with enough of a gap to have meant something. Two
+  // strikes within 5 cm/s of each other are the same strike as far as anybody's
+  // hand is concerned.
+  if (!(soft + 0.05 <= medium && medium + 0.05 <= hard)) return null;
+
+  const span = hard - soft;
+  if (span < 0.15) return null;
+
+  const t = (medium - soft) / span;
+  if (!(t > 0.02 && t < 0.98)) return null;
+
+  const target = (MEDIUM_TARGET - 1) / 126;
+  const gamma = Math.log(target) / Math.log(t);
+  if (!Number.isFinite(gamma)) return null;
+
+  return {
+    minSpeed: soft,
+    maxSpeed: hard,
+    gamma: Math.min(GAMMA_RANGE.high, Math.max(GAMMA_RANGE.low, gamma)),
+  };
+}

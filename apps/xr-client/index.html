@@ -5,8 +5,52 @@
     <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
     <title>VRMC — Mixed Reality MIDI Controller</title>
     <meta name="description" content="Play virtual MIDI pads and keys in passthrough on Quest 3." />
-    <!-- Inline empty icon: suppresses the browser's automatic /favicon.ico request. -->
-    <link rel="icon" href="data:," />
+    <meta name="theme-color" content="#f2f0eb" />
+    <link rel="icon" href="/brand/EION_Simbolo_Tinta.svg" type="image/svg+xml" />
+    <script>
+      /*
+       * The theme, before the first paint.
+       *
+       * This has to run here rather than in a module: a module is deferred, so
+       * by the time it executes the browser has already painted — and someone
+       * who asked for dark would watch the page open bone-white and then cross
+       * to Sumi, which is precisely the abrupt change the identity forbids.
+       *
+       * Keep in step with src/brand/theme.ts: the storage key and both dataset
+       * names are the contract between the two, and the module adopts whatever
+       * this decided rather than deciding again.
+       */
+      (function () {
+        try {
+          var pref = localStorage.getItem('vrmc.theme');
+          if (pref !== 'light' && pref !== 'dark' && pref !== 'system') pref = 'system';
+          var theme =
+            pref === 'system'
+              ? window.matchMedia('(prefers-color-scheme: dark)').matches
+                ? 'dark'
+                : 'light'
+              : pref;
+          var root = document.documentElement;
+          root.dataset.theme = theme;
+          root.dataset.themePref = pref;
+          var meta = document.querySelector('meta[name="theme-color"]');
+          if (meta) meta.setAttribute('content', theme === 'dark' ? '#0b0b0c' : '#f2f0eb');
+          /*
+           * `data-theme-ready` is what arms the crossing in brand/theme.css, and
+           * it is set on the next frame rather than now. Set here it would be
+           * present for the first paint, and the tokens would animate out of
+           * their @property initial values — the page would open by fading in
+           * from the light theme even for someone who asked for dark.
+           */
+          requestAnimationFrame(function () {
+            root.setAttribute('data-theme-ready', '');
+          });
+        } catch (e) {
+          /* Storage disabled. The stylesheet's own default is the light theme,
+             which is the right thing to show when nothing can be remembered. */
+        }
+      })();
+    </script>
   </head>
   <body>
     <div id="root"></div>

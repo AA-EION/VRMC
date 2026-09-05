@@ -144,6 +144,54 @@ describe('dashboard', () => {
     expect(() => new Function(script)).not.toThrow();
   });
 
+  it('offers both appearances, and lets the system pick', () => {
+    /*
+     * It declared `color-scheme: dark` and a single near-black palette, which
+     * on a Mac set to Light was a dark rectangle in a light window — and the
+     * accent, a pale cyan chosen to glow on near-black, had almost no contrast
+     * against a white card.
+     */
+    const html = dashboardHtml();
+    expect(html).toContain('color-scheme: light dark');
+    expect(html).not.toContain('color-scheme: dark;');
+  });
+
+  it('leaves no colour hard-coded outside the token block', () => {
+    /*
+     * A hex anywhere else is a colour that cannot follow the appearance, and
+     * the three that were there — the inset code background and the button's
+     * two states — were exactly the unreadable ones in Light.
+     *
+     * The icon is excluded deliberately: it is a data: URI drawn on its own
+     * dark tile, the same in both appearances by design, the way an app icon
+     * is.
+     */
+    const html = dashboardHtml();
+    const css = html.slice(html.indexOf('<style>'), html.indexOf('</style>'));
+    const tokens = css.slice(css.indexOf(':root'), css.indexOf('* { box-sizing'));
+    const outside = css.replace(tokens, '');
+    expect(outside).not.toMatch(/#[0-9a-fA-F]{6}\b/);
+  });
+
+  it('gives every colour a different value in each appearance', () => {
+    /*
+     * A colour legible on black is generally not legible on white, so no token
+     * may use one value for both.
+     *
+     * A first version of this matched the accent against a regex that a
+     * `light-dark(x, x)` pair satisfied perfectly well — it pinned the shape
+     * and not the point. Comparing the two halves is the actual property.
+     */
+    const html = dashboardHtml();
+    const pairs = [...html.matchAll(/--([a-z-]+): light-dark\(([^,]+), ([^)]+)\)/g)];
+    expect(pairs.length).toBeGreaterThanOrEqual(8);
+    for (const [, name, light, dark] of pairs) {
+      expect(light!.trim(), `--${name!} is the same in both appearances`).not.toBe(
+        dark!.trim(),
+      );
+    }
+  });
+
   it('keeps backslashes out of the inline script, which cannot carry them', () => {
     const html = dashboardHtml();
     const script = html.slice(

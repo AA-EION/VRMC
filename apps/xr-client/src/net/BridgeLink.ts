@@ -5,11 +5,21 @@ import {
   PacketWriter,
   MAX_EVENTS_PER_PACKET,
   readDeviceState,
+  readDeviceText,
+  readLayoutState,
   readLedUpdate,
+  readLinkStats,
   writeDeviceAdd,
+  writeDevicePose,
   writeDeviceRemove,
+  writeLayoutName,
+  writeLayoutSave,
+  type DevicePlacement,
   type DeviceStateEntry,
+  type Layout,
+  type LayoutState,
   type LedVisitor,
+  type LinkQuality,
 } from '@vrmc/protocol';
 import type { Transport, TransportFactory } from './Transport.js';
 
@@ -29,6 +39,14 @@ export interface LinkStatus {
   /** Where the link points, for display. */
   url: string;
   lastError: string;
+  /**
+   * What the bridge sees from its end, or null before the first push.
+   *
+   * Round trip above is measured here; jitter and loss are not measurable here
+   * at all. They are the variation in transit time and the gaps in the sequence
+   * number, both of which only exist where the packets land.
+   */
+  quality: LinkQuality | null;
 }
 
 /**
@@ -85,6 +103,7 @@ export class BridgeLink {
   private eventsSent = 0;
   private eventsDropped = 0;
   private lastError = '';
+  private quality: LinkQuality | null = null;
 
   /** Whether a packet is currently accumulating events. */
   private batching = false;
@@ -104,6 +123,12 @@ export class BridgeLink {
 
   /** Called when the bridge reports its device roster. */
   onDevices: ((devices: DeviceStateEntry[]) => void) | null = null;
+
+  /** Called when the bridge reports its stored arrangements. */
+  onLayouts: ((state: LayoutState) => void) | null = null;
+
+  /** Called when the DAW sends a device text to display. */
+  onDeviceText: ((deviceId: number, text: string) => void) | null = null;
 
   /** Bound once, so decoding an LED packet allocates nothing. */
   private readonly ledVisitor: LedVisitor;
@@ -130,6 +155,7 @@ export class BridgeLink {
       eventsDropped: this.eventsDropped,
       url: this.label,
       lastError: this.lastError,
+      quality: this.quality,
     };
   }
 
@@ -214,6 +240,24 @@ export class BridgeLink {
       case PacketKind.DEVICE_STATE: {
         // Roster changes are rare and human-paced, so allocating here is fine.
         this.onDevices?.(readDeviceState(this.reader.bodyView()));
+        return;
+      }
+      case PacketKind.DEVICE_TEXT: {
+        const message = readDeviceText(this.reader.bodyView());
+        if (message !== null) this.onDeviceText?.(message.deviceId, message.text);
+        return;
+      }
+      case PacketKind.LAYOUT_STATE: {
+        this.onLayouts?.(readLayoutState(this.reader.bodyView()));
+        return;
+      }
+      case PacketKind.LINK_STATS: {
+        const quality = readLinkStats(this.reader.bodyView());
+        if (quality === null) return;
+        this.quality = quality;
+        // Once a second, so this is a status push rather than a frame-path
+        // cost — which is why it is allowed to allocate and to notify.
+        this.notify();
         return;
       }
       default:
@@ -319,6 +363,53 @@ export class BridgeLink {
     const w = this.controlWriter;
     w.begin(PacketKind.DEVICE_ADD);
     if (!writeDeviceAdd(w, deviceId, model)) return false;
+    transport.send(w.finish(performance.now()));
+    return true;
+  }
+
+  /**
+   * Tell the bridge where a device now is.
+   *
+   * Sent when a grab settles rather than per frame. A hand moving an instrument
+   * produces a new pose ninety times a second and the bridge needs exactly one
+   * of them — the last — so this is called by the release, not by the drag.
+   */
+  sendDevicePose(placement: DevicePlacement): boolean {
+    const transport = this.transport;
+    if (transport === null || !transport.isOpen) return false;
+    const w = this.controlWriter;
+    w.begin(PacketKind.DEVICE_POSE);
+    if (!writeDevicePose(w, placement)) return false;
+    transport.send(w.finish(performance.now()));
+    return true;
+  }
+
+  /** Store the current arrangement under a name. */
+  saveLayout(layout: Layout): boolean {
+    return this.sendLayout(PacketKind.LAYOUT_SAVE, (w) => writeLayoutSave(w, layout));
+  }
+
+  /** Forget a stored arrangement. */
+  deleteLayout(name: string): boolean {
+    return this.sendLayout(PacketKind.LAYOUT_DELETE, (w) => writeLayoutName(w, name));
+  }
+
+  /**
+   * Record which arrangement is now in use.
+   *
+   * The headset has already applied it; this is what lets the next connection
+   * hand back the same one.
+   */
+  applyLayout(name: string): boolean {
+    return this.sendLayout(PacketKind.LAYOUT_APPLY, (w) => writeLayoutName(w, name));
+  }
+
+  private sendLayout(kind: number, fill: (w: PacketWriter) => boolean): boolean {
+    const transport = this.transport;
+    if (transport === null || !transport.isOpen) return false;
+    const w = this.controlWriter;
+    w.begin(kind);
+    if (!fill(w)) return false;
     transport.send(w.finish(performance.now()));
     return true;
   }

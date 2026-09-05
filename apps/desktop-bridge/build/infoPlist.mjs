@@ -3,6 +3,18 @@
 import { MACOS_DEPLOYMENT_TARGET } from '../native/target.mjs';
 
 /**
+ * The bundle's main executable, named here because two things need to agree.
+ *
+ * `CFBundleExecutable` below is one of them. The other is signing: `codesign`
+ * on the *path* of a bundle's main executable does not sign that file, it signs
+ * the enclosing bundle — so a signing plan that treats it as one more nested
+ * binary signs the whole bundle halfway through, before the nested code is
+ * done. Exported rather than written twice, because the failure when these
+ * drift is a bundle that signs and then does not verify.
+ */
+export const BUNDLE_EXECUTABLE = 'vrmc-bridge';
+
+/**
  * The app bundle's Info.plist.
  *
  * Its own module because it is the one part of packaging with no build step to
@@ -22,7 +34,7 @@ export function infoPlist(version) {
   <key>CFBundleVersion</key><string>${version}</string>
   <key>CFBundleShortVersionString</key><string>${version}</string>
   <key>CFBundlePackageType</key><string>APPL</string>
-  <key>CFBundleExecutable</key><string>vrmc-bridge</string>
+  <key>CFBundleExecutable</key><string>${BUNDLE_EXECUTABLE}</string>
   <key>CFBundleIconFile</key><string>vrmc.icns</string>
   <key>LSMinimumSystemVersion</key><string>${MACOS_DEPLOYMENT_TARGET}</string>
   <!--

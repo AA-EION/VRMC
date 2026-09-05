@@ -1,32 +1,60 @@
 #!/usr/bin/env node
-import { networkInterfaces } from 'node:os';
+import { networkInterfaces } from "node:os";
 import {
   DeviceId,
   DeviceStatus,
   FIRST_DYNAMIC_DEVICE_ID,
   isPrivateAddress,
-} from '@vrmc/protocol';
-import { ArgError, parseArgs, USAGE, type BridgeConfig } from './config.js';
-import { Router } from './core/Router.js';
-import { checkNativeModules, formatChecks } from './core/selfCheck.js';
-import { BRIDGE_VERSION, runSelfTest } from './core/selfTest.js';
-import { autostartState, toggleAutostart } from './setup/autostart.js';
-import { runFirstLaunch } from './setup/firstRun.js';
-import { ensureCertificate } from './setup/certificate.js';
-import { PairingPublisher } from './setup/pairing.js';
-import { copyToClipboard, openUrl } from './tray/desktop.js';
-import { buildMenu, buildTooltip, TrayAction, type TrayState } from './tray/menu.js';
-import { TrayController } from './tray/TrayController.js';
-import { DEFAULT_PORT_NAME_TEMPLATE, DeviceManager } from './devices/DeviceManager.js';
-import { listPorts } from './midi/openPort.js';
-import { Broadcaster } from './net/Broadcaster.js';
-import { RtcTransport } from './net/RtcTransport.js';
-import { SignalClient } from './net/SignalClient.js';
-import { UdpServer } from './net/UdpServer.js';
-import { WsServer } from './net/WsServer.js';
+} from "@vrmc/protocol";
+import { DeviceModel } from "@vrmc/devices";
+import { ArgError, parseArgs, USAGE, type BridgeConfig } from "./config.js";
+import { Router } from "./core/Router.js";
+import { loadWorkspace, saveWorkspace } from "./core/workspaceFile.js";
+import {
+  checkEndpointIdentity,
+  checkNativeModules,
+  formatChecks,
+} from "./core/selfCheck.js";
+import { BRIDGE_VERSION, runSelfTest } from "./core/selfTest.js";
+import { autostartState, toggleAutostart } from "./setup/autostart.js";
+import { runFirstLaunch } from "./setup/firstRun.js";
+import { ensureCertificate } from "./setup/certificate.js";
+import { PairingPublisher } from "./setup/pairing.js";
+import { copyToClipboard, openUrl } from "./tray/desktop.js";
+import {
+  buildMenu,
+  type DriverState,
+  buildTooltip,
+  TrayAction,
+  type TrayState,
+} from "./tray/menu.js";
+import { spawn } from "node:child_process";
+import { findDashboard } from "./tray/helperPath.js";
+import { TrayController } from "./tray/TrayController.js";
+import {
+  DEFAULT_PORT_NAME_TEMPLATE,
+  DeviceManager,
+} from "./devices/DeviceManager.js";
+import { PresenceGate } from "./core/PresenceGate.js";
+import { listPorts, openBidirectionalPort } from "./midi/openPort.js";
+import { DriverLink } from "./midi/DriverLink.js";
+import { DriverPorts, driverAwareOpener } from "./midi/DriverPort.js";
+import {
+  bundledDriver,
+  currentDriverState,
+  installDriver,
+  uninstallDriver,
+} from "./midi/driverInstall.js";
+import { Broadcaster } from "./net/Broadcaster.js";
+import { RtcTransport } from "./net/RtcTransport.js";
+import { SignalClient } from "./net/SignalClient.js";
+import { UdpServer } from "./net/UdpServer.js";
+import { WsServer } from "./net/WsServer.js";
 
 const log = (message: string): void => {
-  process.stdout.write(`${new Date().toISOString().slice(11, 23)}  ${message}\n`);
+  process.stdout.write(
+    `${new Date().toISOString().slice(11, 23)}  ${message}\n`,
+  );
 };
 
 /**
@@ -37,18 +65,19 @@ const log = (message: string): void => {
  * what the user needs, since the Quest connects over the LAN, never loopback.
  */
 function reachableAddresses(host: string): string[] {
-  if (host !== '0.0.0.0' && host !== '::') return [host];
+  if (host !== "0.0.0.0" && host !== "::") return [host];
   const out: string[] = [];
   for (const addresses of Object.values(networkInterfaces())) {
     for (const address of addresses ?? []) {
-      if (address.family === 'IPv4' && !address.internal) out.push(address.address);
+      if (address.family === "IPv4" && !address.internal)
+        out.push(address.address);
     }
   }
-  return out.length > 0 ? out : ['127.0.0.1'];
+  return out.length > 0 ? out : ["127.0.0.1"];
 }
 
 async function main(): Promise<void> {
-  let config: BridgeConfig | 'help';
+  let config: BridgeConfig | "help";
   try {
     config = parseArgs(process.argv.slice(2));
   } catch (err) {
@@ -59,7 +88,7 @@ async function main(): Promise<void> {
     throw err;
   }
 
-  if (config === 'help') {
+  if (config === "help") {
     process.stdout.write(USAGE);
     return;
   }
@@ -73,24 +102,71 @@ async function main(): Promise<void> {
    */
   if (config.check) {
     const checks = checkNativeModules();
+    // On macOS this opens a probe port and round-trips the identity through
+    // CoreMIDI, which is the only place that can be verified — see
+    // core/selfCheck.ts. Elsewhere it returns null and nothing is added.
+    const identity = await checkEndpointIdentity();
+    if (identity !== null) checks.push(identity);
     const { lines, ok } = formatChecks(checks);
-    process.stdout.write(`vrmc-bridge ${BRIDGE_VERSION} (${process.platform}-${process.arch})\n`);
-    process.stdout.write(`${lines.join('\n')}\n`);
+    process.stdout.write(
+      `vrmc-bridge ${BRIDGE_VERSION} (${process.platform}-${process.arch})\n`,
+    );
+    process.stdout.write(`${lines.join("\n")}\n`);
     if (!ok) {
       process.stdout.write(
-        '\nThis build is missing a native library and cannot work.\n' +
-          'Re-download it, or report this with the lines above.\n',
+        "\nThis build is missing a native library and cannot work.\n" +
+          "Re-download it, or report this with the lines above.\n",
       );
     }
     process.exit(ok ? 0 : 1);
+  }
+
+  /*
+   * Install or remove the driver, then exit.
+   *
+   * Ahead of anything that opens ports, for the same reason `--check` is: this
+   * is about the machine's MIDI setup rather than about running a session, and
+   * MIDIServer is restarted as part of it.
+   */
+  if (config.driverAction !== "none") {
+    const result =
+      config.driverAction === "uninstall"
+        ? await uninstallDriver()
+        : await (async () => {
+            const source = await bundledDriver();
+            if (source === null) {
+              return {
+                ok: false,
+                scope: "user" as const,
+                path: "",
+                notes: [
+                  "this build has no CoreMIDI driver bundled with it",
+                  "builds that do carry it as VRMC.plugin in the app's Resources",
+                ],
+              };
+            }
+            return installDriver({
+              source,
+              scope:
+                config.driverAction === "install-system" ? "system" : "user",
+            });
+          })();
+
+    process.stdout.write(
+      `${result.ok ? "ok" : "failed"}  ${result.path || "CoreMIDI driver"}
+`,
+    );
+    for (const note of result.notes) process.stdout.write(`  ${note}
+`);
+    process.exit(result.ok ? 0 : 1);
   }
 
   if (config.listPorts) {
     const ports = await listPorts();
     process.stdout.write(
       ports.length > 0
-        ? `MIDI outputs:\n${ports.map((p, i) => `  [${i}] ${p}`).join('\n')}\n`
-        : 'No MIDI output ports found.\n',
+        ? `MIDI outputs:\n${ports.map((p, i) => `  [${i}] ${p}`).join("\n")}\n`
+        : "No MIDI output ports found.\n",
     );
     return;
   }
@@ -99,10 +175,79 @@ async function main(): Promise<void> {
   // router because it is built from the router's stats.
   let broadcast: Broadcaster | null = null;
 
+  /*
+   * Where everything sits, restored from the last run.
+   *
+   * Read before any device is opened, so the roster that goes out on the first
+   * connection already carries each device's placement and the headset never
+   * shows a Launchpad at its default pose and then moves it.
+   *
+   * Writes are debounced. A grab produces a placement per settled move, and
+   * writing the file on each one would put a synchronous disk write on the path
+   * of somebody dragging an instrument around.
+   */
+  const workspace = loadWorkspace();
+  let saveTimer: NodeJS.Timeout | null = null;
+  workspace.onChange = () => {
+    broadcast?.sendLayouts(workspace.state());
+    broadcast?.sendRoster(devices.roster());
+    if (saveTimer !== null) clearTimeout(saveTimer);
+    saveTimer = setTimeout(() => {
+      saveTimer = null;
+      if (!saveWorkspace(workspace)) log("could not write the workspace file");
+    }, 1000);
+    saveTimer.unref();
+  };
+
+  /*
+   * The link to the CoreMIDI driver, if one is installed.
+   *
+   * Started unconditionally on macOS rather than only when the driver is
+   * present: the driver is installed and removed while the bridge runs — from
+   * the tray menu, in this very process — and a listener that was only opened
+   * when a driver existed at startup would leave the newly installed one
+   * connecting to nothing until a restart.
+   *
+   * Never fatal. Every failure here means MIDI goes out through virtual ports
+   * instead, which is what it did before the driver existed.
+   */
+  // The two refer to each other — the link delivers into the ports, the ports
+  // send through the link — so one of them has to be built first and told about
+  // the other. The closure is only ever called from a socket callback, which is
+  // a later turn of the event loop than the assignment below.
+  let driverPorts: DriverPorts | null = null;
+  const driverLink = new DriverLink({
+    onMidi: (port, data) => driverPorts?.deliver(port, data),
+    onConnected: (connected) => {
+      log(
+        connected
+          ? "the CoreMIDI driver is connected; its device carries MIDI now"
+          : "the CoreMIDI driver went away; new ports will be virtual",
+      );
+      refreshTray();
+    },
+    onLog: log,
+  });
+  driverPorts = new DriverPorts(driverLink);
+  if (process.platform === "darwin") {
+    try {
+      await driverLink.start();
+    } catch (err) {
+      log(
+        `could not listen for the CoreMIDI driver (${err instanceof Error ? err.message : String(err)});` +
+          " MIDI will use virtual ports",
+      );
+    }
+  }
+
   const devices = new DeviceManager(
     {
       onLed: (deviceId, ledIndex, r, g, b, blink) => {
         broadcast?.queueLed(deviceId, ledIndex, r, g, b, blink);
+      },
+      onText: (deviceId, text) => {
+        broadcast?.sendDeviceText(deviceId, text);
+        log(`[device ${deviceId}] display: ${text}`);
       },
       onRosterChange: () => broadcast?.sendRoster(devices.roster()),
       onLog: log,
@@ -111,38 +256,76 @@ async function main(): Promise<void> {
       noMidi: config.noMidi,
       loopbackPattern: config.loopbackPattern,
       portNameTemplate: config.portNameTemplate,
+      plainPortName: config.portName,
+      // Decided per port, not once at startup: MIDIServer loads the driver on
+      // demand and exits when idle, so whether it is there right now changes
+      // minute to minute.
+      openPort: driverAwareOpener(driverPorts, driverLink, openBidirectionalPort),
+      placementOf: (deviceId) => workspace.placementOf(deviceId),
     },
   );
 
-  // The original surfaces are one plain MIDI port with no hardware identity,
-  // created up front so they behave exactly as they did before Launchpads
-  // existed. Pads, keys and knobs share it and are told apart by their event
-  // ids. Emulated hardware is spawned on demand from the headset instead.
-  await devices.add(DeviceId.PADS, config.portName);
-  devices.alias(DeviceId.KEYS, DeviceId.PADS);
-  devices.alias(DeviceId.KNOBS, DeviceId.PADS);
+  /*
+   * The session's own devices, opened when a headset arrives rather than now.
+   *
+   * These used to be created here, at startup, and closed only on SIGINT. That
+   * is why a Mac with the bridge merely running listed a Launchpad X in every
+   * DAW: a virtual MIDI port is published system-wide the instant it opens, so
+   * an unattended one is an instrument in somebody's dropdown that nobody can
+   * play. They now come and go with the headset — see core/PresenceGate.ts for
+   * why departure is delayed and arrival is not.
+   *
+   * The first is the VRMC surface: keys, pads and knobs on one plain port with
+   * no hardware identity. It used to be three device ids aliased onto one
+   * port, because on the headset it was three panels wired into the engine
+   * rather than a device — which meant it could not be moved, pinned, anchored,
+   * saved in a layout or put away, and a player who only wanted a Launchpad had
+   * it in the room regardless. It is now one device on one id, spawned and
+   * removed like any other, and the aliases are gone with the panels.
+   *
+   * It is still an anonymous port, deliberately. A DAW has no script matching
+   * "VRMC", so it appears as a nameless keyboard with nothing to bind — which
+   * is honest. A Launchpad X is emulated closely enough that Ableton loads its
+   * own control-surface script: the port names match, the Device Inquiry reply
+   * carries the family code the script checks for, and the LED SysEx it sends
+   * is understood. `HARDWARE_MODELS` is what separates the two.
+   *
+   * The second is emulated hardware, and only if `--startup-device` asks for
+   * it. Not the same device as the surface above: that one sends plain note
+   * numbers, while a Launchpad's controls are XY indices through the emulator,
+   * and routing one into the other would light the wrong pads. It keeps the
+   * first dynamic id, so the roster the headset receives is indistinguishable
+   * from one it spawned itself.
+   */
+  const openSessionDevices = async (): Promise<void> => {
+    await devices.add(DeviceId.PADS, DeviceModel.VRMC);
+    if (config.startupDevice !== "none") {
+      await devices.add(FIRST_DYNAMIC_DEVICE_ID, config.startupDevice);
+    }
+  };
+
+  const presence = new PresenceGate({
+    graceMs: config.portGraceMs,
+    onOpen: openSessionDevices,
+    onClose: () => devices.removeAll(),
+    onLog: log,
+  });
 
   /*
-   * And one piece of emulated hardware, open before anyone puts the headset on.
+   * Every transport reports its client count here.
    *
-   * The port above is anonymous. A DAW has no script that matches "VRMC", so
-   * it appears as a nameless keyboard: no session grid, no lights, nothing to
-   * bind. The device below is a Launchpad X, emulated closely enough that
-   * Ableton loads its own control-surface script — the port names match, the
-   * Device Inquiry reply carries the family code the script checks for, and
-   * the LED SysEx it sends is understood.
+   * The sum is what matters — a headset on WebRTC and the dashboard on the
+   * WebSocket are two clients of one session — so the gate is told the total
+   * rather than which transport changed.
    *
-   * Not an alias of the surfaces above: those send plain note numbers, while a
-   * Launchpad's controls are XY indices through the emulator, and routing one
-   * into the other would light the wrong pads. It is a separate device, which
-   * is what it is on a desk too.
-   *
-   * It keeps the first dynamic id, so the roster the headset receives is
-   * indistinguishable from one it spawned itself, and the headset draws it.
+   * The resync waits for the open: the roster is what tells a headset what to
+   * draw, and one sent before the ports exist describes an empty room.
    */
-  if (config.startupDevice !== 'none') {
-    await devices.add(FIRST_DYNAMIC_DEVICE_ID, config.startupDevice);
-  }
+  const clientsChanged = (): void => {
+    void presence.update(bus.clientCount).then(() => {
+      if (bus.clientCount > 0) resyncHeadset();
+    });
+  };
 
   /*
    * Bring a headset that has just arrived up to date.
@@ -162,6 +345,10 @@ async function main(): Promise<void> {
     const bus = broadcast;
     if (bus === null) return;
     bus.sendRoster(devices.roster());
+    // The arrangements too. Restoring one on reconnect is the whole reason
+    // they are stored on this side, and a roster without them would have the
+    // headset place everything and then be told to place it again.
+    bus.sendLayouts(workspace.state());
     for (const entry of devices.roster()) {
       devices.forEachLed(entry.deviceId, (ledIndex, r, g, b, blink) => {
         bus.queueLed(entry.deviceId, ledIndex, r, g, b, blink);
@@ -169,21 +356,28 @@ async function main(): Promise<void> {
     }
   };
 
-  const router = new Router(devices, {
-    onPanic: (released) => log(`panic: released ${released} note(s)`),
-    onHello: (name) => {
-      log(`client identified as "${name}"`);
-      // The client saying hello is the only signal a WebSocket connection
-      // gives that it is ready to be told anything.
-      resyncHeadset();
+  const router = new Router(
+    devices,
+    {
+      onPanic: (released) => log(`panic: released ${released} note(s)`),
+      onHello: (name) => {
+        log(`client identified as "${name}"`);
+        // The client saying hello is the only signal a WebSocket connection
+        // gives that it is ready to be told anything.
+        resyncHeadset();
+      },
+      onBye: () => log("client said goodbye"),
+      onRosterChange: () => broadcast?.sendRoster(devices.roster()),
+      onPong: () => broadcast?.notePong(),
+      // Rate-limited by the caller below; a flood of malformed packets should not
+      // itself become the thing that stalls the process.
+      onMalformed: throttle(
+        (reason) => log(`dropped malformed packet: ${reason}`),
+        1000,
+      ),
     },
-    onBye: () => log('client said goodbye'),
-    onRosterChange: () => broadcast?.sendRoster(devices.roster()),
-    onPong: () => broadcast?.notePong(),
-    // Rate-limited by the caller below; a flood of malformed packets should not
-    // itself become the thing that stalls the process.
-    onMalformed: throttle((reason) => log(`dropped malformed packet: ${reason}`), 1000),
-  });
+    workspace,
+  );
 
   // TLS on the WebSocket is opt-in, and almost nobody needs it. The headset
   // reaches this bridge over a WebRTC data channel — authenticated by DTLS
@@ -194,15 +388,19 @@ async function main(): Promise<void> {
   let tlsKey = config.tlsKey;
   if (config.selfSignedTls && (tlsCert === undefined || tlsKey === undefined)) {
     try {
-      const generated = await ensureCertificate(reachableAddresses(config.host));
+      const generated = await ensureCertificate(
+        reachableAddresses(config.host),
+      );
       tlsCert = generated.certPath;
       tlsKey = generated.keyPath;
       if (generated.created) {
-        log(`generated a TLS certificate for ${generated.names.join(', ')}`);
+        log(`generated a TLS certificate for ${generated.names.join(", ")}`);
       }
     } catch (err) {
-      log(`could not prepare TLS: ${err instanceof Error ? err.message : String(err)}`);
-      log('continuing on plain ws://');
+      log(
+        `could not prepare TLS: ${err instanceof Error ? err.message : String(err)}`,
+      );
+      log("continuing on plain ws://");
     }
   }
 
@@ -213,11 +411,16 @@ async function main(): Promise<void> {
         tlsCert,
         tlsKey,
         onLog: log,
+        onClientChange: () => clientsChanged(),
+        // So the hosted client's own page may open a WebSocket, and no other
+        // site may. See WsServer.originAllowed.
+        siteOrigin: config.pairingService,
       })
     : null;
   // Every headset-bound packet fans out through here, so a client on the
   // WebSocket and one on a data channel see exactly the same stream.
   const bus = new Broadcaster(router.stats);
+  bus.onLog = log;
   broadcast = bus;
   if (ws !== null) bus.add(ws);
 
@@ -226,8 +429,9 @@ async function main(): Promise<void> {
         onLog: log,
         // A headset that has just arrived has no idea what devices exist, and
         // it is the roster that tells it what to draw — then the LEDs already
-        // on them.
-        onPeerChange: () => resyncHeadset(),
+        // on them. The count was reported here all along and thrown away,
+        // which is why nothing ever noticed a headset leaving.
+        onPeerChange: () => clientsChanged(),
       })
     : null;
   if (rtc !== null) bus.add(rtc);
@@ -244,7 +448,9 @@ async function main(): Promise<void> {
       clients: bus.clientCount,
       devices: devices.roster(),
       lastPacketAgoMs:
-        router.stats.lastPacketAt === 0 ? null : Date.now() - router.stats.lastPacketAt,
+        router.stats.lastPacketAt === 0
+          ? null
+          : Date.now() - router.stats.lastPacketAt,
       packetsIn: router.stats.packets,
       packetsOut: router.stats.packetsOut,
       eventsIn: router.stats.events,
@@ -253,13 +459,15 @@ async function main(): Promise<void> {
       peakJitterMs: router.stats.peakJitterMs,
       lossRatio: router.stats.lossRatio,
       malformed: router.stats.malformed,
-      midiAvailable: devices.roster().some((d) => d.status === DeviceStatus.READY),
-      pairingCode: pairing?.displayCode ?? '',
+      midiAvailable: devices
+        .roster()
+        .some((d) => d.status === DeviceStatus.READY),
+      pairingCode: pairing?.displayCode ?? "",
       pairingRegistered: pairing?.isRegistered ?? false,
-      pairingError: pairing?.error ?? '',
+      pairingError: pairing?.error ?? "",
       siteUrl: config.pairingService,
       rtcPeers: rtc?.peerCount ?? 0,
-      rtcError: signalling?.error ?? '',
+      rtcError: signalling?.error ?? "",
     });
 
     // Audits the whole outbound path, so it covers whichever transport the
@@ -268,7 +476,11 @@ async function main(): Promise<void> {
   }
 
   const udp = config.enableUdp
-    ? new UdpServer(router, { port: config.udpPort, host: config.host, onLog: log })
+    ? new UdpServer(router, {
+        port: config.udpPort,
+        host: config.host,
+        onLog: log,
+      })
     : null;
 
   try {
@@ -277,14 +489,24 @@ async function main(): Promise<void> {
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err);
     log(`failed to start: ${message}`);
-    if (message.includes('EADDRINUSE')) {
-      log('Another copy of the bridge is probably already running.');
+    if (message.includes("EADDRINUSE")) {
+      log("Another copy of the bridge is probably already running.");
     }
     process.exit(1);
   }
 
-  const scheme = ws?.secure === true ? 'wss' : 'ws';
-  log(`${devices.count} device(s) open; emulated hardware is added from the headset`);
+  const scheme = ws?.secure === true ? "wss" : "ws";
+  /*
+   * Say that no ports exist yet, and why, because their absence is the thing
+   * somebody will go looking for. A DAW open on the other monitor lists
+   * nothing at this point, and without this line that reads as a broken build
+   * rather than as the design.
+   */
+  log(
+    config.startupDevice === "none"
+      ? "no MIDI ports yet: they open when a headset connects and close when it leaves"
+      : `no MIDI ports yet: a ${config.startupDevice} opens when a headset connects`,
+  );
   if (ws !== null) {
     for (const address of reachableAddresses(config.host)) {
       log(`listening  ${scheme}://${address}:${config.wsPort}`);
@@ -300,7 +522,7 @@ async function main(): Promise<void> {
   // find this machine without anyone typing an address. The code is also what
   // the WebRTC handshake is keyed on, so the two go up together.
   const pairing =
-    config.pairingService === ''
+    config.pairingService === ""
       ? null
       : new PairingPublisher({
           serviceUrl: config.pairingService,
@@ -330,9 +552,11 @@ async function main(): Promise<void> {
         onLog: log,
       });
       signalling.start();
-      log('waiting for a headset to pair');
+      log("waiting for a headset to pair");
     } else {
-      log('WebRTC is unavailable, so the hosted client cannot reach this bridge');
+      log(
+        "WebRTC is unavailable, so the hosted client cannot reach this bridge",
+      );
     }
   }
 
@@ -353,27 +577,90 @@ async function main(): Promise<void> {
    * built one, a helper that crashes — the bridge logs it once and carries on
    * serving MIDI, because an icon is worth nothing next to that.
    */
-  const dashboardUrl = `${ws?.secure === true ? 'https' : 'http'}://127.0.0.1:${config.wsPort}/`;
+  const dashboardUrl = `${ws?.secure === true ? "https" : "http"}://127.0.0.1:${config.wsPort}/`;
 
   // Dragging the app to Applications and opening it is the whole installation,
   // so the first launch registers the login item itself. See setup/firstRun.ts
   // for why that is a defensible thing to decide on someone's behalf.
   const firstRun = await runFirstLaunch();
   if (firstRun.first) {
-    log(firstRun.registered ? 'set up to start at login' : `first run: ${firstRun.reason}`);
+    log(
+      firstRun.registered
+        ? "set up to start at login"
+        : `first run: ${firstRun.reason}`,
+    );
   }
 
   let autostart = await autostartState();
 
+  /*
+   * Where the driver stands, refreshed rather than polled.
+   *
+   * Read once at startup and again after an install or a removal, not on the
+   * tray's two-second rebuild: it is two `stat` calls, and doing them thirty
+   * times a minute forever to catch a change only this process makes would be
+   * work for nothing.
+   */
+  let driver: DriverState = await currentDriverState();
+
   const trayState = (): TrayState => ({
-    pairingCode: pairing?.displayCode ?? '',
+    pairingCode: pairing?.displayCode ?? "",
     pairingRegistered: pairing?.isRegistered ?? false,
     clients: bus.clientCount,
     devices: devices.count,
     midiReady: devices.roster().some((d) => d.status === DeviceStatus.READY),
     dashboardUrl,
     autostart,
+    driver,
   });
+
+  /*
+   * The dashboard window, at most one.
+   *
+   * Launching a second copy is what filled the dock with an icon per time the
+   * dashboard had ever been opened. The window's own process now ends when it
+   * closes or loses focus, and this is the other half: when one is already
+   * running it is *raised* rather than launched again.
+   *
+   * SIGUSR1 is the poke. Not a socket or a file: the bridge already holds the
+   * child's handle, so it knows exactly which process to signal, and nothing
+   * has to be invented to find out.
+   */
+  let dashboardChild: ReturnType<typeof spawn> | null = null;
+
+  const openDashboard = (executable: string): void => {
+    if (dashboardChild !== null) {
+      try {
+        dashboardChild.kill("SIGUSR1");
+        return;
+      } catch {
+        // It has gone since we last looked; fall through and start one.
+        dashboardChild = null;
+      }
+    }
+    try {
+      const child = spawn(executable, [dashboardUrl], {
+        detached: true,
+        stdio: "ignore",
+      });
+      dashboardChild = child;
+      // Cleared as soon as it goes, so the next click launches rather than
+      // signalling a pid that no longer exists — or worse, one the system has
+      // since given to something else.
+      child.once("exit", () => {
+        if (dashboardChild === child) dashboardChild = null;
+      });
+      // Detached and unreferenced: closing the window must not stop the
+      // bridge, and the bridge exiting must not close the window out from
+      // under somebody reading it.
+      child.unref();
+    } catch (err) {
+      log(
+        `could not open the dashboard window (${err instanceof Error ? err.message : String(err)}); using the browser`,
+      );
+      openUrl(dashboardUrl);
+    }
+  };
 
   let tray: TrayController | null = null;
   const refreshTray = (): void => {
@@ -385,23 +672,65 @@ async function main(): Promise<void> {
   const handleTrayClick = async (id: string): Promise<void> => {
     switch (id) {
       case TrayAction.COPY_CODE: {
-        const code = pairing?.displayCode ?? '';
-        if (code === '') return;
+        const code = pairing?.displayCode ?? "";
+        if (code === "") return;
         // Logged either way: a machine with no clipboard utility should still
         // put the code somewhere the user can reach it.
-        log((await copyToClipboard(code)) ? `copied ${code}` : `pairing code: ${code}`);
+        log(
+          (await copyToClipboard(code))
+            ? `copied ${code}`
+            : `pairing code: ${code}`,
+        );
         return;
       }
-      case TrayAction.DASHBOARD:
-        openUrl(dashboardUrl);
+      case TrayAction.DASHBOARD: {
+        /*
+         * The native window when this build has one, the browser otherwise.
+         *
+         * Not a preference to configure: they show the same thing from the
+         * same `/api/status`, so a choice here would be a choice between two
+         * identical answers. The native one is simply better where it exists —
+         * no browser tab to lose among thirty others, and it looks like part
+         * of the app because it is.
+         */
+        const native = findDashboard();
+        if (native === null) {
+          openUrl(dashboardUrl);
+          return;
+        }
+        openDashboard(native);
         return;
+      }
       case TrayAction.AUTOSTART:
         autostart = await toggleAutostart();
-        log(autostart === 'on' ? 'will start at login' : 'will not start at login');
+        log(
+          autostart === "on"
+            ? "will start at login"
+            : "will not start at login",
+        );
         refreshTray();
         return;
+      case TrayAction.INSTALL_DRIVER: {
+        const source = await bundledDriver();
+        if (source === null) {
+          log("this build has no CoreMIDI driver bundled with it");
+          return;
+        }
+        const result = await installDriver({ source, scope: "user" });
+        for (const note of result.notes) log(`driver: ${note}`);
+        driver = await currentDriverState();
+        refreshTray();
+        return;
+      }
+      case TrayAction.UNINSTALL_DRIVER: {
+        const result = await uninstallDriver();
+        for (const note of result.notes) log(`driver: ${note}`);
+        driver = await currentDriverState();
+        refreshTray();
+        return;
+      }
       case TrayAction.QUIT:
-        await shutdown('menu');
+        await shutdown("menu");
         return;
       default:
         return;
@@ -411,7 +740,7 @@ async function main(): Promise<void> {
   if (config.enableTray) {
     const controller = new TrayController({
       onLog: log,
-      onQuit: () => void shutdown('menu'),
+      onQuit: () => void shutdown("menu"),
       onClick: (id) => void handleTrayClick(id),
     });
     if (controller.start()) {
@@ -423,7 +752,7 @@ async function main(): Promise<void> {
       const trayTimer = setInterval(refreshTray, 2000);
       trayTimer.unref();
     } else {
-      log('no tray helper found; running without a menu bar icon');
+      log("no tray helper found; running without a menu bar icon");
     }
   }
 
@@ -438,12 +767,46 @@ async function main(): Promise<void> {
     statsTimer.unref();
   }
 
+  /*
+   * Push link quality to the headset, once a second.
+   *
+   * A second is deliberately slower than the dashboard's own refresh. These are
+   * numbers a person glances at to answer «is it lagging or am I early», and a
+   * readout that changes faster than it can be read is one nobody trusts —
+   * jitter in particular is already a smoothed estimate, so sampling it at a
+   * comfortable reading rate loses nothing.
+   *
+   * Sent regardless of traffic. A link that has gone quiet because packets
+   * stopped arriving is exactly the case somebody needs told about, and a
+   * push conditioned on activity would go silent at that moment.
+   */
+  const linkStatsTimer = setInterval(() => {
+    broadcast?.sendLinkStats({
+      jitterMs: router.stats.jitterMs,
+      peakJitterMs: router.stats.peakJitterMs,
+      lossRatio: router.stats.lossRatio,
+      packets: router.stats.packets,
+      dropped: router.stats.dropped,
+      reordered: router.stats.reordered,
+      malformed: router.stats.malformed,
+      activeNotes: router.activeNotes,
+    });
+  }, 1000);
+  linkStatsTimer.unref();
+
   let closing = false;
   const shutdown = async (signal: string): Promise<void> => {
     if (closing) return;
     closing = true;
     log(`${signal} — shutting down`);
     if (statsTimer !== null) clearInterval(statsTimer);
+    clearInterval(linkStatsTimer);
+    // Flush anything the debounce is still holding: the last thing somebody did
+    // before quitting is the thing they most expect to find on the next run.
+    if (saveTimer !== null) {
+      clearTimeout(saveTimer);
+      saveWorkspace(workspace);
+    }
     // Release before closing the ports: once they are gone there is nothing
     // left to send the Note Offs through, and whatever was sounding stays
     // sounding until the DAW is restarted.
@@ -454,12 +817,17 @@ async function main(): Promise<void> {
     rtc?.close();
     bus.close();
     await Promise.all([ws?.close(), udp?.close(), pairing?.stop()]);
-    devices.removeAll();
+    // Through the gate rather than around it: a teardown may already be
+    // scheduled, and the process must not exit with ports still published.
+    presence.dispose();
+    // The socket file outlives the process otherwise, and a stale one is what
+    // the next run has to clear before it can bind.
+    await driverLink.stop();
     process.exit(0);
   };
 
-  process.on('SIGINT', () => void shutdown('SIGINT'));
-  process.on('SIGTERM', () => void shutdown('SIGTERM'));
+  process.on("SIGINT", () => void shutdown("SIGINT"));
+  process.on("SIGTERM", () => void shutdown("SIGTERM"));
 }
 
 /** Call `fn` at most once per `intervalMs`, dropping the calls in between. */
@@ -477,6 +845,8 @@ function throttle<T extends unknown[]>(
 }
 
 main().catch((err: unknown) => {
-  process.stderr.write(`vrmc-bridge: fatal: ${err instanceof Error ? err.stack : String(err)}\n`);
+  process.stderr.write(
+    `vrmc-bridge: fatal: ${err instanceof Error ? err.stack : String(err)}\n`,
+  );
   process.exit(1);
 });

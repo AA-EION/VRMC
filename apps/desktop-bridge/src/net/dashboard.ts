@@ -85,10 +85,35 @@ export function dashboardHtml(): string {
 -->
 <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'><rect width='16' height='16' rx='3.6' fill='%230a0c12'/><g fill='%2363e0ff'><rect x='3' y='3' width='4' height='4' rx='1'/><rect x='9' y='3' width='4' height='4' rx='1'/><rect x='3' y='9' width='4' height='4' rx='1'/><rect x='9' y='9' width='4' height='4' rx='1'/></g></svg>" />
 <style>
+  /*
+   * Both appearances, chosen by the system rather than by this file.
+   *
+   * It was "color-scheme: dark" and a single set of near-black values, which
+   * is one theme wearing the name of a design: on a Mac set to Light it was a
+   * dark rectangle in a light window, and the accent — a pale cyan picked to
+   * glow on near-black — had almost no contrast against a white card.
+   *
+   * "light-dark()" keeps both values on one line each, so a colour and its
+   * counterpart cannot drift apart the way two blocks of hex eventually do.
+   * The light values are not the dark ones lightened: the accent, the warning
+   * and the status colours are all darkened instead, because a colour legible
+   * on black is generally not legible on white.
+   */
   :root {
-    color-scheme: dark;
-    --bg: #0a0c12; --panel: #151926; --border: #262c40; --text: #e8ecf6;
-    --muted: #9aa4bf; --accent: ${ACCENT}; --ok: #6ee7a8; --bad: #ff8189; --warn: #ffc86b;
+    color-scheme: light dark;
+    --bg: light-dark(#f5f6fa, #0a0c12);
+    --panel: light-dark(#ffffff, #151926);
+    --border: light-dark(#d7dbe7, #262c40);
+    --text: light-dark(#12151f, #e8ecf6);
+    --muted: light-dark(#585f73, #9aa4bf);
+    --accent: light-dark(#0a6f8f, ${ACCENT});
+    --ok: light-dark(#0d7a44, #6ee7a8);
+    --bad: light-dark(#b3182d, #ff8189);
+    --warn: light-dark(#7a4d00, #ffc86b);
+    /* Sunken and raised surfaces, so nothing below has to hard-code a hex. */
+    --inset: light-dark(#eef0f6, #0a0c12);
+    --raised: light-dark(#e6e9f2, #2a3145);
+    --raised-hover: light-dark(#dadeeb, #38415c);
   }
   * { box-sizing: border-box; }
   body {
@@ -107,15 +132,15 @@ export function dashboardHtml(): string {
   dd { margin: .15rem 0 0; font-family: ui-monospace, Menlo, monospace; font-variant-numeric: tabular-nums; }
   .addr { display: flex; gap: .5rem; align-items: center; flex-wrap: wrap; margin-bottom: .5rem; }
   .addr code {
-    background: #0a0c12; border: 1px solid var(--border); border-radius: .4rem;
+    background: var(--inset); border: 1px solid var(--border); border-radius: .4rem;
     padding: .45rem .6rem; font-size: .95rem; color: var(--accent);
   }
   button {
     font: inherit; font-size: .85rem; font-weight: 600; padding: .5rem .9rem;
-    border-radius: .5rem; border: 1px solid var(--border); background: #2a3145;
+    border-radius: .5rem; border: 1px solid var(--border); background: var(--raised);
     color: var(--text); cursor: pointer;
   }
-  button:hover:not(:disabled) { background: #38415c; }
+  button:hover:not(:disabled) { background: var(--raised-hover); }
   button:disabled { opacity: .5; cursor: default; }
   .row { display: flex; gap: .5rem; flex-wrap: wrap; }
   table { width: 100%; border-collapse: collapse; font-size: .86rem; }
@@ -202,6 +227,28 @@ const $ = (id) => document.getElementById(id);
 const STATUS = { 0: 'opening', 1: 'ready', 2: 'failed' };
 
 /*
+ * Escape text before it is interpolated into markup.
+ *
+ * Not a precaution — a fix. A device's model name arrives from the headset,
+ * over the wire, and nothing validated it: DEVICE_ADD carries up to 255
+ * arbitrary bytes and they were written straight into the devices table with
+ * innerHTML. A model of "<img src=x onerror=...>" ran script on this page,
+ * which is same-origin with /api/status — the page holding the pairing code
+ * and the machine's LAN addresses.
+ *
+ * The model is bounded and checked at the Router now as well. This is the
+ * second of the two, because the first can only reject what it knows to look
+ * for, and escaping is what makes the rendering correct rather than lucky.
+ */
+const esc = (value) =>
+  String(value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+
+/*
  * The site as a user would say it aloud: "vrmc.eionstudios.com".
  *
  * URL rather than a regex, and not only because it is clearer. This whole
@@ -261,7 +308,7 @@ async function refresh() {
 
   const scheme = s.secure ? 'wss' : 'ws';
   $('addresses').innerHTML = s.addresses
-    .map((a) => '<div class="addr"><code>' + scheme + '://' + a + ':' + s.wsPort + '</code></div>')
+    .map((a) => '<div class="addr"><code>' + esc(scheme) + '://' + esc(a) + ':' + esc(s.wsPort) + '</code></div>')
     .join('') || '<p class="hint">No LAN address found.</p>';
   $('tlsNote').textContent = s.rtcError
     ? 'Pairing is not listening: ' + s.rtcError
@@ -272,16 +319,18 @@ async function refresh() {
 
   $('devices').innerHTML = s.devices.length
     ? s.devices.map((d) =>
-        '<tr><td>' + d.deviceId + '</td><td>' + d.model +
+        '<tr><td>' + esc(d.deviceId) + '</td><td>' + esc(d.model) +
         '</td><td class="' + (d.status === 1 ? 'ok' : d.status === 2 ? 'bad' : 'muted') + '">' +
-        (d.detail || STATUS[d.status]) + '</td></tr>').join('')
+        esc(d.detail || STATUS[d.status]) + '</td></tr>').join('')
     : '<tr><td colspan="3" class="muted">None. Devices are created from the headset.</td></tr>';
 }
 
 function show(name, result) {
   const line = document.createElement('div');
+  // A self-test detail carries a device's own name back — a failure names the
+  // port it could not open — so it is no safer than the roster is.
   line.innerHTML = '<span class="' + (result.ok ? 'ok' : 'bad') + '">' +
-    (result.ok ? '✓' : '✗') + '</span><span>' + name + ' — ' + result.detail + '</span>';
+    (result.ok ? '✓' : '✗') + '</span><span>' + esc(name) + ' — ' + esc(result.detail) + '</span>';
   $('results').prepend(line);
 }
 

@@ -1,10 +1,14 @@
 import { useState } from 'react';
 import { DeviceModel } from '@vrmc/devices';
 import { PAIRING_CODE_LENGTH, isPairingCode, normalisePairingCode } from '@vrmc/protocol';
-import { DeviceStatus } from '@vrmc/protocol';
+import { DeviceStatus, type LayoutState } from '@vrmc/protocol';
 import type { LaunchpadInstance } from '../devices/LaunchpadInstance.js';
 import type { LinkStatus } from '../net/BridgeLink.js';
-import type { XrSupport } from '../xr/session.js';
+import type { XrMode, XrSupport } from '../xr/session.js';
+import type { DepthSensingState } from '../xr/Occlusion.js';
+import { Logo } from '../brand/Logo.js';
+import { SEAL } from '../brand/tokens.js';
+import { useTheme, type ThemePref } from '../brand/theme.js';
 
 export interface OverlayProps {
   support: XrSupport | null;
@@ -20,10 +24,42 @@ export interface OverlayProps {
   devices: readonly LaunchpadInstance[];
   onAddDevice: (model: string) => void;
   onRemoveDevice: (deviceId: number) => void;
+  onPinDevice: (deviceId: number, pinned: boolean) => void;
+  onDropDevice: (deviceId: number) => void;
+  layouts: LayoutState;
+  onSaveLayout: (name: string) => void;
+  onApplyLayout: (name: string) => void;
+  onDeleteLayout: (name: string) => void;
   onPair: (code: string) => void;
   pairingBusy: boolean;
   pairingNote: string;
+  mode: XrMode;
+  onModeChange: (mode: XrMode) => void;
+  depthOcclusion: boolean;
+  onDepthOcclusionChange: (on: boolean) => void;
+  depthState: DepthSensingState;
 }
+
+/** The three theme states, named the way the identity names them. */
+const THEME_LABEL: Record<ThemePref, string> = {
+  system: 'Auto',
+  light: 'Light',
+  dark: 'Dark',
+};
+
+/**
+ * What to say about depth sensing, given what it actually did.
+ *
+ * Reported rather than promised. The feature is requested as optional, may not
+ * be granted, and is best-effort even where it is — so the interface says which
+ * of those happened instead of showing a checkbox that claims to have worked.
+ */
+const DEPTH_NOTE: Record<DepthSensingState, string> = {
+  off: 'Uses the headset’s depth sensing, which is approximate: edges are soft and can shimmer.',
+  unsupported: 'This headset did not offer depth sensing, so nothing changed.',
+  waiting: 'Waiting for the headset’s first depth frame…',
+  active: 'Active. Edges are approximate and can shimmer — that is the sensor, not the app.',
+};
 
 const STATE_LABEL: Record<LinkStatus['state'], string> = {
   idle: 'Not connected',
@@ -56,9 +92,20 @@ export function Overlay(props: OverlayProps): React.ReactElement {
     devices,
     onAddDevice,
     onRemoveDevice,
+    onPinDevice,
+    onDropDevice,
+    layouts,
+    onSaveLayout,
+    onApplyLayout,
+    onDeleteLayout,
     onPair,
     pairingBusy,
     pairingNote,
+    mode,
+    onModeChange,
+    depthOcclusion,
+    onDepthOcclusionChange,
+    depthState,
   } = props;
 
   const connected = status.state === 'open';
@@ -66,10 +113,7 @@ export function Overlay(props: OverlayProps): React.ReactElement {
 
   return (
     <div className="overlay">
-      <header>
-        <h1>VRMC</h1>
-        <p className="tagline">Mixed reality MIDI controller</p>
-      </header>
+      <Masthead />
 
       <section className="card">
         <h2>1 · Connect</h2>
@@ -153,10 +197,68 @@ export function Overlay(props: OverlayProps): React.ReactElement {
           <p className="warn">{support.reason}</p>
         )}
         {sessionActive && (
-          <p className="hint">
+          <p className="hint spaced">
             {passthrough ? 'Passthrough active.' : 'Running without passthrough.'} Take the headset
             off or press the menu button to end the session.
           </p>
+        )}
+
+        {/*
+          The room, and it is a choice rather than a fallback.
+          `startSession` still drops to immersive-vr on a headset that cannot
+          do passthrough, but that is a different thing entirely from someone
+          deciding they would rather work in the dark. This switch is live in
+          both directions at any moment, in or out of a session, and it does
+          not touch the session at all — see xr/Backdrop.tsx.
+        */}
+        <div className="segmented" role="group" aria-label="Room">
+          <button
+            type="button"
+            className={mode === 'passthrough' ? 'on' : ''}
+            aria-pressed={mode === 'passthrough'}
+            onClick={() => onModeChange('passthrough')}
+          >
+            Your room
+          </button>
+          <button
+            type="button"
+            className={mode === 'immersive' ? 'on' : ''}
+            aria-pressed={mode === 'immersive'}
+            onClick={() => onModeChange('immersive')}
+          >
+            Full VR
+          </button>
+        </div>
+        <p className="hint spaced">
+          {mode === 'immersive'
+            ? 'The instruments sit in the EION Studios galaxy. Switching back is instant and does not interrupt the MIDI connection.'
+            : 'The instruments sit in the room around you. Switch to full VR at any time, mid-session, without dropping the connection.'}
+        </p>
+
+        {/*
+          Environment occlusion, said plainly.
+
+          Hand occlusion is not offered here because it is not a choice: the
+          hands are drawn as depth in passthrough and that is simply how the
+          room is supposed to look. This is the *room's* depth, which is
+          best-effort on every runtime that has it, so it is opt-in and the
+          copy says what it actually does rather than promising occlusion.
+        */}
+        {mode === 'passthrough' && (
+          <>
+            <label className="toggle">
+              <input
+                type="checkbox"
+                checked={depthOcclusion}
+                onChange={(e) => onDepthOcclusionChange(e.target.checked)}
+              />
+              <span>Let real objects hide the instruments</span>
+            </label>
+            <p className="hint spaced">
+              {DEPTH_NOTE[depthState]} Your hands already pass in front of the instruments
+              correctly; this is about the desk and everything else in the room.
+            </p>
+          </>
         )}
       </section>
 
@@ -166,6 +268,13 @@ export function Overlay(props: OverlayProps): React.ReactElement {
           Adding a device makes a MIDI port appear on the computer, named as the real hardware is,
           so your DAW discovers it the way it would a controller being plugged in. Removing it
           closes the port again.
+        </p>
+        <p className="hint">
+          In the headset, pinch a device to move it and use both hands to turn it. “To surface”
+          drops it flat onto whatever is really underneath, so it sits on your desk rather than
+          floating at a guessed height. Pinning one makes your hands pass straight through — worth
+          doing before you play, since drumming on a pad grid means putting your fingers exactly
+          where a grab would look for them.
         </p>
         <div className="row wrap">
           <button type="button" onClick={() => onAddDevice(DeviceModel.LAUNCHPAD_X)}>
@@ -198,8 +307,70 @@ export function Overlay(props: OverlayProps): React.ReactElement {
                       ? device.detail
                       : 'opening ports…'}
                 </span>
+                <button
+                  type="button"
+                  onClick={() => onDropDevice(device.deviceId)}
+                  disabled={!sessionActive}
+                  title={
+                    sessionActive
+                      ? 'Rest it on whatever is really underneath it.'
+                      : 'Only in the headset — it needs to see your room.'
+                  }
+                >
+                  {device.anchored ? 'On a surface' : 'To surface'}
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={device.pinned}
+                  className={device.pinned ? 'on' : ''}
+                  onClick={() => onPinDevice(device.deviceId, !device.pinned)}
+                  title={
+                    device.pinned
+                      ? 'Pinned: your hands cannot move it while you play.'
+                      : 'Loose: pinch it to move it.'
+                  }
+                >
+                  {device.pinned ? 'Pinned' : 'Pin'}
+                </button>
                 <button type="button" onClick={() => onRemoveDevice(device.deviceId)}>
                   Remove
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
+      </section>
+
+      <section className="card">
+        <h2>4 · Layouts</h2>
+        <p className="hint">
+          A named arrangement remembers where every device is, how it is turned, and whether it
+          is pinned. It is stored on the computer rather than in this browser, so it comes back
+          the moment the headset reconnects — including after a restart.
+        </p>
+        <LayoutEntry onSave={onSaveLayout} disabled={!connected} />
+        {!connected && <p className="hint spaced">Connect first — layouts live on the computer.</p>}
+
+        {layouts.layouts.length === 0 ? (
+          connected && <p className="hint spaced">No saved layouts yet.</p>
+        ) : (
+          <ul className="devices">
+            {layouts.layouts.map((layout) => (
+              <li key={layout.name}>
+                <span className="device-name">{layout.name}</span>
+                <span>
+                  {layout.entries.length === 1 ? '1 device' : `${layout.entries.length} devices`}
+                </span>
+                <button
+                  type="button"
+                  className={layouts.current === layout.name ? 'on' : ''}
+                  aria-pressed={layouts.current === layout.name}
+                  onClick={() => onApplyLayout(layout.name)}
+                >
+                  {layouts.current === layout.name ? 'In use' : 'Use'}
+                </button>
+                <button type="button" onClick={() => onDeleteLayout(layout.name)}>
+                  Delete
                 </button>
               </li>
             ))}
@@ -221,10 +392,86 @@ export function Overlay(props: OverlayProps): React.ReactElement {
       </section>
 
       {error !== '' && <p className="warn banner">{error}</p>}
+
+      <footer className="colophon">
+        <span className="eion-seal">{SEAL}</span>
+        <span>EION Studios</span>
+      </footer>
     </div>
   );
 }
 
+/**
+ * The head of the page: the mark, the name, one line, and the theme.
+ *
+ * The theme control lives here rather than in a settings section because it is
+ * a property of the page rather than of anything on it — and because a person
+ * who wants it wants it before they have read anything else.
+ */
+function Masthead(): React.ReactElement {
+  const { pref, cycle } = useTheme();
+  return (
+    <header className="masthead">
+      <Logo className="mark" />
+      <div>
+        <h1>VRMC</h1>
+        <p className="tagline">Mixed reality MIDI controller</p>
+      </div>
+      <button
+        type="button"
+        className="theme"
+        onClick={cycle}
+        aria-label={`Theme: ${THEME_LABEL[pref]}. Click to change.`}
+      >
+        {THEME_LABEL[pref]}
+      </button>
+    </header>
+  );
+}
+
+
+/**
+ * Naming an arrangement.
+ *
+ * A plain field and a button rather than a prompt: this is typed on a floating
+ * keyboard in a headset as often as on a real one, and a modal you have to
+ * dismiss is one more thing to aim at.
+ */
+function LayoutEntry({
+  onSave,
+  disabled,
+}: {
+  onSave: (name: string) => void;
+  disabled: boolean;
+}): React.ReactElement {
+  const [name, setName] = useState('');
+  const ready = name.trim() !== '';
+  return (
+    <form
+      className="row"
+      onSubmit={(e) => {
+        e.preventDefault();
+        if (!ready || disabled) return;
+        onSave(name);
+        setName('');
+      }}
+    >
+      <input
+        type="text"
+        value={name}
+        placeholder="Studio"
+        maxLength={48}
+        spellCheck={false}
+        aria-label="Layout name"
+        disabled={disabled}
+        onChange={(e) => setName(e.target.value)}
+      />
+      <button type="submit" disabled={!ready || disabled}>
+        Save this arrangement
+      </button>
+    </form>
+  );
+}
 
 /**
  * Pairing code entry.

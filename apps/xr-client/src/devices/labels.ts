@@ -81,3 +81,58 @@ function isLight(hex: string): boolean {
   const b = n & 0xff;
   return (0.2126 * r + 0.7152 * g + 0.0722 * b) / 255 > 0.5;
 }
+
+
+/**
+ * Render one line of text into a canvas texture, for a floating label.
+ *
+ * The same reasoning as the zone labels above: a canvas drawn once when the
+ * text changes costs one texture and no per-frame work, where glyph meshes
+ * would mean a font load and a pile of draw calls in a scene that has to hold
+ * 90 fps on a mobile GPU. Text arrives when somebody changes a view in their
+ * DAW, which is human speed.
+ */
+export function buildTextTexture(
+  text: string,
+  options: { ink?: string; ground?: string } = {},
+): CanvasTexture | null {
+  if (text === '') return null;
+  const canvas = document.createElement('canvas');
+  // Fixed height, width from the text: a label is as wide as its words and the
+  // mesh is scaled to match, so glyphs never stretch.
+  const height = 128;
+  const fontPx = Math.round(height * 0.52);
+  const ctx0 = canvas.getContext('2d');
+  if (ctx0 === null) return null;
+  const font = `500 ${fontPx}px Inter, system-ui, -apple-system, sans-serif`;
+  ctx0.font = font;
+  const padding = fontPx * 0.7;
+  canvas.width = Math.min(2048, Math.ceil(ctx0.measureText(text).width + padding * 2));
+  canvas.height = height;
+
+  const ctx = canvas.getContext('2d');
+  if (ctx === null) return null;
+  // Re-set: resizing the canvas resets every context property.
+  ctx.font = font;
+  ctx.textAlign = 'center';
+  ctx.textBaseline = 'middle';
+
+  ctx.fillStyle = options.ground ?? 'rgba(11, 11, 12, 0.82)';
+  ctx.fillRect(0, 0, canvas.width, canvas.height);
+  // The identity's hairline, at this scale.
+  ctx.strokeStyle = options.ink ?? '#f2f0eb';
+  ctx.globalAlpha = 0.35;
+  ctx.lineWidth = 2;
+  ctx.strokeRect(1, 1, canvas.width - 2, canvas.height - 2);
+  ctx.globalAlpha = 1;
+
+  ctx.fillStyle = options.ink ?? '#f2f0eb';
+  ctx.fillText(text, canvas.width / 2, canvas.height / 2 + fontPx * 0.04);
+
+  const texture = new CanvasTexture(canvas);
+  texture.colorSpace = SRGBColorSpace;
+  texture.minFilter = LinearFilter;
+  texture.magFilter = LinearFilter;
+  texture.anisotropy = 4;
+  return texture;
+}

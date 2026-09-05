@@ -5,11 +5,16 @@ import {
   PacketWriter,
   ledCapacity,
   writeDeviceState,
+  writeDeviceText,
+  writeLayoutState,
+  writeLinkStats,
   writeLedEntry,
   writeLedHeader,
   type DeviceStateEntry,
-} from '@vrmc/protocol';
-import type { LinkStats } from '../core/Stats.js';
+  type LayoutState,
+  type LinkQuality,
+} from "@vrmc/protocol";
+import type { LinkStats } from "../core/Stats.js";
 
 /** Somewhere packets can be sent to every headset it holds. */
 export interface PacketSink {
@@ -31,6 +36,14 @@ export interface PacketSink {
 export class Broadcaster {
   private readonly sinks: PacketSink[] = [];
   private readonly stats: LinkStats;
+
+  /**
+   * Where to report something the headset will not be told.
+   *
+   * Optional so tests need not supply one, and set rather than constructed
+   * because the bridge's logger is built after the bus.
+   */
+  onLog: ((message: string) => void) | null = null;
 
   /** One reusable writer. Only ever used on this thread. */
   private readonly writer = new PacketWriter();
@@ -84,7 +97,10 @@ export class Broadcaster {
     if (this.clientCount === 0) return;
     this.pendingLeds.set(
       deviceId * 256 + ledIndex,
-      (r & 0x3f) | ((g & 0x3f) << 6) | ((b & 0x3f) << 12) | ((blink & 0x3) << 18),
+      (r & 0x3f) |
+        ((g & 0x3f) << 6) |
+        ((b & 0x3f) << 12) |
+        ((blink & 0x3) << 18),
     );
     if (this.ledFlushTimer === null) {
       // setImmediate rather than a millisecond timer: this fires at the end of
@@ -145,6 +161,53 @@ export class Broadcaster {
     this.send(w.finish(performance.now()));
   }
 
+  /** Push text the DAW sent a device to display. */
+  sendDeviceText(deviceId: number, text: string): void {
+    if (this.clientCount === 0) return;
+    const w = this.writer;
+    w.begin(PacketKind.DEVICE_TEXT);
+    if (!writeDeviceText(w, deviceId, text)) return;
+    this.send(w.finish(performance.now()));
+  }
+
+  /** Push the stored arrangements, and which one is current. */
+  sendLayouts(state: LayoutState): void {
+    if (this.clientCount === 0) return;
+    const w = this.writer;
+    w.begin(PacketKind.LAYOUT_STATE);
+    const written = writeLayoutState(w, state);
+    if (written < 0) return;
+    if (written < state.layouts.length) {
+      // Reported rather than swallowed: the headset is about to show a shorter
+      // list than the bridge holds, and somebody wondering where a layout went
+      // should be able to find out here.
+      this.onLog?.(
+        `layout list too large for one packet: sent ${written} of ${state.layouts.length}`,
+      );
+    }
+    this.send(w.finish(performance.now()));
+  }
+
+  /**
+   * Push receive-side link quality.
+   *
+   * The headset can time its own round trip and nothing else. Jitter is the
+   * variation in transit time and loss is the gaps in the sequence number, and
+   * both are only measurable where the packets land — which is here. Until this
+   * existed those figures reached the desktop dashboard alone, and that is the
+   * one screen nobody can look at while wearing the headset.
+   */
+  sendLinkStats(quality: LinkQuality): void {
+    if (this.clientCount === 0) return;
+    const w = this.writer;
+    w.begin(PacketKind.LINK_STATS);
+    if (!writeLinkStats(w, quality)) return;
+    this.send(w.finish(performance.now()));
+    // Deliberately not counted as outbound traffic. These go out on a timer
+    // whether or not anybody is playing, and folding them into the packet
+    // counter would make an idle link look busy in its own statistics.
+  }
+
   /**
    * Send a PING to every client and resolve when one answers.
    *
@@ -156,7 +219,7 @@ export class Broadcaster {
   pingClients(timeoutMs = 2000): Promise<number> {
     return new Promise((resolve, reject) => {
       if (this.clientCount === 0) {
-        reject(new Error('no headset connected'));
+        reject(new Error("no headset connected"));
         return;
       }
       const started = performance.now();

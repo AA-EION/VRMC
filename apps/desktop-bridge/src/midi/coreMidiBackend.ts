@@ -1,5 +1,6 @@
 import { dataByteCount } from '@vrmc/protocol';
 import { requireNative, unwrapDefault } from '../native.js';
+import { coreMidiIdentityError, stampIdentity, type EndpointIdentity } from './coreMidiIdentity.js';
 import type { MidiSink, MidiSource } from './MidiSink.js';
 
 /**
@@ -77,6 +78,9 @@ export class RtMidiSink implements MidiSink {
   readonly name: string;
   readonly backend: string;
   readonly virtual: boolean;
+  /** Why the endpoint could not be given the hardware's identity, if it could
+   * not. Empty when there was nothing to do or it worked. */
+  identityError = '';
   private readonly output: RtMidiOutput;
   private closed = false;
 
@@ -178,8 +182,26 @@ export class RtMidiSource implements MidiSource {
   }
 }
 
+/**
+ * Give a freshly created endpoint the hardware's identity, if we know it.
+ *
+ * macOS only, and best-effort: it is metadata, so failing to set it costs the
+ * port some polish and nothing else. The reason is returned rather than
+ * swallowed, because "the endpoint has no manufacturer" is invisible from the
+ * outside and would otherwise be undiagnosable.
+ */
+function applyIdentity(name: string, identity: EndpointIdentity | null | undefined): string {
+  if (identity === null || identity === undefined) return '';
+  if (process.platform !== 'darwin') return '';
+  if (stampIdentity(name, identity)) return '';
+  return coreMidiIdentityError();
+}
+
 /** Create a CoreMIDI/ALSA virtual destination named `name`. */
-export async function openVirtualInput(name: string): Promise<MidiSource | null> {
+export async function openVirtualInput(
+  name: string,
+  identity?: EndpointIdentity | null,
+): Promise<MidiSource | null> {
   const midi = await loadRtMidi();
   if (midi === null) return null;
   let input: RtMidiInput;
@@ -200,11 +222,15 @@ export async function openVirtualInput(name: string): Promise<MidiSource | null>
     }
     return null;
   }
+  applyIdentity(name, identity);
   return new RtMidiSource(input, name);
 }
 
 /** Create a CoreMIDI/ALSA virtual source named `name`. */
-export async function openVirtualPort(name: string): Promise<MidiSink | null> {
+export async function openVirtualPort(
+  name: string,
+  identity?: EndpointIdentity | null,
+): Promise<MidiSink | null> {
   const midi = await loadRtMidi();
   if (midi === null) return null;
   let output: RtMidiOutput;
@@ -224,8 +250,11 @@ export async function openVirtualPort(name: string): Promise<MidiSink | null> {
     }
     return null;
   }
+  const identityError = applyIdentity(name, identity);
   const backend = process.platform === 'darwin' ? 'coremidi' : 'alsa';
-  return new RtMidiSink(output, name, backend, true);
+  const sink = new RtMidiSink(output, name, backend, true);
+  sink.identityError = identityError;
+  return sink;
 }
 
 /**

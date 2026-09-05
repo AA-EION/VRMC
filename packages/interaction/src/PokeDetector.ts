@@ -1,5 +1,12 @@
 import type { ZoneLocator } from '@vrmc/layout';
-import { DEFAULT_VELOCITY, EventFlags, speedToVelocity, VelocityCurve } from '@vrmc/protocol';
+import {
+  DEFAULT_VELOCITY,
+  EventFlags,
+  MAX_STRIKE_SPEED,
+  MIN_STRIKE_SPEED,
+  speedToVelocity,
+  VelocityCurve,
+} from '@vrmc/protocol';
 import { FingerFrame, MAX_FINGERS } from './fingers.js';
 
 /**
@@ -53,6 +60,18 @@ export interface PokeOptions {
   velocityGamma: number;
 
   /**
+   * The speed window the curve is normalised against, in m/s.
+   *
+   * Defaults to the shared constants, and overridden by a calibration fitted to
+   * one player's hands — which is the whole point of having them here rather
+   * than reading the module constants directly at the call site. Hand tracking
+   * makes the spread between people far wider than it is on hardware, because
+   * there is no surface to stop against.
+   */
+  velocityMinSpeed: number;
+  velocityMaxSpeed: number;
+
+  /**
    * Whether sliding a pressed finger from one zone to another retriggers.
    *
    * On a keyboard this is a glissando and players expect it. On a pad grid it
@@ -80,6 +99,8 @@ export const DEFAULT_POKE_OPTIONS: PokeOptions = {
   aftertouchDepth: 0.02,
   aftertouchInterval: 3,
   velocityGamma: VelocityCurve.NATURAL,
+  velocityMinSpeed: MIN_STRIKE_SPEED,
+  velocityMaxSpeed: MAX_STRIKE_SPEED,
   glissando: true,
   glissandoScale: 0.72,
   maxTrustedDt: 0.05,
@@ -100,7 +121,23 @@ const VELOCITY_HISTORY = 4;
  * O(zones), because the layout resolves a point to a zone by arithmetic.
  */
 export class PokeDetector {
+  /** Mutable so a fitted velocity curve can replace the preset in place. */
   readonly options: PokeOptions;
+
+  /**
+   * Told the peak approach speed of each strike, in m/s.
+   *
+   * For calibration, which needs the number the curve is computed *from*
+   * rather than the velocity it produced. Recovering the speed by inverting
+   * `speedToVelocity` looks like it would work and does not: the curve
+   * saturates at both ends, so every strike harder than the current ceiling
+   * comes back as exactly the ceiling — which is the half of the range a
+   * calibration most needs to measure.
+   *
+   * Null by default and free when it is: one comparison per strike, on a path
+   * that already emits a note.
+   */
+  onStrikeSpeed: ((speed: number) => void) | null = null;
   private readonly locator: ZoneLocator;
 
   // --- Surface pose (world space) ---
@@ -252,7 +289,12 @@ export class PokeDetector {
           const velocity =
             flags & EventFlags.ESTIMATED_VELOCITY
               ? DEFAULT_VELOCITY
-              : speedToVelocity(speed, this.options.velocityGamma);
+              : speedToVelocity(
+                  speed,
+                  this.options.velocityGamma,
+                  this.options.velocityMinSpeed,
+                  this.options.velocityMaxSpeed,
+                );
 
           this.strike(f, zone, velocity, tOffsetMs, flags, frame.timestamp, sink);
         }
@@ -279,6 +321,19 @@ export class PokeDetector {
     return this.heldZone[finger] ?? -1;
   }
 
+  /**
+   * Adopt a velocity curve fitted to this player.
+   *
+   * Mutating the live options rather than rebuilding the detector: rebuilding
+   * would drop every held note's state at the moment a calibration finishes,
+   * which is precisely when somebody's finger is still on a pad.
+   */
+  setVelocityCurve(fit: { gamma: number; minSpeed: number; maxSpeed: number }): void {
+    this.options.velocityGamma = fit.gamma;
+    this.options.velocityMinSpeed = fit.minSpeed;
+    this.options.velocityMaxSpeed = fit.maxSpeed;
+  }
+
   // --- internals ---
 
   private strike(
@@ -290,6 +345,12 @@ export class PokeDetector {
     now: number,
     sink: NoteSink,
   ): void {
+    if (this.onStrikeSpeed !== null && (flags & EventFlags.ESTIMATED_VELOCITY) === 0) {
+      // Only a measured strike. An estimated one means tracking dropped the
+      // joint or the frame hitched, and its speed is a default rather than
+      // something the player did.
+      this.onStrikeSpeed(this.peakSpeed(f));
+    }
     this.heldZone[f] = zone;
     this.holdVelocity[f] = velocity;
     this.lastStrikeMs[f] = now;

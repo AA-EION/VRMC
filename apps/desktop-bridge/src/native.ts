@@ -49,9 +49,23 @@ function __vrmcSnapshot(): boolean {
   }
 }
 
-/** Where a packaged build stages its addons: beside the executable. */
-function stagedPath(moduleName: string): string {
-  return join(dirname(process.execPath), 'node_modules', ...moduleName.split('/'));
+/**
+ * Where a packaged build stages its addons.
+ *
+ * Two places, because a macOS `.app` cannot use the obvious one. Everywhere
+ * else the addons sit beside the executable; inside a bundle they sit in
+ * `Contents/Resources`, one level up and across, because `Contents/MacOS`
+ * means *executables* to macOS and `codesign` refuses to seal a bundle with
+ * ordinary files in there. See build/package.mjs.
+ *
+ * Both are tried rather than branching on platform: the layout is a fact about
+ * the build that produced this binary, not about the machine running it, and a
+ * missing addon is expensive enough to be worth one extra failed `require`.
+ */
+export function stagedPaths(moduleName: string): string[] {
+  const parts = ['node_modules', ...moduleName.split('/')];
+  const beside = dirname(process.execPath);
+  return [join(beside, ...parts), join(beside, '..', 'Resources', ...parts)];
 }
 
 /** Why the last `requireNative` call failed, for reporting. */
@@ -82,8 +96,8 @@ export function requireNative<T>(moduleName: string): T {
   // snapshot and fails there; the bare name first otherwise, so a checkout uses
   // its own node_modules rather than whatever sits beside the node binary.
   const candidates = isPackaged()
-    ? [stagedPath(moduleName), moduleName]
-    : [moduleName, stagedPath(moduleName)];
+    ? [...stagedPaths(moduleName), moduleName]
+    : [moduleName, ...stagedPaths(moduleName)];
 
   // The first attempt's error is the one worth keeping. The fallback fails
   // with a bare "Cannot find module <name>", which says nothing; the first

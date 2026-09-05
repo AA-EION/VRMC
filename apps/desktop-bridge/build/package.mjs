@@ -18,20 +18,33 @@
  *    nothing is compiled here — binaries are only selected and copied.
  *
  * A macOS `.app` is assembled by hand: it is a directory with an `Info.plist`
- * and the executable under `Contents/MacOS`. Note that an unsigned app is
- * quarantined by Gatekeeper on download — see docs/PACKAGING.md.
+ * and the executable under `Contents/MacOS`, and it is ad-hoc signed once
+ * everything is in place — see `codesign.mjs` for why that is not optional on
+ * Apple Silicon. It is still quarantined on download; ad-hoc signing changes
+ * the refusal from "damaged" to the ordinary unidentified-developer prompt,
+ * which is a thing a person can get past. See docs/PACKAGING.md.
  */
 import { exec as execCb } from 'node:child_process';
 import { promisify } from 'node:util';
 import { cp, mkdir, readFile, rm, writeFile, chmod, readdir } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
-import { dirname, join, sep } from 'node:path';
+import { basename, dirname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { infoPlist } from './infoPlist.mjs';
+import { signBundle, unsignableEntries, verifyBundle } from './codesign.mjs';
 
 const exec = promisify(execCb);
 const here = dirname(fileURLToPath(import.meta.url));
 const root = join(here, '..');
+/*
+ * The workspace root, two levels above this package.
+ *
+ * `root` is `apps/desktop-bridge`, not the repository — which reads as the
+ * repository right up until something outside the package is wanted. The
+ * CoreMIDI driver lives in `native/coremidi-driver` at the top level, and
+ * resolving it against `root` looked entirely correct and found nothing.
+ */
+const repoRoot = join(root, '..', '..');
 const outRoot = join(root, 'build/dist');
 
 const pkg = JSON.parse(await readFile(join(root, 'package.json'), 'utf8'));
@@ -112,6 +125,28 @@ async function resolvePackageDir(name, from = join(root, 'package.json')) {
  * Returns true if one was found — a missing prebuild is reported rather than
  * silently producing a binary that cannot open a MIDI port.
  */
+/**
+ * Should this path be left out of the staged copy?
+ *
+ * `node_modules/.bin` is the one that matters. pnpm fills it with shell shims
+ * for a package's build-time tools — `pkg-prebuilds-copy` and
+ * `pkg-prebuilds-verify` under `@julusian/midi` — which resolve relative to a
+ * store layout the stage does not have, and which nothing here would run
+ * anyway: the bridge shells out to no dependency.
+ *
+ * They are not merely dead weight. `codesign` walks the whole bundle when it
+ * seals it, treats that directory as a subcomponent, and refuses the entire
+ * app with "bundle format unrecognized, invalid, or unsuitable" — naming the
+ * `.bin` directory and nothing about why. That failed a release.
+ */
+function isBuildDetritus(src) {
+  const name = basename(src);
+  return name === '.bin' || name === '.tmp' || name === '.package-lock.json';
+}
+
+/** `fs.cp` filter form of the above: keep everything that is not detritus. */
+const keepRuntimeFiles = (src) => !isBuildDetritus(src);
+
 async function copyMidiPrebuild(target, destDir) {
   const dir = await resolvePackageDir('@julusian/midi');
   if (dir === null) return false;
@@ -144,7 +179,8 @@ async function copyMidiPrebuild(target, destDir) {
   const prebuildRoot = join(dir, 'prebuilds');
   await cp(dir, pkgDest, {
     recursive: true,
-    filter: (src) => src !== prebuildRoot && !src.startsWith(prebuildRoot + sep),
+    filter: (src) =>
+      src !== prebuildRoot && !src.startsWith(prebuildRoot + sep) && keepRuntimeFiles(src),
   });
 
   // The one prebuild this target needs, in both places its loader may look:
@@ -194,7 +230,7 @@ async function stageDependencies(name, fromManifest, destModules, seen = new Set
   const to = join(destModules, ...name.split('/'));
   if (!existsSync(to)) {
     await mkdir(dirname(to), { recursive: true });
-    await cp(dir, to, { recursive: true });
+    await cp(dir, to, { recursive: true, filter: keepRuntimeFiles });
   }
 
   const manifest = JSON.parse(await readFile(join(dir, 'package.json'), 'utf8'));
@@ -233,10 +269,10 @@ async function copyDataChannel(target, destDir) {
   const wanted = DATACHANNEL_PACKAGE[`${target.platform}-${target.arch}`];
   if (wanted === undefined) return false;
 
-  const libDir = await resolvePackageDir('node-datachannel');
-  if (libDir === null) return false;
+  const pkgDir = await resolvePackageDir('node-datachannel');
+  if (pkgDir === null) return false;
 
-  const addonDir = await resolvePackageDir(wanted, join(libDir, 'package.json'));
+  const addonDir = await resolvePackageDir(wanted, join(pkgDir, 'package.json'));
   if (addonDir === null) {
     console.warn(`  ! ${wanted} is not installed; skipping the WebRTC addon`);
     return false;
@@ -245,16 +281,16 @@ async function copyDataChannel(target, destDir) {
   const modules = join(destDir, 'node_modules');
   await mkdir(modules, { recursive: true });
   for (const file of ['package.json', 'dist']) {
-    await cp(join(libDir, file), join(modules, 'node-datachannel', file), { recursive: true });
+    await cp(join(pkgDir, file), join(modules, 'node-datachannel', file), { recursive: true });
   }
   // Only this platform's addon: the other eight are a hundred megabytes of
   // binaries for machines that will never run this build.
-  await cp(addonDir, join(modules, wanted), { recursive: true });
+  await cp(addonDir, join(modules, wanted), { recursive: true, filter: keepRuntimeFiles });
 
-  const manifest = JSON.parse(await readFile(join(libDir, 'package.json'), 'utf8'));
+  const manifest = JSON.parse(await readFile(join(pkgDir, 'package.json'), 'utf8'));
   const seen = new Set(['node-datachannel', wanted]);
   for (const dependency of Object.keys(manifest.dependencies ?? {})) {
-    await stageDependencies(dependency, join(libDir, 'package.json'), modules, seen);
+    await stageDependencies(dependency, join(pkgDir, 'package.json'), modules, seen);
   }
   return true;
 }
@@ -282,19 +318,75 @@ async function copyTrayHelper(target, destDir) {
 }
 
 /**
+ * Copy the native dashboard, on macOS.
+ *
+ * Into `Contents/MacOS` and not `Contents/Resources`, unlike the addons and the
+ * driver: this one is an executable, which is exactly what that directory
+ * means. It is also why the signing rule treats anything directly in there as
+ * code — see build/codesign.mjs.
+ */
+async function copyDashboard(target, destDir) {
+  if (target.platform !== 'darwin' || process.platform !== 'darwin') return false;
+  const built = join(root, 'native/build/vrmc-dashboard');
+  if (!existsSync(built)) return false;
+  const to = join(destDir, 'vrmc-dashboard');
+  await cp(built, to);
+  await chmod(to, 0o755);
+  return true;
+}
+
+/**
+ * Copy the CoreMIDI driver, so the app can install it without a download.
+ *
+ * macOS only, and optional: `native/coremidi-driver/build.sh` has to have run,
+ * which it does on the macOS runner and not on a Linux one. A build without it
+ * works in every respect except that `--install-driver` has nothing to
+ * install, and says so.
+ *
+ * Into `Contents/Resources` rather than beside the executable, for the same
+ * reason as the addons — `Contents/MacOS` means executables by the bundle
+ * format's definition. Being a bundle in its own right it is signed as one
+ * (see build/codesign.mjs), and it keeps that signature when it is copied out
+ * to `~/Library/Audio/MIDI Drivers`, which is what MIDIServer checks.
+ */
+async function copyCoreMidiDriver(target, destDir) {
+  if (target.platform !== 'darwin') return false;
+  const built = join(repoRoot, 'native/coremidi-driver/build/VRMC.plugin');
+  if (!existsSync(built)) {
+    // Loudly, because the silent version of this shipped: packaging said
+    // nothing, signing had nothing to sign, and the first thing to notice was
+    // a release step three minutes later. A macOS build without it is still a
+    // working bridge, just one whose --install-driver has nothing to install.
+    console.warn(
+      `  ! no CoreMIDI driver at ${built}\n` +
+        '    run native/coremidi-driver/build.sh first; --install-driver will do nothing',
+    );
+    return false;
+  }
+  await cp(built, join(destDir, 'VRMC.plugin'), { recursive: true });
+  return true;
+}
+
+/**
  * Copy koffi, the FFI used to reach the Windows teVirtualMIDI driver.
  *
  * Windows-only: on macOS and Linux the MIDI addon talks to CoreMIDI and ALSA
  * directly and there is nothing for an FFI to do.
  */
 async function copyKoffi(target, destDir) {
-  if (target.platform !== 'win32') return false;
+  // Windows needs it to reach the teVirtualMIDI driver; macOS needs it to
+  // publish the endpoint identity through CoreMIDI. Linux needs neither, and
+  // staging an FFI with nothing to call is dead weight in the download.
+  if (target.platform !== 'win32' && target.platform !== 'darwin') return false;
   const dir = await resolvePackageDir('koffi');
   if (dir === null) {
     console.warn('  ! koffi is not installed');
     return false;
   }
-  await cp(dir, join(destDir, 'node_modules/koffi'), { recursive: true });
+  await cp(dir, join(destDir, 'node_modules/koffi'), {
+    recursive: true,
+    filter: keepRuntimeFiles,
+  });
 
   /*
    * koffi's actual binary lives in a separate package, exactly as
@@ -302,7 +394,7 @@ async function copyKoffi(target, destDir) {
    * from koffi's own manifest. Copying koffi alone stages a loader with
    * nothing to load.
    */
-  const platformPackage = `@koromix/koffi-win32-${target.arch}`;
+  const platformPackage = `@koromix/koffi-${target.platform}-${target.arch}`;
   const addonDir = await resolvePackageDir(platformPackage, join(dir, 'package.json'));
   if (addonDir === null) {
     console.warn(`  ! ${platformPackage} is not installed`);
@@ -310,6 +402,7 @@ async function copyKoffi(target, destDir) {
   }
   await cp(addonDir, join(destDir, 'node_modules', ...platformPackage.split('/')), {
     recursive: true,
+    filter: keepRuntimeFiles,
   });
 
   const manifest = JSON.parse(await readFile(join(dir, 'package.json'), 'utf8'));
@@ -426,7 +519,30 @@ async function buildTarget(target) {
   const appDir =
     target.platform === 'darwin' ? join(stage, 'VRMC Bridge.app/Contents') : null;
   const exeDir = appDir === null ? stage : join(appDir, 'MacOS');
+
+  /*
+   * Where the staged addons go, which on macOS is NOT beside the executable.
+   *
+   * `Contents/MacOS` does not mean "next to the program" to macOS. It means
+   * executables, and `codesign` enforces that literally: sealing the bundle, it
+   * treats every file in there as a code object that must already carry its own
+   * signature. Stage `node_modules` in it and sealing fails with
+   *
+   *     VRMC Bridge.app: code object is not signed at all
+   *     In subcomponent: .../@julusian/midi/binding.gyp
+   *
+   * naming whichever ordinary text file it reached first. There is no way to
+   * satisfy that — `codesign` will not sign a .gyp — so the tree has to live
+   * somewhere the bundle format expects data. `Contents/Resources` is that
+   * place: its contents are sealed wholesale into CodeResources, and the .node
+   * binaries inside it still get their own signatures. It is where Electron
+   * puts unpacked native modules, for the same reason.
+   *
+   * Off macOS there is no bundle and everything sits beside the executable.
+   */
+  const libDir = appDir === null ? stage : join(appDir, 'Resources');
   await mkdir(exeDir, { recursive: true });
+  await mkdir(libDir, { recursive: true });
 
   console.log(`\n== ${target.slug} ==`);
   await exec(
@@ -446,10 +562,14 @@ async function buildTarget(target) {
     { cwd: root, maxBuffer: 32 * 1024 * 1024 },
   );
 
-  const hasMidi = await copyMidiPrebuild(target, exeDir);
-  const hasKoffi = await copyKoffi(target, exeDir);
-  const hasRtc = await copyDataChannel(target, exeDir);
+  const hasMidi = await copyMidiPrebuild(target, libDir);
+  const hasKoffi = await copyKoffi(target, libDir);
+  const hasRtc = await copyDataChannel(target, libDir);
+  // The tray helper is a real executable, so it does belong in Contents/MacOS.
   const hasTray = await copyTrayHelper(target, exeDir);
+  const hasDriver = await copyCoreMidiDriver(target, libDir);
+  if (hasDriver) console.log('  staged the CoreMIDI driver');
+  if (await copyDashboard(target, exeDir)) console.log('  staged the native dashboard');
 
   /*
    * Refuse to produce a build that cannot work.
@@ -490,6 +610,9 @@ async function buildTarget(target) {
       await cp(icns, join(appDir, 'Resources/vrmc.icns'));
     }
     await chmod(join(exeDir, exeName), 0o755);
+    // Last, and it has to be last: a signature seals what is under it, so
+    // anything written into the bundle afterwards invalidates it.
+    await signApp(join(stage, 'VRMC Bridge.app'));
   } else if (target.platform !== 'win32') {
     await chmod(join(exeDir, exeName), 0o755);
   }
@@ -499,6 +622,77 @@ async function buildTarget(target) {
   console.log(`  -> ${stage}`);
 }
 
+
+/**
+ * Ad-hoc sign the assembled bundle.
+ *
+ * Skipped, loudly, where `codesign` does not exist — which is every machine
+ * that is not a Mac. A macOS build can be *assembled* anywhere (the addons all
+ * ship prebuilds), and there is no reason to make that impossible; but a build
+ * produced that way must not be handed to anybody, because it is the exact
+ * build that says "damaged". The release workflow runs on macOS and verifies
+ * the signature afterwards, so the artifact people actually download cannot
+ * reach them this way.
+ */
+async function signApp(appPath) {
+  if (!(await hasCodesign())) {
+    console.warn(
+      '  ! codesign is not available, so "VRMC Bridge.app" is unsigned.\n' +
+        '    It will report itself as damaged on Apple Silicon. Build on macOS to release.',
+    );
+    return;
+  }
+
+  const entries = await listBundle(appPath);
+
+  const unsignable = unsignableEntries(entries);
+  if (unsignable.length > 0) {
+    throw new Error(
+      'The bundle contains build tooling that codesign cannot classify, and it ' +
+        'would refuse the whole app with "bundle format unrecognized, invalid, ' +
+        'or unsuitable" while naming only the directory:\n' +
+        unsignable.map((e) => `  ${e}`).join('\n') +
+        '\nExclude it where it is staged — see isBuildDetritus above.',
+    );
+  }
+
+  const run = (command, args) =>
+    exec(`${command} ${args.map((a) => JSON.stringify(a)).join(' ')}`);
+
+  await signBundle(appPath, entries, { run, log: (line) => console.log(line) });
+  await verifyBundle(appPath, { run });
+  console.log('  signed ad-hoc and verified');
+}
+
+/** Every path inside the bundle, relative to it. */
+async function listBundle(appPath) {
+  const out = [];
+  const walk = async (dir, prefix) => {
+    for (const entry of await readdir(dir, { withFileTypes: true })) {
+      const relative = prefix === '' ? entry.name : `${prefix}/${entry.name}`;
+      // Symlinks are not followed and not signed: a bundle that contains one
+      // has it sealed by the enclosing signature, and following it would leave
+      // the walk somewhere outside the bundle entirely.
+      if (entry.isSymbolicLink()) continue;
+      if (entry.isDirectory()) await walk(join(dir, entry.name), relative);
+      else out.push(relative);
+    }
+  };
+  await walk(appPath, '');
+  return out;
+}
+
+let codesignAvailable = null;
+async function hasCodesign() {
+  if (codesignAvailable !== null) return codesignAvailable;
+  try {
+    await exec('command -v codesign');
+    codesignAvailable = true;
+  } catch {
+    codesignAvailable = false;
+  }
+  return codesignAvailable;
+}
 
 function readmeFor(target) {
   const run =
@@ -519,8 +713,19 @@ function readmeFor(target) {
             'headset. Opening it also sets it to start at login, which you can',
             'turn off from the same menu.',
             '',
-            'macOS will refuse to open it the first time if this build is',
-            'unsigned. Right-click the app and choose Open, then confirm.',
+            'The first time you open it, macOS will say Apple cannot verify it.',
+            'That is expected: this build is signed ad-hoc rather than with a',
+            'paid Developer ID, so it is not notarised.',
+            '',
+            'Open it once and let it be blocked, then go to System Settings >',
+            'Privacy & Security and press "Open Anyway" next to the message',
+            'about VRMC. Right-clicking and choosing Open no longer works as a',
+            'bypass on macOS 15 and later.',
+            '',
+            'If it instead says the app is *damaged*, the download lost its',
+            'signature somewhere. Clear the quarantine flag and open it again:',
+            '',
+            '  xattr -dr com.apple.quarantine "/Applications/VRMC Bridge.app"',
           ].join('\n')
         : 'Run ./vrmc-bridge from a terminal.';
 

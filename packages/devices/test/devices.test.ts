@@ -4,6 +4,7 @@ import {
   ButtonRole,
   Command,
   ControlKind,
+  DEVICE_SPECS,
   LAUNCHPAD_PRO_MK3,
   LAUNCHPAD_X,
   LaunchpadEmulator,
@@ -11,22 +12,29 @@ import {
   LightingType,
   PALETTE_SIZE,
   buildInquiryReply,
+  LAUNCHKEY_MK3_49,
   buildModeMessage,
   buildRgbLedMessage,
   colOf,
   isDeviceInquiry,
   isGridIndex,
+  DeviceModel,
+  isHardwareModel,
   nearestPaletteIndex,
   paletteB,
   paletteG,
   paletteR,
   parseLedMessage,
+  readScrollText,
   rowOf,
   specFor,
   to8Bit,
   xy,
   type DeviceSpec,
   LaunchpadLayout,
+  VRMC,
+  VrmcPart,
+  VrmcSurface,
   type EmulatorObserver,
 } from '../src/index.js';
 
@@ -131,6 +139,181 @@ describe.each([
   it('presents a DAW port whose index is in range', () => {
     expect(spec.portNames.length).toBeGreaterThanOrEqual(2);
     expect(spec.dawPortIndex).toBeLessThan(spec.portNames.length);
+  });
+});
+
+/**
+ * The ports, checked against the hardware rather than against ourselves.
+ *
+ * The assertion above is true of any two-port spec and stayed green for the
+ * whole time the order was backwards, which is the useful lesson: a test that
+ * only restates the code's own shape cannot catch the code being wrong about
+ * the world. These name the hardware's answer.
+ *
+ * These once cited CoreFW's USB descriptor, and CoreFW parenthesises: `LPX
+ * (DAW)`. That is community firmware naming its own ports, not the strings a
+ * stock Launchpad puts on the bus, and the difference reached the user as
+ * `Launchpad Pro MK3 PRO MK3 (DAW)` in Ableton's port list. The sources now
+ * are Novation's own Ableton setup guides for the two models — which name
+ * `LPX DAW`, `LPX MIDI`, `LPProMK3 DAW`, `LPProMK3 MIDI` — and Live's
+ * `get_capabilities()` for port order: Launchpad_X lists SCRIPT on the first
+ * in/out pair and REMOTE on the second, so the DAW port is first.
+ */
+describe('the ports, as the hardware presents them', () => {
+  // Only the models that emulate hardware. The VRMC surface has a spec like
+  // these do but claims no hardware at all — it opens one plain port under
+  // whatever --port-name says — so holding it to a Launchpad's naming would be
+  // asserting the opposite of what it is for. See the block below.
+  const models = Object.entries(DEVICE_SPECS).filter(([model]) =>
+    isHardwareModel(model),
+  );
+
+  it.each(models)('%s points dawPortIndex at a port actually called DAW', (_model, spec) => {
+    // Not `dawPortIndex < length`, which stayed green through a spec whose
+    // index pointed at the wrong port. The DAW port is first on the X and
+    // *last* on the Pro MK3, so the claim worth making is not about position:
+    // it is that the index and the name agree.
+    expect(spec.portNames[spec.dawPortIndex]).toContain('DAW');
+    expect(spec.portNames.filter((n) => n.includes('DAW'))).toHaveLength(1);
+  });
+
+  it.each(models)('%s names its ports the way the hardware does', (_model, spec) => {
+    // `<prefix> DAW` / `<prefix> MIDI` / `<prefix> DIN`: one shared prefix, a
+    // space, no brackets. The bracketed form is CoreFW's, and a port named in
+    // a style no Launchpad uses is one a host has no reason to treat as a
+    // Launchpad.
+    for (const name of spec.portNames) {
+      expect(name).toMatch(/^[A-Za-z0-9]+ (?:DAW|MIDI|DIN)$/);
+    }
+    const prefixes = new Set(spec.portNames.map((n) => n.split(' ')[0]));
+    expect(prefixes.size).toBe(1);
+  });
+
+  it('matches the hardware model for model', () => {
+    /*
+     * From Novation's setup guides for each model, and from the shape of
+     * Live's own `get_capabilities()`. Spelled out rather than derived so that
+     * changing a spec cannot quietly change the expectation with it.
+     *
+     * Two ports on the X, three on the Pro MK3, and the DAW port in a
+     * different place on each. Live's Launchpad_X lists SCRIPT on the first
+     * in/out pair; its Launchpad_Pro_MK3 lists REMOTE first, a propless port
+     * second and SCRIPT third.
+     */
+    expect(LAUNCHPAD_X.portNames).toEqual(['LPX DAW', 'LPX MIDI']);
+    expect(LAUNCHPAD_X.dawPortIndex).toBe(0);
+    expect(LAUNCHPAD_PRO_MK3.portNames).toEqual([
+      'LPProMK3 MIDI',
+      'LPProMK3 DIN',
+      'LPProMK3 DAW',
+    ]);
+    expect(LAUNCHPAD_PRO_MK3.dawPortIndex).toBe(2);
+  });
+
+  it('replies to a device inquiry with the bytes Live compares against', () => {
+    /*
+     * Live's IdentifiableControlSurface takes `midi_bytes[5:12]` from the
+     * identity reply and compares it, as a whole, against
+     * NOVATION_MANUFACTURER_ID + model_family_code + DEVICE_FAMILY_MEMBER_CODE
+     * — `00 20 29` + the family code + `00 00`. Anything else and it logs
+     * "MIDI device responded with wrong product id" and never binds.
+     *
+     * This is the one part of looking like a Launchpad that a virtual port can
+     * actually satisfy, so it is worth pinning to the byte.
+     */
+    for (const [, spec] of models) {
+      const reply = buildInquiryReply(spec);
+      expect([...reply.slice(5, 12)]).toEqual([
+        0x00, 0x20, 0x29, spec.familyCode[0], spec.familyCode[1], 0x00, 0x00,
+      ]);
+    }
+  });
+});
+
+describe('the VRMC surface', () => {
+  it('is a spec, but not hardware', () => {
+    /*
+     * The distinction the bridge acts on. A model on `HARDWARE_MODELS` opens
+     * the ports its spec names, publishes a manufacturer and model on the
+     * endpoints, answers a Device Inquiry and speaks its protocol through an
+     * emulator. This one must do none of that: no DAW ships a script for a
+     * "VRMC", so a Novation-shaped identity would only invite a host to load
+     * somebody else's script over a device that cannot answer it.
+     */
+    expect(specFor(DeviceModel.VRMC)).toBe(VRMC);
+    expect(isHardwareModel(DeviceModel.VRMC)).toBe(false);
+    expect(VRMC.usbVendorId).toBe(0);
+    expect(VRMC.usbProductId).toBe(0);
+    expect(VRMC.familyCode).toEqual([0, 0]);
+    // One port, and nothing named DAW on it — there is no DAW protocol here.
+    expect(VRMC.portNames).toHaveLength(1);
+    expect(VRMC.portNames[0]).not.toContain('DAW');
+  });
+
+  it('has the keys, pads and knobs the two fixed panels had', () => {
+    // The surface did not change when it became a device: same two octaves
+    // from C3, same sixteen drum pads from note 36, same four CCs from 21.
+    const keys = VRMC.controls.filter((c) => c.role === ButtonRole.KEY);
+    const pads = VRMC.controls.filter((c) => c.role === ButtonRole.GRID);
+    const knobs = VRMC.controls.filter((c) => c.role === ButtonRole.KNOB);
+    expect(keys.map((c) => c.data1)).toEqual(
+      Array.from({ length: 25 }, (_, i) => 48 + i),
+    );
+    expect(pads.map((c) => c.data1)).toEqual(
+      Array.from({ length: 16 }, (_, i) => 36 + i),
+    );
+    expect(knobs.map((c) => c.data1)).toEqual([21, 22, 23, 24]);
+    expect(knobs.every((c) => c.kind === ControlKind.CC)).toBe(true);
+  });
+
+  it('gives every control a unique id, though a pad and a key share a note', () => {
+    // Notes 48..51 are both the bottom of the keyboard and four of the pads.
+    // They stay apart on the wire by channel, but nothing keyed by id would
+    // know that — so the ids are disjoint, as on the Launchkey.
+    const ids = VRMC.controls.map((c) => c.index);
+    expect(new Set(ids).size).toBe(ids.length);
+    const notes = VRMC.controls
+      .filter((c) => c.kind === ControlKind.NOTE)
+      .map((c) => c.data1);
+    expect(new Set(notes).size).toBeLessThan(notes.length);
+  });
+
+  it('puts the pads on channel 10 and the keys on 1', () => {
+    /*
+     * The one thing that would break silently. A drum rack listens on channel
+     * 10 and nothing else does, so pads sent on 1 arrive at the keyboard's
+     * instrument and play as pitches — audible, plausible, and wrong.
+     */
+    const surface = new VrmcSurface();
+    const padZone = surface.zones.find(
+      (z) => surface.partOf(z.index) === VrmcPart.PADS,
+    )!;
+    const keyZone = surface.zones.find(
+      (z) => surface.partOf(z.index) === VrmcPart.KEYS,
+    )!;
+    expect(surface.channelOf(padZone.index)).toBe(9);
+    expect(surface.channelOf(keyZone.index)).toBe(0);
+  });
+
+  it('makes the knobs pinchable and everything else pokeable', () => {
+    const surface = new VrmcSurface();
+    for (const zone of surface.zones) {
+      const part = surface.partOf(zone.index);
+      expect(surface.isContinuous(zone.index)).toBe(part === VrmcPart.KNOBS);
+    }
+  });
+
+  it('locates every control from its own centre', () => {
+    // The geometry is what decides whether a poke lands on the pad somebody
+    // aimed at, and it is wrong in a way that looks fine from outside.
+    const surface = new VrmcSurface();
+    for (const zone of surface.zones) {
+      const x = zone.rect.x + zone.rect.width / 2;
+      const y = zone.rect.y + zone.rect.height / 2;
+      expect(surface.locate(x, y), `zone ${zone.index} (${zone.label})`).toBe(
+        zone.index,
+      );
+    }
   });
 });
 
@@ -504,5 +687,271 @@ describe('LaunchpadLayout', () => {
     expect(grid.accidental).toBe(false);
     expect(top.accidental).toBe(true);
     expect(top.label).toBe('Up');
+  });
+});
+
+describe('text the DAW sends a device to display', () => {
+  const spec = specFor(DeviceModel.LAUNCHPAD_X)!;
+
+  /** F0 00 20 29 02 <device> 07 <loop> <speed> <payload…> F7 */
+  function textMessage(payload: readonly number[]): Uint8Array {
+    return Uint8Array.of(0xf0, 0x00, 0x20, 0x29, 0x02, spec.sysexDeviceId, 0x07, 0, 4, ...payload, 0xf7);
+  }
+
+  const ascii = (text: string): number[] => [...text].map((c) => c.charCodeAt(0));
+
+  it('reads the words out', () => {
+    expect(readScrollText(textMessage(ascii('Drums')), spec)).toBe('Drums');
+  });
+
+  it('drops the control bytes rather than trying to model them', () => {
+    /*
+     * The payload is ASCII with speed changes and colour markers embedded in
+     * it, and the layout of those differs between models. Everything printable
+     * is kept and everything else dropped: the result is the words, and a
+     * colour marker cannot corrupt them because it was never printable.
+     */
+    expect(readScrollText(textMessage([0x01, 0x05, ...ascii('Bass'), 0x03]), spec)).toBe('Bass');
+  });
+
+  it('answers null for an empty or blank display', () => {
+    expect(readScrollText(textMessage([]), spec)).toBeNull();
+    expect(readScrollText(textMessage(ascii('   ')), spec)).toBeNull();
+  });
+
+  it('ignores anything that is not a text message', () => {
+    const led = Uint8Array.of(0xf0, 0x00, 0x20, 0x29, 0x02, spec.sysexDeviceId, 0x03, 11, 5, 0xf7);
+    expect(readScrollText(led, spec)).toBeNull();
+    expect(readScrollText(Uint8Array.of(0xf0, 0xf7), spec)).toBeNull();
+  });
+
+  it('reaches the observer as text', () => {
+    const seen: string[] = [];
+    const emulator = new LaunchpadEmulator(spec, {
+      onLed: () => {},
+      onMidiOut: () => {},
+      onText: (text) => seen.push(text),
+    });
+    emulator.handleHostMessage(textMessage(ascii('Session')));
+    expect(seen).toEqual(['Session']);
+  });
+});
+
+/**
+ * The Launchkey MK3 49.
+ *
+ * Everything asserted here was read out of Ableton's own `Launchkey_MK3` remote
+ * script, and every one of these is a value that fails *silently* if it drifts:
+ * a wrong identity byte means Live logs "wrong product id" and never binds, a
+ * wrong port index means the control-surface protocol is spoken at a port
+ * expecting notes, and a missing fader means the script writes to a control
+ * that is not there.
+ */
+describe('Launchkey MK3 49', () => {
+  const spec = LAUNCHKEY_MK3_49;
+
+  it('replies with the seven bytes Live compares, for the 49 specifically', () => {
+    /*
+     * `00 20 29 36 01 00 00`. The 0x36 is the model byte — 54 — and the three
+     * models either side of it (25, 37, 61) differ only there, so this is the
+     * assertion that catches transcribing the wrong one of four.
+     */
+    expect([...buildInquiryReply(spec).slice(5, 12)]).toEqual([
+      0x00, 0x20, 0x29, 0x36, 0x01, 0x00, 0x00,
+    ]);
+  });
+
+  it('has a USB product id whose low byte is the model byte', () => {
+    // 0x136 and 0x36. Novation numbers them so, and it is a second, independent
+    // check on the same transcription.
+    expect(spec.usbProductId & 0xff).toBe(spec.familyCode[0]);
+  });
+
+  it('puts the DAW port second, which no other family here does', () => {
+    /*
+     * Live's capabilities: `inport(props=[NOTES_CC, REMOTE])` then
+     * `inport(props=[NOTES_CC, SCRIPT])`. Three Novation families, three
+     * orderings — the Launchpad X first of two, the Pro MK3 last of three,
+     * this second of two. There is no rule to infer, so it is pinned.
+     */
+    expect(spec.dawPortIndex).toBe(1);
+    expect(spec.portNames[spec.dawPortIndex]).toBe('LKMK3 DAW');
+  });
+
+  it('names its endpoints by direction, from the device\'s point of view', () => {
+    /*
+     * Unlike the Launchpads, whose port is called the same thing whichever way
+     * MIDI flows. What a host lists as an *input* is the port the device calls
+     * "Out", which is exactly the pair a careless implementation swaps.
+     */
+    const byDirection = spec.portNamesByDirection;
+    expect(byDirection).toBeDefined();
+    expect(byDirection!.source[spec.dawPortIndex]).toBe('LKMK3 DAW Out');
+    expect(byDirection!.destination[spec.dawPortIndex]).toBe('LKMK3 DAW In');
+    // Parallel to portNames, or the indices mean different things per array.
+    expect(byDirection!.source).toHaveLength(spec.portNames.length);
+    expect(byDirection!.destination).toHaveLength(spec.portNames.length);
+  });
+
+  it('has nine faders, not eight', () => {
+    // The ninth is the master. A spec that stopped at eight would leave Live
+    // writing to a control that does not exist, and a fader that is never moved
+    // looks exactly like one nobody touched.
+    const faders = spec.controls.filter((c) => c.role === ButtonRole.FADER);
+    expect(faders).toHaveLength(9);
+    expect(faders.at(-1)?.label).toBe('MASTER');
+    // The MIDI bytes, which is what a DAW sees. The ids are separate — see the
+    // collision test below.
+    expect(faders.map((f) => f.data1)).toEqual([41, 42, 43, 44, 45, 46, 47, 48, 49]);
+  });
+
+  it('has eight knobs, and they are continuous rather than pressed', () => {
+    // CC and not NOTE: a knob has no release, and note tracking must not try to
+    // send one for it when the device goes away.
+    const knobs = spec.controls.filter((c) => c.role === ButtonRole.KNOB);
+    expect(knobs).toHaveLength(8);
+    expect(knobs.every((k) => k.kind === ControlKind.CC)).toBe(true);
+  });
+
+  it('has 49 keys, spanning C2 to C6', () => {
+    const keys = spec.controls.filter((c) => c.role === ButtonRole.KEY);
+    expect(keys).toHaveLength(49);
+    expect(keys[0]!.data1).toBe(36);
+    expect(keys.at(-1)!.data1).toBe(84);
+  });
+
+  it('gives every control a unique id, though their MIDI bytes overlap', () => {
+    /*
+     * The bug this device found. A Launchpad's controls live in one XY
+     * namespace, so its id and its MIDI byte are the same number and nothing
+     * had to say otherwise. Here they cannot be: key 41 sends note 41 and the
+     * sixth fader sends CC 41, and seventeen such pairs existed — so the
+     * emulator's id lookup returned whichever was built first, and pressing a
+     * pad could emit a knob's CC.
+     *
+     * Ids are now disjoint by region and `data1` carries the wire value.
+     */
+    const ids = spec.controls.map((c) => c.index);
+    expect(new Set(ids).size, 'control ids collide').toBe(ids.length);
+
+    // And the overlap that caused it is still there in the MIDI bytes, which
+    // is correct — it is the hardware's numbering, not ours to change.
+    const midi = spec.controls.map((c) => c.data1 ?? c.index);
+    expect(new Set(midi).size).toBeLessThan(midi.length);
+  });
+
+  it('releases every held control, whatever its id', () => {
+    /*
+     * The bug this found. The emulator's `pressed` and `leds` arrays were a
+     * fixed 110 entries — enough for a Launchpad, whose ids are `row * 10 +
+     * col` — and this device's ids run to 308. Writes past the end of a typed
+     * array are silently dropped, so six of the sixteen pads read back as
+     * never held, and `releaseAll` skipped them.
+     *
+     * `releaseAll` is not a corner: it runs when the device is removed and
+     * when the host changes mode. A note left on then has nothing left to
+     * stop it, and it rings until the DAW is restarted.
+     */
+    const sent: number[][] = [];
+    const emulator = new LaunchpadEmulator(spec, {
+      onLed: () => {},
+      onMidiOut: (bytes) => sent.push([...bytes]),
+    });
+
+    const pressable = spec.controls.filter((c) => c.kind !== ControlKind.OUTPUT_ONLY);
+    for (const control of pressable) emulator.press(control.index, 100);
+    sent.length = 0;
+    emulator.releaseAll();
+
+    // One release each, carrying the MIDI byte rather than the id.
+    expect(sent).toHaveLength(pressable.length);
+    const released = new Set(sent.map((m) => m[1]!));
+    for (const control of pressable) {
+      expect(released.has(control.data1 ?? control.index), `${control.label || control.role} ${control.index} was left ringing`).toBe(true);
+    }
+    // And every one of them is a release: velocity 0, or CC 0.
+    expect(sent.every((m) => m[2] === 0)).toBe(true);
+  });
+
+  it('lights the pad the DAW addressed, by note number', () => {
+    /*
+     * Two bugs met here. The host lights a pad with a Note On for the note
+     * that pad *sends* — 96..111 — and everything on this side is keyed by
+     * control id — 100..115. On a Launchpad those are the same number, so the
+     * emulator used the wire byte as the LED index and nothing noticed. Here
+     * note 96 landed on id 96, which is not a control at all, while ids
+     * 110..115 were past the end of a fixed 110-entry array and dropped.
+     *
+     * Either way the pad stayed dark with the DAW believing it lit — and a
+     * session grid that does not light is the whole point of the device.
+     */
+    const lit: number[] = [];
+    const emulator = new LaunchpadEmulator(spec, {
+      onLed: (index, r, g, b) => lit.push(index, r, g, b),
+      onMidiOut: () => {},
+    });
+    const pads = spec.controls.filter((c) => c.role === ButtonRole.GRID);
+    for (const pad of pads) {
+      emulator.handleHostMessage(new Uint8Array([0x90, pad.data1!, 5]));
+    }
+    expect(lit.filter((_, i) => i % 4 === 0)).toEqual(pads.map((p) => p.index));
+    // Colour, not merely an event: a palette entry that decoded to black would
+    // satisfy the indices above and still leave the grid dark.
+    expect(lit.filter((_, i) => i % 4 !== 0).some((c) => c > 0)).toBe(true);
+  });
+
+  it('extinguishes the pad a Note Off names', () => {
+    // The other half of the translation, and the half a lit-only test misses:
+    // an untranslated Note Off clears an id nothing owns, so the pad stays lit
+    // after the clip stops — which on a session grid is worse than never
+    // lighting, because it reads as a clip still playing.
+    const lit: Array<[number, number]> = [];
+    const emulator = new LaunchpadEmulator(spec, {
+      onLed: (index, r) => lit.push([index, r]),
+      onMidiOut: () => {},
+    });
+    const pad = spec.controls.find((c) => c.role === ButtonRole.GRID)!;
+    emulator.handleHostMessage(new Uint8Array([0x90, pad.data1!, 5]));
+    emulator.handleHostMessage(new Uint8Array([0x80, pad.data1!, 0]));
+    expect(lit).toHaveLength(2);
+    expect(lit[1]![0]).toBe(pad.index);
+    expect(lit[1]![1]).toBe(0);
+  });
+
+  it('does not confuse a key with the fader that sends the same byte', () => {
+    // Note 41 is a key; CC 41 is the sixth fader. One reverse map over both
+    // would resolve whichever was built first, so a Note On for 41 could light
+    // a fader and a CC could light a key.
+    const lit: number[] = [];
+    const emulator = new LaunchpadEmulator(spec, {
+      onLed: (index) => lit.push(index),
+      onMidiOut: () => {},
+    });
+    emulator.handleHostMessage(new Uint8Array([0x90, 41, 5]));
+    emulator.handleHostMessage(new Uint8Array([0xb0, 41, 5]));
+    const key41 = spec.controls.find((c) => c.role === ButtonRole.KEY && c.data1 === 41)!;
+    const fader41 = spec.controls.find((c) => c.role === ButtonRole.FADER && c.data1 === 41)!;
+    expect(key41.index).not.toBe(fader41.index);
+    expect(lit).toEqual([key41.index, fader41.index]);
+  });
+
+  it('gives each kind of control a unique MIDI byte, so the reverse map is exact', () => {
+    // Within one status nibble the bytes must not repeat, or the id an LED
+    // resolves to is whichever control happened to be declared first.
+    for (const kind of [ControlKind.NOTE, ControlKind.CC]) {
+      const bytes = spec.controls
+        .filter((c) => c.kind === kind)
+        .map((c) => c.data1 ?? c.index);
+      expect(new Set(bytes).size, `${kind} bytes collide`).toBe(bytes.length);
+    }
+  });
+
+  it('has sixteen pads in two rows, not sixty-four in eight', () => {
+    // `gridSize` is the width. Anything reading it as both dimensions draws an
+    // 8x8 where there are two rows of eight.
+    const pads = spec.controls.filter((c) => c.role === ButtonRole.GRID);
+    expect(pads).toHaveLength(16);
+    expect(spec.padRows).toBe(2);
+    expect(new Set(pads.map((p) => p.row)).size).toBe(2);
   });
 });

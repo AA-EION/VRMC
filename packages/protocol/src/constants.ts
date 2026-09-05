@@ -16,8 +16,16 @@ export const MAGIC = 0x4d56;
  * v2 added the return path. v1 only ever sent headset -> bridge, which is all a
  * pad controller needs; a Launchpad is a display as much as an input, and its
  * LEDs are driven by the DAW, so the link had to become bidirectional.
+ *
+ * v3 made the roster carry *where* a device is, not only that it exists. Once
+ * an instrument can be picked up and put down, its pose is state — and state
+ * that only lives in the headset is state that ends when the session does, so
+ * every session would start with everything back at its default pose. The
+ * bridge already outlives the headset and already pushes the roster, so the
+ * roster is where the pose belongs; a side channel for it would be a second
+ * source of truth about the same device.
  */
-export const PROTOCOL_VERSION = 2;
+export const PROTOCOL_VERSION = 3;
 
 /** Packet header size in bytes. Events begin at this offset. */
 export const HEADER_BYTES = 16;
@@ -33,7 +41,8 @@ export const EVENT_BYTES = 12;
 export const MAX_EVENTS_PER_PACKET = 64;
 
 /** Largest EVENTS packet. */
-export const MAX_EVENT_PACKET_BYTES = HEADER_BYTES + MAX_EVENTS_PER_PACKET * EVENT_BYTES;
+export const MAX_EVENT_PACKET_BYTES =
+  HEADER_BYTES + MAX_EVENTS_PER_PACKET * EVENT_BYTES;
 
 /**
  * Largest control packet.
@@ -47,6 +56,34 @@ export const MAX_CONTROL_BYTES = 4096;
 
 /** Largest packet of any kind. Sized for receive buffers. */
 export const MAX_PACKET_BYTES = MAX_CONTROL_BYTES;
+
+/**
+ * Longest a layout name may be, in UTF-8 bytes.
+ *
+ * Names are typed on a floating keyboard in a headset, so anything past a
+ * couple of words is not a name somebody is going to enter twice.
+ */
+export const MAX_LAYOUT_NAME_BYTES = 48;
+
+/**
+ * Most arrangements the bridge will store.
+ *
+ * A ceiling rather than a design: `LAYOUT_STATE` pushes every layout in one
+ * control packet, and the packet is capped at 4 kB. Sixteen named arrangements
+ * of eight devices each fit comfortably inside that; the limit exists so the
+ * failure is «you have enough layouts» rather than a truncated packet that
+ * silently drops the one you wanted.
+ */
+export const MAX_LAYOUTS = 16;
+
+/**
+ * Body bytes a LAYOUT_STATE may use, after the 16-byte header.
+ *
+ * `MAX_LAYOUTS` alone never bounded this: sixteen layouts of eight devices is
+ * roughly 5 KB against a 4 KB packet, because what costs bytes is devices and
+ * name lengths rather than the number of layouts. See `fitLayouts`.
+ */
+export const MAX_LAYOUT_BODY_BYTES = MAX_CONTROL_BYTES - HEADER_BYTES;
 
 /** Bytes per LED in an LED_UPDATE body: index, r, g, b, blink. */
 export const LED_ENTRY_BYTES = 5;
@@ -95,6 +132,56 @@ export const PacketKind = {
   LED_UPDATE: 10,
   /** Either direction: a raw SysEx message for one device. */
   SYSEX: 11,
+
+  // --- v3: where things are, and how the link is doing ---
+
+  /**
+   * Either direction: one device's placement and pin state.
+   *
+   * Sent by the headset when somebody moves or pins a device, and by the
+   * bridge when it has a stored placement to hand back. Single-device rather
+   * than a whole roster because a grab produces a stream of these as the hand
+   * moves, and re-sending every device's pose to move one of them would put a
+   * roster on the wire at hand-tracking rate.
+   */
+  DEVICE_POSE: 12,
+
+  /** Headset -> bridge: store the current arrangement under a name. */
+  LAYOUT_SAVE: 13,
+  /** Headset -> bridge: forget a stored arrangement. */
+  LAYOUT_DELETE: 14,
+  /**
+   * Headset -> bridge: this arrangement is the one in use now.
+   *
+   * The headset applies it locally; this only tells the bridge which one to
+   * hand back on the next connection. Restoring on reconnect is the whole
+   * reason layouts are worth having, and it needs somebody to remember which
+   * was last chosen across a session boundary.
+   */
+  LAYOUT_APPLY: 15,
+  /** Bridge -> headset: every stored arrangement, and which one is current. */
+  LAYOUT_STATE: 16,
+
+  /**
+   * Bridge -> headset: receive-side link quality.
+   *
+   * Jitter and loss cannot be measured on the headset. Round trip can — it is
+   * timed against our own PING — but the variation in transit time and the gaps
+   * in the sequence number are only visible where the packets arrive. The
+   * bridge has computed all of it since v1 and showed it only on the desktop
+   * dashboard, which is the one screen you cannot look at while wearing the
+   * headset.
+   */
+  LINK_STATS: 17,
+
+  /**
+   * Bridge -> headset: text the DAW sent a device to display.
+   *
+   * Real hardware scrolls this across the grid. There is nothing to scroll it
+   * across here, so it becomes a label above the device — which is more legible
+   * than a Launchpad has ever managed.
+   */
+  DEVICE_TEXT: 18,
 } as const;
 export type PacketKind = (typeof PacketKind)[keyof typeof PacketKind];
 
@@ -133,8 +220,14 @@ export const EventFlags = {
  *
  * v1 treated this as a fixed enum of the three built-in surfaces. v2 makes it a
  * runtime instance id, because there can now be several devices at once and a
- * user may hold two Launchpads. The three values below stay reserved so the
- * original surfaces keep their identity.
+ * user may hold two Launchpads.
+ *
+ * `PADS` is now the whole VRMC surface: its keys, pads and knobs were three
+ * ids aliased onto one MIDI port while they were three panels built into the
+ * headset's engine, and they are one device on one id since that surface
+ * became something you can add and remove. `KEYS` and `KNOBS` stay reserved
+ * rather than reused, so an older client's events cannot land on a Launchpad
+ * that happened to be given the number.
  */
 export const DeviceId = {
   PADS: 1,
@@ -148,6 +241,21 @@ export const FIRST_DYNAMIC_DEVICE_ID = 16;
 
 /** Highest device instance id. The field is one byte. */
 export const MAX_DEVICE_ID = 255;
+
+/**
+ * Devices that may be open at once.
+ *
+ * `MAX_DEVICE_ID` is not a bound on this — it bounds the *numbering*, and 240
+ * dynamic ids at up to three MIDI ports each is over seven hundred virtual
+ * endpoints published system-wide, in every DAW's port list, from a client
+ * that sends nothing more unusual than a lot of DEVICE_ADD.
+ *
+ * Sixteen because nobody plays sixteen instruments, and because a limit that
+ * is never reached in use is one whose refusal always means something went
+ * wrong. The bridge answers with a device that stays FAILED and says why,
+ * rather than dropping the request silently.
+ */
+export const MAX_ACTIVE_DEVICES = 16;
 
 /** MIDI status nibbles, for the bridge's encoder. */
 export const MidiStatus = {

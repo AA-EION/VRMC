@@ -27,6 +27,8 @@ const TYPES = {
   '.js': 'text/javascript',
   '.css': 'text/css',
   '.map': 'application/json',
+  '.glb': 'model/gltf-binary',
+  '.svg': 'image/svg+xml',
 };
 
 function serve() {
@@ -51,6 +53,17 @@ function serve() {
     server.listen(0, '127.0.0.1', () => resolve({ server, port: server.address().port }));
   });
 }
+
+/*
+ * Subtrees that are not instruments.
+ *
+ * The room's own furniture and the wrist console. Both are mounted for the
+ * whole session — the console hides itself rather than unmounting, so its
+ * shaders are compiled before somebody first turns their wrist rather than at
+ * the moment they do — so both are in the scene graph while the counts below
+ * are taken. Excluded by name so those counts keep saying what their names say.
+ */
+const ROOM_OBJECTS = ['backdrop-shell', 'focus-vignette', 'wrist-console'];
 
 const checks = [];
 const check = (name, pass, detail = '') => {
@@ -142,6 +155,64 @@ const codeBox = await page.evaluate(() => {
 check('pairing code field is usably wide', codeBox !== null && codeBox > 120,
   codeBox === null ? 'missing' : `${Math.round(codeBox)}px wide`);
 
+/*
+ * The identity actually reached the page.
+ *
+ * Three things, and each one has failed on its own before: the token layer
+ * resolves (a stylesheet that does not load leaves every colour at its
+ * @property initial value, which looks deliberate); the mark is inline and
+ * takes `currentColor` (an <img> would be the one element that cannot cross a
+ * theme change); and a theme choice actually reaches <html data-theme>, which
+ * is the single attribute the whole stylesheet keys off.
+ */
+const brand = await page.evaluate(() => {
+  const root = document.documentElement;
+  const style = getComputedStyle(root);
+  const read = (name) => style.getPropertyValue(name).trim();
+  const mark = document.querySelector('.masthead .mark');
+  return {
+    ink: read('--ink'),
+    surface: read('--surface'),
+    bone: read('--eion-bone'),
+    theme: root.dataset.theme ?? '',
+    markIsInline: mark !== null && mark.tagName.toLowerCase() === 'svg',
+    markTakesCurrentColor:
+      mark !== null && mark.querySelector('path')?.getAttribute('fill') === 'currentColor',
+    seal: document.querySelector('.eion-seal')?.textContent ?? '',
+  };
+});
+check('brand tokens resolve on the root', brand.bone === '#f2f0eb',
+  `--eion-bone ${brand.bone || 'unset'}`);
+check('the theme layer paints from the identity',
+  (brand.theme === 'dark' && brand.surface === 'rgb(11, 11, 12)') ||
+    (brand.theme === 'light' && brand.surface === 'rgb(242, 240, 235)'),
+  `${brand.theme} surface ${brand.surface}`);
+check('the mark is inline and takes the page ink',
+  brand.markIsInline && brand.markTakesCurrentColor,
+  brand.markIsInline ? 'svg, currentColor' : 'not an inline svg');
+check('the seal is set, never romanised', brand.seal === '永音', brand.seal);
+
+// Cycling the control writes a literal theme, which is the only thing the
+// stylesheet reads. `system` is a deferral and must survive as its own state
+// rather than collapsing into whichever of the two it resolves to today.
+const themeCycle = await page.evaluate(async () => {
+  const button = document.querySelector('button.theme');
+  if (button === null) return null;
+  const seen = [];
+  for (let i = 0; i < 4; i++) {
+    seen.push(document.documentElement.dataset.themePref ?? '');
+    button.click();
+    await new Promise((r) => requestAnimationFrame(r));
+  }
+  return seen;
+});
+check('the theme control cycles all three states',
+  themeCycle !== null &&
+    themeCycle.length === 4 &&
+    new Set(themeCycle).size === 3 &&
+    themeCycle[0] === themeCycle[3],
+  themeCycle === null ? 'no control' : themeCycle.join(' -> '));
+
 const webgl = await page.evaluate(() => {
   const canvas = document.querySelector('canvas');
   if (!canvas) return { ok: false, reason: 'no canvas element' };
@@ -160,14 +231,22 @@ check('canvas has non-zero size', webgl.ok && webgl.width > 0 && webgl.height > 
   webgl.ok ? `${webgl.width}x${webgl.height}` : '');
 
 // Reach into the running scene through the debug handle the app publishes.
-const scene = await page.evaluate(() => {
+const scene = await page.evaluate((roomObjects) => {
   const h = window.__vrmc;
   if (!h) return { ok: false, reason: 'no window.__vrmc handle' };
   let instanced = 0;
   let totalInstances = 0;
   let meshes = 0;
   let withInstanceColor = 0;
+  // True for anything inside a subtree the room owns rather than an instrument.
+  const isRoom = (node) => {
+    for (let n = node; n; n = n.parent) {
+      if (roomObjects.includes(n.name)) return true;
+    }
+    return false;
+  };
   h.scene.traverse((o) => {
+    if (isRoom(o)) return;
     if (o.isInstancedMesh) {
       instanced++;
       totalInstances += o.count;
@@ -186,18 +265,24 @@ const scene = await page.evaluate(() => {
     frames: info.frame,
     triangles: info.triangles,
   };
-});
+}, ROOM_OBJECTS);
 check('R3F scene reachable', scene.ok, scene.ok ? '' : scene.reason);
 
 if (scene.ok) {
-  check('both instrument surfaces built as instanced meshes', scene.instanced === 2,
+  // One surface, not two. The keys, the pads and the knobs were two panels and
+  // a loose row of knobs until the VRMC surface became a device; they are one
+  // instanced mesh on one plane now, which is what makes it movable.
+  check('the VRMC surface is one instanced mesh', scene.instanced === 1,
     `${scene.instanced} instanced`);
-  check('all 41 zones instanced (25 keys + 16 pads)', scene.totalInstances === 41,
+  check('all 45 zones instanced (25 keys + 16 pads + 4 knobs)', scene.totalInstances === 45,
     `${scene.totalInstances} instances`);
-  check('instance colours allocated by the highlighter', scene.withInstanceColor === 2,
-    `${scene.withInstanceColor}/2`);
-  // 2 backing plates + 1 label plane (pads only) + 4 knobs x 2 meshes each.
-  check('knobs, plates and labels present', scene.meshes === 11, `${scene.meshes} plain meshes`);
+  check('instance colours allocated', scene.withInstanceColor === 1,
+    `${scene.withInstanceColor}/1`);
+  // 1 backing plate + 4 knobs x 2 meshes each. The room's own shell is
+  // excluded where this is gathered: this check is about the instruments, and
+  // a count that quietly includes the backdrop stops saying what its name says
+  // the moment the room gains anything.
+  check('knobs and plate present', scene.meshes === 9, `${scene.meshes} plain meshes`);
   check('geometry rasterised', scene.triangles > 400, `${scene.triangles} triangles/frame`);
 }
 
@@ -219,16 +304,21 @@ const framing = await page.evaluate(() => {
   if (!h) return { ok: false };
   const cam = h.camera;
   const out = [];
-  for (const inst of h.engine.instruments) {
+  for (const inst of h.engine.launchpads) {
     const [ox, oy, oz] = inst.transform.origin;
     // Centre of the surface, in world space.
     const [qx, , , qw] = inst.transform.quaternion;
     const th = 2 * Math.atan2(qx, qw);
-    const cx = ox + inst.locator.width / 2;
-    const cy = oy + (inst.locator.height / 2) * Math.cos(th);
-    const cz = oz + (inst.locator.height / 2) * Math.sin(th);
+    const cx = ox + inst.layout.width / 2;
+    const cy = oy + (inst.layout.height / 2) * Math.cos(th);
+    const cz = oz + (inst.layout.height / 2) * Math.sin(th);
     const v = new h.THREE.Vector3(cx, cy, cz).project(cam);
-    out.push({ id: inst.id, x: +v.x.toFixed(3), y: +v.y.toFixed(3), z: +v.z.toFixed(3) });
+    out.push({
+      id: inst.spec.model,
+      x: +v.x.toFixed(3),
+      y: +v.y.toFixed(3),
+      z: +v.z.toFixed(3),
+    });
   }
   return { ok: true, projected: out };
 });
@@ -252,7 +342,36 @@ if (framing.ok) {
  * The overlay is hidden first, and the metric is near-white pixels: only the
  * keyboard's white keys are that bright, so this specifically proves the
  * instruments rendered rather than merely that the page has a background.
+ *
+ * That premise depends on the ground being dark, and since the UI took on the
+ * identity's palette the ground is Polymer Bone by default — itself near-white,
+ * and near-white across the whole viewport, which swamps the keys and turns
+ * both figures below into a measurement of the page rather than of the scene.
+ * So the theme is pinned to dark for the reading. The scene's own colours do
+ * not depend on it; only the paper behind them does.
  */
+await page.evaluate(async () => {
+  // `data-theme-ready` is what arms the 720 ms crossing. Removed first, so the
+  // change lands on this frame instead of easing through mid-grey — a grey page
+  // is above the `nonBackground` threshold, and sampling part-way through the
+  // ease would measure the crossing rather than the scene.
+  document.documentElement.removeAttribute('data-theme-ready');
+  /*
+   * Driven through the real control rather than by writing `data-theme`.
+   *
+   * The attribute is an *output* of brand/theme.ts, not an input: setting it by
+   * hand repaints the CSS and leaves the store still believing it is light, so
+   * anything reading the store — the galaxy's ink, the room's own surface —
+   * carries on in the other theme entirely. That divergence made the full-VR
+   * check below pass against a bone-white room in which a buried keyboard was
+   * every bit as near-white as a drawn one.
+   */
+  const control = document.querySelector('button.theme');
+  for (let i = 0; i < 5 && document.documentElement.dataset.theme !== 'dark'; i++) {
+    control.click();
+    await new Promise((r) => setTimeout(r, 30));
+  }
+});
 await page.addStyleTag({ content: '.overlay { display: none !important; }' });
 await page.waitForTimeout(300);
 const shot = (await page.screenshot()).toString('base64');
@@ -298,10 +417,16 @@ const interaction = await page.evaluate(async () => {
   if (!h) return { ok: false, reason: 'no handle' };
 
   const engine = h.engine;
-  const pads = engine.instruments.find((i) => i.id === 'pads');
-  if (!pads) return { ok: false, reason: 'no pad instrument' };
+  // The VRMC surface, and its first pad. It is a device now rather than a
+  // built-in panel, so it is found the same way any device is.
+  const pads = engine.launchpads.find((d) => d.spec.model === 'vrmc');
+  if (!pads) return { ok: false, reason: 'no VRMC device' };
 
-  const zone = pads.locator.zones[0];
+  const padZone = pads.layout.zones.find(
+    (z) => pads.layout.partOf(z.index) === 'pads',
+  );
+  if (!padZone) return { ok: false, reason: 'no pad zone' };
+  const zone = padZone;
   const t = pads.transform;
   const [qx, , , qw] = t.quaternion;
   const th = 2 * Math.atan2(qx, qw);
@@ -318,14 +443,16 @@ const interaction = await page.evaluate(async () => {
   const lx = zone.rect.x + zone.rect.width / 2;
   const ly = zone.rect.y + zone.rect.height / 2;
 
-  // Count notes by wrapping the router's sink methods.
+  // Count notes by wrapping the device's own sink. The device *is* the sink
+  // now — there is no separate router for it — which is the point: the same
+  // path a Launchpad uses.
   const notes = [];
-  const router = pads.router;
-  const realOn = router.noteOn.bind(router);
-  router.noteOn = (zi, note, vel, off, flags) => {
-    notes.push({ zone: zi, note, vel });
-    realOn(zi, note, vel, off, flags);
+  const realOn = pads.noteOn.bind(pads);
+  pads.noteOn = (zi, control, vel, off, flags) => {
+    notes.push({ zone: zi, note: control, vel });
+    realOn(zi, control, vel, off, flags);
   };
+  const router = pads;
 
   const RADIUS = 0.008;
   const frame = engine.fingers;
@@ -352,46 +479,58 @@ const interaction = await page.evaluate(async () => {
     pads.detector.update(frame, router);
   }
 
-  // Read the instance colour the highlighter wrote for that pad.
-  let padColor = null;
-  h.scene.traverse((o) => {
-    if (o.isInstancedMesh && o.count === 16 && o.instanceColor) {
-      const a = o.instanceColor.array;
-      padColor = [a[0], a[1], a[2]].map((v) => +v.toFixed(3));
-    }
-  });
-
-  router.noteOn = realOn;
-  return { ok: true, notes, padColor };
+  pads.noteOn = realOn;
+  return { ok: true, notes, struck: zone.index };
 });
 
 check('poke produced a note', interaction.ok && interaction.notes.length === 1,
   interaction.ok ? JSON.stringify(interaction.notes) : interaction.reason);
 if (interaction.ok && interaction.notes.length === 1) {
   const n = interaction.notes[0];
-  check('note is pad 1 (C1, MIDI 36)', n.note === 36 && n.zone === 0, `note=${n.note} zone=${n.zone}`);
+  // The control *id*, not the MIDI byte: the pads' ids start at 100 and the
+  // bridge resolves them against the spec, exactly as it does for a Launchpad.
+  check('note is the first pad, by control id', n.note === 100, `note=${n.note} zone=${n.zone}`);
   check('velocity derived from approach speed', n.vel > 1 && n.vel <= 127, `velocity=${n.vel}`);
 }
+/**
+ * Read the struck pad's instance colour, once a frame has actually written it.
+ *
+ * Inside the poke evaluate it cannot be read at all: the buffer is filled by
+ * `LedState.update` from the render loop, so nothing has been written yet and
+ * what comes back is the resting colour. This check used to do exactly that,
+ * and passed — the resting colour happens to be slightly bluer than it is red,
+ * which is all the old assertion asked for. It has never tested a highlight
+ * until now.
+ */
+const readStruckPad = () =>
+  page.evaluate((struck) => {
+    const h = window.__vrmc;
+    let colour = null;
+    h.scene.traverse((o) => {
+      if (o.isInstancedMesh && o.count === 45 && o.instanceColor) {
+        const a = o.instanceColor.array;
+        const i = struck * 3;
+        colour = [a[i], a[i + 1], a[i + 2]].map((v) => +v.toFixed(3));
+      }
+    });
+    return colour;
+  }, interaction.ok ? interaction.struck : 0);
+
+// Much brighter than its resting colour, which is the dark plastic a pad grid
+// sits at. The touch overlay mixes toward white rather than to a fixed accent,
+// so the assertion is about brightness rather than about hue.
+await page.waitForTimeout(150);
+const padColor = await readStruckPad();
 check('struck pad lit up in the instance colour buffer',
-  interaction.ok && interaction.padColor !== null &&
-    interaction.padColor[2] > interaction.padColor[0],
-  `rgb=${JSON.stringify(interaction.padColor)}`);
+  padColor !== null && padColor.every((c) => c > 0.5),
+  `rgb=${JSON.stringify(padColor)}`);
 
 // A held zone must not fade. Let several frames elapse, then confirm it is
-// still lit — this is the regression guard for the highlighter's held state.
+// still lit — this is the regression guard for the held state.
 await page.waitForTimeout(400);
-const stillLit = await page.evaluate(() => {
-  const h = window.__vrmc;
-  let colour = null;
-  h.scene.traverse((o) => {
-    if (o.isInstancedMesh && o.count === 16 && o.instanceColor) {
-      const a = o.instanceColor.array;
-      colour = [a[0], a[1], a[2]].map((v) => +v.toFixed(3));
-    }
-  });
-  return colour;
-});
-check('held pad stays lit across frames', stillLit !== null && stillLit[2] > stillLit[0] + 0.3,
+const stillLit = await readStruckPad();
+check('held pad stays lit across frames',
+  stillLit !== null && stillLit.every((c) => c > 0.5),
   `rgb=${JSON.stringify(stillLit)}`);
 
 /*
@@ -470,7 +609,8 @@ const launchpad = await page.evaluate(async () => {
   };
 });
 
-check('emulated Launchpad spawned', launchpad.ok && launchpad.deviceCount === 1,
+// Two: the VRMC surface the engine starts with, and the Launchpad just added.
+check('emulated Launchpad spawned', launchpad.ok && launchpad.deviceCount === 2,
   launchpad.ok ? `${launchpad.model}, ${launchpad.zones} controls` : launchpad.reason);
 if (launchpad.ok) {
   // 64 grid pads + 8 top + 8 scene = 80 pokeable controls; the logo is not one.
@@ -493,7 +633,9 @@ const lit = await page.evaluate(() => {
     if (o.isInstancedMesh && o.count === 80 && o.instanceColor) lpMesh = o;
   });
   if (!lpMesh) return { ok: false };
-  const device = h.engine.launchpads[0];
+  // By model, not by position: the VRMC surface holds index 0 now.
+  const device = h.engine.launchpads.find((d) => d.spec.model === 'launchpad-x');
+  if (!device) return { ok: false };
   const read = (xy) => {
     const z = device.layout.zoneForIndex(xy);
     const a = lpMesh.instanceColor.array;
@@ -599,6 +741,511 @@ const keypad = await page.evaluate(async () => {
     typed: controller.value,
     instanced,
   };
+});
+
+/*
+ * The room, and the switch into it.
+ *
+ * The claim being tested is the one the whole feature rests on: going fully
+ * immersive is a *render* decision inside the existing session, so the shell
+ * and the clouds are already in the scene graph while the player is in
+ * passthrough — invisible and costing nothing — and the toggle only changes
+ * how opaque they are. If this ever starts building the galaxy on the toggle,
+ * the switch stops being free and starts being a stall.
+ */
+const backdrop = await page.evaluate(async () => {
+  const h = window.__vrmc;
+  if (!h) return { ok: false, reason: 'no handle' };
+
+  const survey = () => {
+    let points = 0;
+    let particles = 0;
+    let visiblePoints = 0;
+    let shellAlpha = null;
+    h.scene.traverse((o) => {
+      if (o.isPoints) {
+        points++;
+        particles += o.geometry.getAttribute('position')?.count ?? 0;
+        if (o.visible) visiblePoints++;
+      }
+      if (o.name === 'backdrop-shell') shellAlpha = o.material?.uniforms?.uAlpha?.value ?? null;
+    });
+    return { points, particles, visiblePoints, shellAlpha };
+  };
+
+  /*
+   * Wait for the fade to *settle*, not for a duration.
+   *
+   * The crossfade advances in frame time, and its per-frame step is clamped so
+   * that a hitch cannot make the room jump. Under SwiftShader a frame can take
+   * most of a second, so a fixed wall-clock wait lands wherever the software
+   * renderer happened to get to — 0.994 on the first run of this, which is a
+   * fact about the test host and not about the code. On a headset at 90 Hz the
+   * same 720 ms is 65 frames and long finished.
+   */
+  const settle = async (want) => {
+    for (let i = 0; i < 400; i++) {
+      const state = survey();
+      if (state.shellAlpha === want) return state;
+      await new Promise((r) => requestAnimationFrame(r));
+    }
+    return survey();
+  };
+
+  const before = survey();
+  const button = [...document.querySelectorAll('.segmented button')].find(
+    (b) => b.textContent.trim() === 'Full VR',
+  );
+  if (!button) return { ok: false, reason: 'no Full VR control' };
+  button.click();
+  const after = await settle(1);
+
+  const back = [...document.querySelectorAll('.segmented button')].find(
+    (b) => b.textContent.trim() === 'Your room',
+  );
+  back.click();
+  const returned = await settle(0);
+
+  return { ok: true, before, after, returned };
+});
+
+check('the galaxy is built before it is asked for', backdrop.ok && backdrop.before.points === 3,
+  backdrop.ok ? `${backdrop.before.points} clouds, ${backdrop.before.particles} particles` : backdrop.reason);
+if (backdrop.ok) {
+  check('the room costs nothing while it is not showing',
+    backdrop.before.visiblePoints === 0 && backdrop.before.shellAlpha === 0,
+    `${backdrop.before.visiblePoints} visible clouds, shell alpha ${backdrop.before.shellAlpha}`);
+  // Fully opaque, not merely nearly: at 0.999 the compositor is still blending
+  // a thousandth of the real room in, which reads as a dirty lens.
+  check('full VR reaches a completely opaque room',
+    backdrop.after.shellAlpha === 1 && backdrop.after.visiblePoints === 3,
+    `shell alpha ${backdrop.after.shellAlpha}, ${backdrop.after.visiblePoints} clouds drawn`);
+  check('switching back leaves the buffer transparent again',
+    backdrop.returned.shellAlpha === 0 && backdrop.returned.visiblePoints === 0,
+    `shell alpha ${backdrop.returned.shellAlpha}, ${backdrop.returned.visiblePoints} clouds drawn`);
+  check('no cloud was rebuilt by the switch',
+    backdrop.after.particles === backdrop.before.particles &&
+      backdrop.returned.particles === backdrop.before.particles,
+    `${backdrop.before.particles} -> ${backdrop.after.particles} -> ${backdrop.returned.particles}`);
+}
+
+/*
+ * The instruments survive the room.
+ *
+ * This is here because the room once ate them and every other check passed.
+ * three draws all opaque geometry first and only then the transparent objects,
+ * sorted among themselves — so a transparent shell with its depth test off is
+ * drawn *after* the pads and straight over them. What that looked like was a
+ * galaxy with the pad labels floating correctly in it (labels are transparent,
+ * and sorted after the shell) and solid black where every pad and every white
+ * key should have been. Counting the keys through the room is the cheapest
+ * thing that would have caught it.
+ */
+const throughTheRoom = await page.evaluate(async () => {
+  const button = [...document.querySelectorAll('.segmented button')].find(
+    (b) => b.textContent.trim() === 'Full VR',
+  );
+  button.click();
+  for (let i = 0; i < 600; i++) {
+    let alpha = null;
+    window.__vrmc.scene.traverse((o) => {
+      if (o.name === 'backdrop-shell') alpha = o.material?.uniforms?.uAlpha?.value ?? null;
+    });
+    if (alpha === 1) return true;
+    await new Promise((r) => requestAnimationFrame(r));
+  }
+  return false;
+});
+check('the room reached full opacity for the reading', throughTheRoom === true);
+
+/*
+ * Measured inside the keyboard's own projected box.
+ *
+ * This check exists because the room once ate the instruments and everything
+ * else still passed, so it is worth saying what it took to make it actually
+ * discriminate. A plain tally of near-white pixels does not: on the dark theme
+ * the galaxy's ink is Absolute White, so a million particle pixels clear the
+ * threshold whether or not the pads are buried underneath them. The longest
+ * unbroken *run* does not either — the white keys are drawn as separate boxes
+ * with a seam between them, so one key is about eighteen pixels wide and the
+ * only long run in the frame belonged to the bone-white shell that was doing
+ * the burying.
+ *
+ * What does discriminate is where the white is. The keys are projected to a
+ * screen box and the near-white inside it is counted: thousands when the
+ * keyboard is drawn, a scattering of stray particles when the room is over it.
+ */
+const keyBox = await page.evaluate(() => {
+  const h = window.__vrmc;
+  const keys = h?.engine?.launchpads?.find((d) => d.spec.model === 'vrmc');
+  if (!keys) return null;
+  const [ox, oy, oz] = keys.transform.origin;
+  const [qx, , , qw] = keys.transform.quaternion;
+  const th = 2 * Math.atan2(qx, qw);
+  const cos = Math.cos(th);
+  const sin = Math.sin(th);
+  let minX = 1;
+  let maxX = -1;
+  let minY = 1;
+  let maxY = -1;
+  // The four corners of the surface, in its own frame, projected out.
+  for (const [lx, ly] of [
+    [0, 0],
+    [keys.layout.width, 0],
+    [0, keys.layout.height],
+    [keys.layout.width, keys.layout.height],
+  ]) {
+    const v = new h.THREE.Vector3(ox + lx, oy + ly * cos, oz + ly * sin).project(h.camera);
+    minX = Math.min(minX, v.x);
+    maxX = Math.max(maxX, v.x);
+    minY = Math.min(minY, v.y);
+    maxY = Math.max(maxY, v.y);
+  }
+  return { minX, maxX, minY, maxY };
+});
+
+const roomShot = (await page.screenshot()).toString('base64');
+const inBox = await page.evaluate(
+  async ({ b64, box }) => {
+    const img = new Image();
+    img.src = `data:image/png;base64,${b64}`;
+    await img.decode();
+    const off = document.createElement('canvas');
+    off.width = img.width;
+    off.height = img.height;
+    const ctx = off.getContext('2d');
+    ctx.drawImage(img, 0, 0);
+    const px = (ndc) => Math.round(((ndc + 1) / 2) * (img.width - 1));
+    const py = (ndc) => Math.round(((1 - ndc) / 2) * (img.height - 1));
+    const x0 = Math.max(0, px(box.minX));
+    const x1 = Math.min(img.width - 1, px(box.maxX));
+    const y0 = Math.max(0, py(box.maxY));
+    const y1 = Math.min(img.height - 1, py(box.minY));
+    if (x1 <= x0 || y1 <= y0) return { bright: 0, area: 0 };
+    const { data } = ctx.getImageData(x0, y0, x1 - x0 + 1, y1 - y0 + 1);
+    let bright = 0;
+    for (let i = 0; i < data.length; i += 4) {
+      if (data[i] > 200 && data[i + 1] > 200 && data[i + 2] > 200) bright++;
+    }
+    return { bright, area: (x1 - x0 + 1) * (y1 - y0 + 1) };
+  },
+  { b64: roomShot, box: keyBox ?? { minX: 0, maxX: 0, minY: 0, maxY: 0 } },
+);
+
+check('the instruments are still drawn inside the full-VR room',
+  keyBox !== null && inBox.bright > inBox.area * 0.25,
+  `${inBox.bright} near-white px in the keyboard's ${inBox.area}px box`);
+
+/*
+ * Grabbing a device moves the mesh and the detector together.
+ *
+ * This is the check that matters for movable instruments, and it is why the
+ * pose has exactly one setter. placement.ts is explicit about the failure mode:
+ * a transform the renderer derives separately from the one the detector inverts
+ * does not look broken — the pads simply trigger somewhere other than where
+ * they are drawn, which is far harder to find than an obvious break. So a poke
+ * is thrown at the device's *new* position and has to produce a note.
+ */
+const grabbed = await page.evaluate(async () => {
+  const h = window.__vrmc;
+  const engine = h?.engine;
+  const device = engine?.launchpads?.[0];
+  if (!device) return { ok: false, reason: 'no emulated device' };
+
+  const meshFor = () => {
+    let found = null;
+    h.scene.traverse((o) => {
+      if (o.isInstancedMesh && o.count === device.layout.zones.length) found = o;
+    });
+    return found;
+  };
+
+  const before = {
+    centre: [...device.pose.centre],
+    mesh: meshFor()?.parent?.position?.toArray() ?? null,
+  };
+
+  // Pinch inside the device, carry it, let go — through the real controller.
+  const frame = engine.fingers;
+  const sink = {
+    events: [],
+    noteOn(zone, control, velocity) { this.events.push({ zone, control, velocity }); },
+    noteOff() {},
+    aftertouch() {},
+  };
+  let clock = performance.now();
+  const step = (x, y, z, separation) => {
+    clock += 1000 / 90;
+    frame.beginFrame(clock, 1 / 90);
+    frame.setFinger(0, x - separation / 2, y, z, 0.008);
+    frame.setFinger(1, x + separation / 2, y, z, 0.008);
+    engine.grabs.update(frame, engine.grabSink);
+  };
+
+  const [cx, cy, cz] = device.pose.centre;
+  step(cx, cy, cz, 0.05);
+  step(cx, cy, cz, 0.015);
+  const moved = [cx + 0.25, cy + 0.1, cz + 0.05];
+  for (let i = 1; i <= 10; i++) {
+    step(cx + (0.25 * i) / 10, cy + (0.1 * i) / 10, cz + (0.05 * i) / 10, 0.015);
+  }
+  step(moved[0], moved[1], moved[2], 0.05);
+
+  await new Promise((r) => requestAnimationFrame(r));
+  await new Promise((r) => requestAnimationFrame(r));
+
+  const after = {
+    centre: [...device.pose.centre],
+    mesh: meshFor()?.parent?.position?.toArray() ?? null,
+  };
+
+  // Now poke where the device *now* is, through its own detector, and see
+  // whether it answers. This is the whole point of the check.
+  const zone = device.layout.zones[0];
+  const t = device.transform;
+  const q = t.quaternion;
+  const rotate = (x, y, z) => {
+    const [qx, qy, qz, qw] = q;
+    const tx = qy * z - qz * y + qw * x;
+    const ty = qz * x - qx * z + qw * y;
+    const tz = qx * y - qy * x + qw * z;
+    return [
+      x + 2 * (qy * tz - qz * ty),
+      y + 2 * (qz * tx - qx * tz),
+      z + 2 * (qx * ty - qy * tx),
+    ];
+  };
+  const toWorld = (lx, ly, lz) => {
+    const v = rotate(lx, ly, lz);
+    return [t.origin[0] + v[0], t.origin[1] + v[1], t.origin[2] + v[2]];
+  };
+
+  const lx = zone.rect.x + zone.rect.width / 2;
+  const ly = zone.rect.y + zone.rect.height / 2;
+  device.detector.releaseAll(sink);
+  sink.events = [];
+  for (let i = 0; i <= 6; i++) {
+    const depth = 0.03 - (0.04 * i) / 6;
+    const [wx, wy, wz] = toWorld(lx, ly, zone.raise + 0.008 + depth);
+    clock += 1000 / 90;
+    frame.beginFrame(clock, 1 / 90);
+    frame.setFinger(6, wx, wy, wz, 0.008);
+    device.detector.update(frame, sink);
+  }
+
+  return {
+    ok: true,
+    before,
+    after,
+    moved,
+    notes: sink.events.length,
+    pinned: device.pinned,
+  };
+});
+
+check('a pinch carries the device', grabbed.ok &&
+  Math.abs(grabbed.after.centre[0] - grabbed.moved[0]) < 1e-3,
+  grabbed.ok
+    ? `centre ${grabbed.before.centre.map((n) => n.toFixed(2))} -> ${grabbed.after.centre.map((n) => n.toFixed(2))}`
+    : grabbed.reason);
+if (grabbed.ok) {
+  check('the mesh went with it',
+    grabbed.after.mesh !== null &&
+      Math.abs(grabbed.after.mesh[0] - grabbed.before.mesh[0] - 0.25) < 1e-3,
+    `mesh x ${grabbed.before.mesh?.[0]?.toFixed(3)} -> ${grabbed.after.mesh?.[0]?.toFixed(3)}`);
+  // The one that would have caught a drifted detector.
+  check('and the pads answer where they are now drawn', grabbed.notes > 0,
+    `${grabbed.notes} note(s) from a poke at the new position`);
+}
+
+/*
+ * The hand mesh loads from this origin and binds to the standard's joints.
+ *
+ * There is no XR device here, so the runtime is faked — but everything that is
+ * ours is real: the vendored glb is fetched over HTTP exactly as the headset
+ * would fetch it, SkeletonUtils clones it, and each of the twenty-five bones is
+ * looked up *by the name the standard gives its joint*. That last part is the
+ * whole binding and the one thing that could silently rot: swap the asset for a
+ * differently-rigged hand and every bone lookup returns undefined, the hand
+ * renders in its bind pose, and nothing else in this suite would notice.
+ */
+const HAND_JOINT_NAMES = [
+  'wrist',
+  'thumb-metacarpal', 'thumb-phalanx-proximal', 'thumb-phalanx-distal', 'thumb-tip',
+  'index-finger-metacarpal', 'index-finger-phalanx-proximal',
+  'index-finger-phalanx-intermediate', 'index-finger-phalanx-distal', 'index-finger-tip',
+  'middle-finger-metacarpal', 'middle-finger-phalanx-proximal',
+  'middle-finger-phalanx-intermediate', 'middle-finger-phalanx-distal', 'middle-finger-tip',
+  'ring-finger-metacarpal', 'ring-finger-phalanx-proximal',
+  'ring-finger-phalanx-intermediate', 'ring-finger-phalanx-distal', 'ring-finger-tip',
+  'pinky-finger-metacarpal', 'pinky-finger-phalanx-proximal',
+  'pinky-finger-phalanx-intermediate', 'pinky-finger-phalanx-distal', 'pinky-finger-tip',
+];
+
+const hands = await page.evaluate(async (JOINTS) => {
+  const h = window.__vrmc;
+  const engine = h?.engine;
+  if (!engine?.skeleton) return { ok: false, reason: 'no skeleton on the engine' };
+
+  const hand = () => new Map(JOINTS.map((name) => [name, { name }]));
+  engine.skeleton.syncInputSources({
+    inputSources: [
+      { handedness: 'left', hand: hand() },
+      { handedness: 'right', hand: hand() },
+    ],
+  });
+
+  // A pose per joint, distinguishable so the bind can be checked for having
+  // actually happened rather than for merely not throwing.
+  const frame = {
+    fillPoses(spaces, base, out) {
+      let j = 0;
+      for (const space of spaces) {
+        void space;
+        for (let k = 0; k < 16; k++) out[j * 16 + k] = k % 5 === 0 ? 1 : 0;
+        // Translation lives in elements 12..14 of a column-major 4x4.
+        out[j * 16 + 12] = j * 0.01;
+        out[j * 16 + 13] = 1.2;
+        out[j * 16 + 14] = -0.4;
+        j++;
+      }
+      return true;
+    },
+  };
+
+  const countSkinned = () => {
+    let n = 0;
+    h.scene.traverse((o) => {
+      if (o.isSkinnedMesh) n++;
+    });
+    return n;
+  };
+
+  // Wait for both glb files to land and the rigs to mount.
+  for (let i = 0; i < 600; i++) {
+    engine.skeleton.update(frame, {});
+    if (countSkinned() >= 2) break;
+    await new Promise((r) => requestAnimationFrame(r));
+  }
+  // A few more frames so the bind runs against a mounted rig.
+  for (let i = 0; i < 5; i++) {
+    engine.skeleton.update(frame, {});
+    await new Promise((r) => requestAnimationFrame(r));
+  }
+
+  let skinned = 0;
+  let visible = 0;
+  let placed = 0;
+  const missing = [];
+  h.scene.traverse((o) => {
+    if (!o.isSkinnedMesh) return;
+    skinned++;
+    // Walk up to whatever node actually carries the named bones.
+    let root = o;
+    while (root.parent && !JOINTS.some((n) => root.getObjectByName(n))) root = root.parent;
+    for (const name of JOINTS) {
+      const bone = root.getObjectByName(name);
+      if (!bone) missing.push(name);
+      // The bind writes the joint matrix into the bone's own elements, so a
+      // bound bone carries the translation the fake frame put there.
+      else if (Math.abs(bone.matrix.elements[13] - 1.2) < 1e-6) placed++;
+    }
+    if (o.visible) visible++;
+  });
+
+  return {
+    ok: true,
+    skinned,
+    visible,
+    missingCount: missing.length,
+    missing: missing.slice(0, 3),
+    placed,
+    bound: engine.skeleton.hands.length,
+  };
+}, HAND_JOINT_NAMES);
+
+check('both hand meshes load from this origin', hands.ok && hands.skinned === 2,
+  hands.ok ? `${hands.skinned} skinned meshes, ${hands.bound} hands bound` : hands.reason);
+if (hands.ok && hands.skinned === 2) {
+  // 25 joints x 2 hands. A rig whose bones are named anything else fails here
+  // and nowhere else in this suite.
+  check('every joint the standard names is present in the asset', hands.missingCount === 0,
+    hands.missingCount === 0 ? '50/50 bones found' : `missing ${hands.missing.join(', ')}`);
+  check('the runtime pose reaches the bones', hands.placed === 50,
+    `${hands.placed}/50 bones carry the frame's own translation`);
+  check('a tracked hand is drawn', hands.visible === 2, `${hands.visible} visible`);
+}
+
+/*
+ * The same rig, doing two different jobs.
+ *
+ * In the galaxy the hands are drawn. Against passthrough they write depth and
+ * no colour, which is what makes the compositor show your own hands there while
+ * the pad behind them is correctly hidden — Meta's own recommended route, since
+ * their depth map deliberately has hands removed from it.
+ *
+ * Checked as one rig rather than two on purpose: a silhouette that is not
+ * exactly the drawn hand's shape shows a seam at the one edge that has to be
+ * clean, and a mode toggle must not refetch and re-clone a skinned mesh.
+ */
+const occlusion = await page.evaluate(async () => {
+  const h = window.__vrmc;
+  const survey = () => {
+    let meshes = 0;
+    let colourWriting = 0;
+    let depthOnly = 0;
+    const orders = new Set();
+    const materials = new Set();
+    h.scene.traverse((o) => {
+      if (!o.isSkinnedMesh) return;
+      meshes++;
+      orders.add(o.renderOrder);
+      materials.add(o.material.uuid);
+      if (o.material.colorWrite) colourWriting++;
+      else if (o.material.depthWrite) depthOnly++;
+    });
+    return { meshes, colourWriting, depthOnly, orders: [...orders], materials: materials.size };
+  };
+
+  const click = (label) =>
+    [...document.querySelectorAll('.segmented button')]
+      .find((b) => b.textContent.trim() === label)
+      .click();
+
+  const settle = async () => {
+    for (let i = 0; i < 30; i++) await new Promise((r) => requestAnimationFrame(r));
+  };
+
+  const inGalaxy = survey();
+  click('Your room');
+  await settle();
+  const inRoom = survey();
+  click('Full VR');
+  await settle();
+  const back = survey();
+
+  return { inGalaxy, inRoom, back };
+});
+
+check('the hands are drawn in the galaxy',
+  occlusion.inGalaxy.meshes === 2 && occlusion.inGalaxy.colourWriting === 2,
+  `${occlusion.inGalaxy.colourWriting}/2 writing colour`);
+check('the hands become depth-only occluders against passthrough',
+  occlusion.inRoom.meshes === 2 &&
+    occlusion.inRoom.depthOnly === 2 &&
+    occlusion.inRoom.colourWriting === 0,
+  `${occlusion.inRoom.depthOnly}/2 depth-only, ${occlusion.inRoom.colourWriting} writing colour`);
+check('the occluder is drawn before the instruments',
+  occlusion.inRoom.orders.every((o) => o < 0),
+  `render order ${occlusion.inRoom.orders.join(', ')}`);
+check('switching rooms reuses the rig rather than rebuilding it',
+  occlusion.back.meshes === 2 && occlusion.back.colourWriting === 2,
+  `${occlusion.back.meshes} meshes after two switches`);
+
+await page.evaluate(() => {
+  [...document.querySelectorAll('.segmented button')]
+    .find((b) => b.textContent.trim() === 'Your room')
+    .click();
 });
 
 check('pairing keypad renders in the scene', keypad.ok,

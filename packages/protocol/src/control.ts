@@ -2,6 +2,13 @@
 
 import { HEADER_BYTES, LED_ENTRY_BYTES, MAX_CONTROL_BYTES } from './constants.js';
 import type { PacketWriter } from './codec.js';
+import {
+  PLACEMENT_BYTES,
+  PlacementFlags,
+  readPlacement,
+  writePlacement,
+  type DevicePlacement,
+} from './pose.js';
 
 /**
  * Variable-length control frames: device lifecycle, LED updates, SysEx.
@@ -30,6 +37,34 @@ export type DeviceStatus = (typeof DeviceStatus)[keyof typeof DeviceStatus];
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
+/**
+ * Longest a model name may be. Comfortably past the longest real one
+ * ("launchpad-pro-mk3"), and far short of the 255 the length byte allows.
+ */
+export const MAX_MODEL_NAME_BYTES = 64;
+
+/**
+ * Whether a string is shaped like a model identifier.
+ *
+ * Models are identifiers the two sides agree on — `launchpad-x`, `vrmc` — not
+ * free text, and nothing checked that. `DEVICE_ADD` carried up to 255 arbitrary
+ * bytes straight into the roster, from there into the dashboard's devices table
+ * (which builds markup by concatenation) and into the name of a MIDI port
+ * published system-wide. A model of `<img src=x onerror=…>` ran script on the
+ * dashboard, which is same-origin with /api/status and therefore with the
+ * pairing code and the machine's addresses.
+ *
+ * So this is the boundary check: letters, digits, and the few separators real
+ * model names use. Rejecting rather than sanitising, because a name that is not
+ * one of the agreed identifiers is not something to guess the intent of — the
+ * caller counts it as a malformed packet, which is what it is.
+ */
+export function isValidModelName(model: string): boolean {
+  if (model.length === 0) return false;
+  if (encoder.encode(model).length > MAX_MODEL_NAME_BYTES) return false;
+  return /^[A-Za-z0-9][A-Za-z0-9 _.-]*$/.test(model);
+}
+
 // --- DEVICE_ADD ---
 
 /** Body: deviceId, model length, model name. */
@@ -48,7 +83,11 @@ export function readDeviceAdd(body: Uint8Array): DeviceAdd | null {
   if (body.length < 2) return null;
   const len = body[1]!;
   if (body.length < 2 + len) return null;
-  return { deviceId: body[0]!, model: decoder.decode(body.subarray(2, 2 + len)) };
+  const model = decoder.decode(body.subarray(2, 2 + len));
+  // Checked here rather than at the caller so every reader inherits it: this
+  // is the one place a model name crosses from the wire into the bridge.
+  if (!isValidModelName(model)) return null;
+  return { deviceId: body[0]!, model };
 }
 
 // --- DEVICE_REMOVE ---
@@ -69,8 +108,25 @@ export interface DeviceStateEntry {
   model: string;
   /** Port names when ready, or the reason when failed. */
   detail: string;
+  /**
+   * Where the bridge last saw this device, or null if nobody has placed it.
+   *
+   * Null is a real answer and not a missing one: a device the bridge opened at
+   * startup has never been anywhere, and the headset should put it at the
+   * default pose rather than at the origin. Encoding it as a present-but-zero
+   * placement would make «nobody has moved this» indistinguishable from
+   * «somebody put this at the player's feet».
+   */
+  placement: DevicePlacement | null;
 }
 
+/**
+ * v3 appends a placement to every entry.
+ *
+ * Written as a presence byte followed by the placement when there is one, so
+ * the common case — a device the bridge opened and nobody has moved — costs a
+ * single byte rather than twenty-two of zeroes.
+ */
 export function writeDeviceState(w: PacketWriter, entries: readonly DeviceStateEntry[]): boolean {
   if (!w.pushU8(entries.length)) return false;
   for (const e of entries) {
@@ -84,6 +140,11 @@ export function writeDeviceState(w: PacketWriter, entries: readonly DeviceStateE
       !w.pushU8(detail.length) ||
       !w.pushRaw(detail)
     ) {
+      return false;
+    }
+    if (e.placement === null) {
+      if (!w.pushU8(0)) return false;
+    } else if (!w.pushU8(1) || !writePlacement(w, e.placement)) {
       return false;
     }
   }
@@ -110,10 +171,45 @@ export function readDeviceState(body: Uint8Array): DeviceStateEntry[] {
     if (o + detailLen > body.length) break;
     const detail = decoder.decode(body.subarray(o, o + detailLen));
     o += detailLen;
-    out.push({ deviceId, status, model, detail });
+
+    if (o >= body.length) break;
+    const hasPlacement = body[o]! === 1;
+    o += 1;
+    let placement: DevicePlacement | null = null;
+    if (hasPlacement) {
+      placement = readPlacement(body, o);
+      // A truncated placement ends the walk rather than being skipped: the
+      // entries after it are no longer aligned to anything, and reading them
+      // anyway would report devices that are not there.
+      if (placement === null) break;
+      o += PLACEMENT_BYTES;
+    }
+
+    out.push({ deviceId, status, model, detail, placement });
   }
   return out;
 }
+
+// --- DEVICE_POSE ---
+
+/**
+ * One device's placement, in either direction.
+ *
+ * Single-device rather than a roster because this is what a grab produces: the
+ * headset sends one of these as the hand settles, and re-sending every device's
+ * pose in order to move one of them would put the whole roster on the wire at
+ * hand-tracking rate.
+ */
+export function writeDevicePose(w: PacketWriter, placement: DevicePlacement): boolean {
+  return writePlacement(w, placement);
+}
+
+export function readDevicePose(body: Uint8Array): DevicePlacement | null {
+  return readPlacement(body, 0);
+}
+
+export { PlacementFlags };
+export type { DevicePlacement };
 
 // --- LED_UPDATE ---
 
@@ -169,6 +265,28 @@ export function readLedUpdate(body: Uint8Array, visit: LedVisitor): number {
     o += LED_ENTRY_BYTES;
   }
   return deviceId;
+}
+
+// --- DEVICE_TEXT ---
+
+/** Body: deviceId, length, UTF-8 text. */
+export function writeDeviceText(w: PacketWriter, deviceId: number, text: string): boolean {
+  // Truncated by characters rather than bytes, so a multi-byte one is never cut
+  // in half into a replacement character.
+  let clipped = text.slice(0, 120);
+  let bytes = encoder.encode(clipped);
+  while (bytes.length > 200 && clipped.length > 0) {
+    clipped = clipped.slice(0, -1);
+    bytes = encoder.encode(clipped);
+  }
+  return w.pushU8(deviceId) && w.pushU8(bytes.length) && w.pushRaw(bytes);
+}
+
+export function readDeviceText(body: Uint8Array): { deviceId: number; text: string } | null {
+  if (body.length < 2) return null;
+  const len = body[1]!;
+  if (body.length < 2 + len) return null;
+  return { deviceId: body[0]!, text: decoder.decode(body.subarray(2, 2 + len)) };
 }
 
 // --- SYSEX ---

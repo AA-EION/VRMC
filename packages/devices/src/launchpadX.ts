@@ -26,11 +26,17 @@ export const LAUNCHPAD_X: DeviceSpec = {
   sysexDeviceId: 0x0c,
   familyCode: [0x03, 0x01],
   firmwareVersion: [0x09, 0x09, 0x09],
+  manufacturer: 'Focusrite - Novation',
 
-  // Names as the hardware presents them. Ableton's script matches on these, so
-  // they are functional strings rather than cosmetic ones.
-  portNames: ['LPX MIDI', 'LPX DAW'],
-  dawPortIndex: 1,
+  // The names a stock Launchpad X puts on the bus, and the order Live expects
+  // them in. These were `LPX (DAW)` / `LPX (MIDI)` — CoreFW's strings, which
+  // are its own: it is community firmware, and it parenthesises where Novation
+  // does not. Novation's own Ableton setup guide names the ports `LPX DAW` and
+  // `LPX MIDI`, and Live's Launchpad_X script lists two in and two out with
+  // SCRIPT on the first pair and REMOTE on the second, which is the DAW port
+  // first.
+  portNames: ['LPX DAW', 'LPX MIDI'],
+  dawPortIndex: 0,
 
   controls: [
     ...gridControls(),

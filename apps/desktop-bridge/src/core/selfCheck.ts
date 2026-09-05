@@ -1,6 +1,11 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
-import { requireNative } from '../native.js';
+import { requireNative } from "../native.js";
+import { openVirtualPort } from "../midi/coreMidiBackend.js";
+import {
+  coreMidiIdentityError,
+  readIdentity,
+} from "../midi/coreMidiIdentity.js";
 
 /**
  * Does this build have the native pieces it needs?
@@ -28,16 +33,33 @@ export interface NativeCheck {
 /**
  * The addons this platform needs.
  *
- * koffi is Windows-only: it is the FFI used to reach the teVirtualMIDI driver,
- * and it has nothing to do on a system with CoreMIDI or ALSA.
+ * koffi is the FFI layer, and what it is for differs by platform: on Windows
+ * it reaches the teVirtualMIDI driver and nothing works without it; on macOS
+ * it publishes the hardware identity on an endpoint, which is polish rather
+ * than function. Linux needs it for neither.
  */
-function expected(): Array<Omit<NativeCheck, 'ok' | 'detail'>> {
+function expected(): Array<Omit<NativeCheck, "ok" | "detail">> {
   const checks = [
-    { name: '@julusian/midi', purpose: 'virtual MIDI ports', required: true },
-    { name: 'node-datachannel', purpose: 'connecting to a headset', required: true },
+    { name: "@julusian/midi", purpose: "virtual MIDI ports", required: true },
+    {
+      name: "node-datachannel",
+      purpose: "connecting to a headset",
+      required: true,
+    },
   ];
-  if (process.platform === 'win32') {
-    checks.push({ name: 'koffi', purpose: 'the Windows MIDI driver', required: true });
+  if (process.platform === "win32") {
+    checks.push({
+      name: "koffi",
+      purpose: "the Windows MIDI driver",
+      required: true,
+    });
+  }
+  if (process.platform === "darwin") {
+    checks.push({
+      name: "koffi",
+      purpose: "publishing the device identity",
+      required: false,
+    });
   }
   return checks;
 }
@@ -47,7 +69,7 @@ export function checkNativeModules(): NativeCheck[] {
   return expected().map((check) => {
     try {
       requireNative(check.name);
-      return { ...check, ok: true, detail: '' };
+      return { ...check, ok: true, detail: "" };
     } catch (err) {
       return {
         ...check,
@@ -68,7 +90,92 @@ export function formatChecks(checks: readonly NativeCheck[]): {
     const label = c.name.padEnd(width);
     return c.ok
       ? `  ok    ${label}  ${c.purpose}`
-      : `  FAIL  ${label}  ${c.purpose}\n        ${c.detail.split('\n')[0]}`;
+      : `  FAIL  ${label}  ${c.purpose}\n        ${c.detail.split("\n")[0]}`;
   });
   return { lines, ok: checks.every((c) => c.ok || !c.required) };
+}
+
+/**
+ * Prove the endpoint identity actually reaches CoreMIDI.
+ *
+ * This is here rather than in the unit tests because it cannot be anywhere
+ * else: no machine that runs this project's test suite has CoreMIDI, so a
+ * test could only assert against a mock of the thing most likely to be wrong.
+ * The failure mode it guards is silent — `MIDIObjectSetStringProperty` given a
+ * property id CoreMIDI does not recognise sets *something* and returns
+ * success, so a wrong constant looks exactly like a working one from the
+ * inside. Only a round trip through the real framework can tell.
+ *
+ * `--check` runs it on macOS, which the release workflow already runs against
+ * the artifact it just built.
+ *
+ * Not required: the identity is metadata, and a port with no manufacturer
+ * still plays. It is reported rather than fatal so that losing the polish
+ * cannot fail a release, while a regression is still visible in the log.
+ */
+export async function checkEndpointIdentity(): Promise<NativeCheck | null> {
+  if (process.platform !== "darwin") return null;
+
+  const check = {
+    name: "CoreMIDI identity",
+    purpose: "the device identity a host reads",
+    required: false,
+  };
+
+  // A name nothing else could be using, so the search cannot find somebody
+  // else's port and report their metadata as ours.
+  const probeName = `VRMC identity probe ${process.pid}`;
+  const identity = {
+    manufacturer: "Focusrite - Novation",
+    model: "Launchpad X",
+  };
+
+  const sink = await openVirtualPort(probeName, identity);
+  if (sink === null) {
+    return { ...check, ok: false, detail: "could not open a probe port" };
+  }
+  try {
+    const got = readIdentity(probeName);
+    if (got === null) {
+      const why = coreMidiIdentityError();
+      return {
+        ...check,
+        ok: false,
+        detail: why === "" ? "endpoint not found after stamping" : why,
+      };
+    }
+
+    /*
+     * Two different claims, checked separately because they fail for different
+     * reasons.
+     *
+     * Manufacturer and model are ours: we wrote them, and a mismatch means the
+     * write did not take. The display name is CoreMIDI's: nothing writes it,
+     * and it should equal the endpoint's own name because a virtual endpoint
+     * has no device to combine with. Asserting that is what would catch the
+     * assumption behind this whole approach going wrong on a future macOS —
+     * it is the reason the combined name is left on the endpoint rather than
+     * being replaced with the bare hardware one.
+     */
+    const wrong: string[] = [];
+    if (got.manufacturer !== identity.manufacturer) {
+      wrong.push(
+        `manufacturer: wrote "${identity.manufacturer}", read "${got.manufacturer}"`,
+      );
+    }
+    if (got.model !== identity.model) {
+      wrong.push(`model: wrote "${identity.model}", read "${got.model}"`);
+    }
+    if (got.displayName !== probeName) {
+      wrong.push(
+        `displayName: derives to "${got.displayName}", expected "${probeName}"`,
+      );
+    }
+
+    return wrong.length === 0
+      ? { ...check, ok: true, detail: "" }
+      : { ...check, ok: false, detail: wrong.join("; ") };
+  } finally {
+    sink.close();
+  }
 }

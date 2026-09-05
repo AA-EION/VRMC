@@ -1,0 +1,87 @@
+/* ============================================================
+   EION STUDIOS — the identity's own layer
+   永音 · Manual de identidad, edición 2026.2 «Monocromo»
+
+   Two things live here and nothing else: the identity's raw constants, and the
+   couple of primitives that are the manual's own objects rather than this
+   app's. Semantic, theme-aware aliases are declared in theme.css; the app's own
+   styling lives in styles.css, and neither of those may hold a hex value.
+
+   These literals mirror src/brand/tokens.ts. If you change one, change
+   tokens.ts too — that file is what the TypeScript reads, and a stylesheet
+   that has drifted from it is the exact failure the token layer exists to
+   prevent.
+   ============================================================ */
+
+:root {
+  /* ---- 01 · Las dos tintas ---------------------------------------------
+     The whole identity. Every other value is one of these two at a stated
+     percentage, which is why there is no third hex here. */
+  --eion-bone: #f2f0eb;
+  --eion-sumi: #0b0b0c;
+
+  /* Reserved. Only the galaxy's core reaches an absolute; chrome never does. */
+  --eion-absolute-black: #000000;
+  --eion-absolute-white: #ffffff;
+
+  /* ---- 04 · Tipografía --------------------------------------------------
+     Inter is named and not fetched — see the note in tokens.ts. */
+  --eion-font-text: Inter, system-ui, -apple-system, 'Segoe UI', sans-serif;
+  --eion-font-jp: 'Noto Sans JP', 'Hiragino Sans', 'Yu Gothic', sans-serif;
+  --eion-font-mono: ui-monospace, 'SF Mono', Menlo, monospace;
+
+  /* Tracking, in em. The manual writes these as Illustrator's 1/1000. */
+  --eion-track-display: -0.02em;
+  --eion-track-eyebrow: 0.22em;
+  --eion-track-dato: 0.04em;
+  --eion-track-jp: 0.16em;
+
+  --eion-leading-display: 1;
+  --eion-leading-body: 1.7;
+
+  /* ---- 05 · Retícula: base 4 px ---------------------------------------- */
+  --s-1: 0.25rem;
+  --s-2: 0.5rem;
+  --s-3: 0.75rem;
+  --s-4: 1rem;
+  --s-5: 1.5rem;
+  --s-6: 2rem;
+  --s-7: 3rem;
+  --s-8: 4rem;
+
+  /* 05 · No bubbles. `--r` exists only so a hairline does not look chipped at
+     its corners; there is no larger radius in the system. */
+  --r: 2px;
+  --rule: 1px;
+
+  /* ---- 06 · Tema — how long a change takes, and on what curve ----------- */
+  --eion-theme-ms: 720ms;
+  --eion-theme-ease: cubic-bezier(0.32, 0.08, 0.24, 1);
+}
+
+/* ---- 04 · Japonés -------------------------------------------------------
+   Noto Sans JP Thin, weight 100 always, ceremonial elements only. */
+
+.eion-jp {
+  font-family: var(--eion-font-jp);
+  font-weight: 100;
+  letter-spacing: var(--eion-track-jp);
+}
+
+/* ---- 07 · El sello 永音 -------------------------------------------------
+   Small, always framed, never translated or romanised. The frame is a hairline
+   in the current ink rather than a tinted box. */
+
+.eion-seal {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  padding: 0.3em 0.55em;
+  border: var(--rule) solid var(--line);
+  font-family: var(--eion-font-jp);
+  font-weight: 100;
+  font-size: 0.8rem;
+  letter-spacing: var(--eion-track-jp);
+  line-height: 1;
+  color: var(--ink-2);
+}

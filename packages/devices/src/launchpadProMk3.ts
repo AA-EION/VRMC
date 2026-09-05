@@ -33,11 +33,31 @@ export const LAUNCHPAD_PRO_MK3: DeviceSpec = {
   sysexDeviceId: 0x0e,
   familyCode: [0x23, 0x01],
   firmwareVersion: [0x09, 0x09, 0x09],
+  manufacturer: 'Focusrite - Novation',
 
-  // The Pro MK3 presents three ports; the third carries DIN output and is not
-  // something a virtual device can usefully emulate, so two are created.
-  portNames: ['LPProMK3 MIDI', 'LPProMK3 DAW'],
-  dawPortIndex: 1,
+  /*
+   * The three ports a stock Launchpad Pro MK3 puts on the bus, in its order.
+   *
+   * Unlike every other model here the DAW port is *last*. Live's
+   * `Launchpad_Pro_MK3.get_capabilities()` asks for three ports in and three
+   * out and says what each is for: REMOTE on the first, no props at all on the
+   * second, NOTES_CC + SYNC + SCRIPT on the third. That is MIDI, DIN, DAW —
+   * so `dawPortIndex` is 2, and anything that assumed index 0 is wrong for
+   * this model.
+   *
+   * `LPProMK3 DIN` carries what the hardware would send out of the two DIN
+   * sockets on its back panel. There is no back panel, so nothing is behind
+   * this port; it exists because the device is meant to present as the
+   * hardware does, and a host that counts ports gets the count it expects.
+   * A DAW that routes to it gets the same silence a real Pro MK3 with nothing
+   * plugged into its DIN sockets would give.
+   *
+   * These names were `PRO MK3 (DAW)` / `PRO MK3 (MIDI)`, from CoreFW — which
+   * is community firmware naming its own ports, and parenthesises where
+   * Novation does not.
+   */
+  portNames: ['LPProMK3 MIDI', 'LPProMK3 DIN', 'LPProMK3 DAW'],
+  dawPortIndex: 2,
 
   controls: [
     ...gridControls(),

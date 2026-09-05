@@ -41,8 +41,6 @@ async function managerWith(sink: NullSink): Promise<DeviceManager> {
     },
   );
   await devices.add(DeviceId.PADS, 'test');
-  devices.alias(DeviceId.KEYS, DeviceId.PADS);
-  devices.alias(DeviceId.KNOBS, DeviceId.PADS);
   return devices;
 }
 
@@ -74,12 +72,12 @@ describe('Router event translation', () => {
   });
 
   it('splits pitch bend into lsb then msb', () => {
-    send((w) => w.pushEvent(EventType.PITCH_BEND, 0, 0, 0, PITCH_BEND_CENTER, DeviceId.KNOBS, 0, 0));
+    send((w) => w.pushEvent(EventType.PITCH_BEND, 0, 0, 0, PITCH_BEND_CENTER, DeviceId.PADS, 0, 0));
     expect(sink.log).toEqual([[MidiStatus.PITCH_BEND, 0, 64]]);
   });
 
   it('sends 14-bit CC as an MSB/LSB pair on n and n+32', () => {
-    send((w) => w.pushEvent(EventType.CONTROL_CHANGE_14, 2, 1, 0, 16383, DeviceId.KNOBS, 0, 0));
+    send((w) => w.pushEvent(EventType.CONTROL_CHANGE_14, 2, 1, 0, 16383, DeviceId.PADS, 0, 0));
     expect(sink.log).toEqual([
       [MidiStatus.CONTROL_CHANGE | 2, 1, 127],
       [MidiStatus.CONTROL_CHANGE | 2, 33, 127],
@@ -87,14 +85,14 @@ describe('Router event translation', () => {
   });
 
   it('emits a single data byte for program change', () => {
-    send((w) => w.pushEvent(EventType.PROGRAM_CHANGE, 0, 42, 0, 0, DeviceId.KNOBS, 0, 0));
+    send((w) => w.pushEvent(EventType.PROGRAM_CHANGE, 0, 42, 0, 0, DeviceId.PADS, 0, 0));
     expect(sink.log).toEqual([[MidiStatus.PROGRAM_CHANGE, 42, 0]]);
   });
 
   it('preserves the order of events inside one packet', () => {
     send((w) => {
       for (let i = 0; i < 8; i++) {
-        w.pushEvent(EventType.NOTE_ON, 0, 60 + i, 100, 0, DeviceId.KEYS, 0, 0);
+        w.pushEvent(EventType.NOTE_ON, 0, 60 + i, 100, 0, DeviceId.PADS, 0, 0);
       }
     });
     expect(sink.log.map((m) => m[1])).toEqual([60, 61, 62, 63, 64, 65, 66, 67]);
@@ -120,8 +118,8 @@ describe('Router event translation', () => {
 
   it('releases sounding notes on a PANIC packet', () => {
     send((w) => {
-      w.pushEvent(EventType.NOTE_ON, 0, 60, 100, 0, DeviceId.KEYS, 0, 0);
-      w.pushEvent(EventType.NOTE_ON, 1, 64, 100, 0, DeviceId.KEYS, 0, 0);
+      w.pushEvent(EventType.NOTE_ON, 0, 60, 100, 0, DeviceId.PADS, 0, 0);
+      w.pushEvent(EventType.NOTE_ON, 1, 64, 100, 0, DeviceId.PADS, 0, 0);
     });
     expect(router.activeNotes).toBe(2);
 
@@ -148,7 +146,7 @@ describe('Router link statistics', () => {
     // Send packets 1..6 but drop 3 and 4 in transit.
     for (let i = 1; i <= 6; i++) {
       w.begin();
-      w.pushEvent(EventType.NOTE_ON, 0, 60, 100, 0, DeviceId.KEYS, 0, 0);
+      w.pushEvent(EventType.NOTE_ON, 0, 60, 100, 0, DeviceId.PADS, 0, 0);
       const frame = w.finish(i * 10);
       if (i === 3 || i === 4) continue;
       router.handlePacket(frame, i * 10, undefined);
@@ -163,7 +161,7 @@ describe('Router link statistics', () => {
     const w = new PacketWriter();
     for (let i = 0; i < 30; i++) {
       w.begin();
-      w.pushEvent(EventType.NOTE_ON, 0, 60, 100, 0, DeviceId.KEYS, 0, 0);
+      w.pushEvent(EventType.NOTE_ON, 0, 60, 100, 0, DeviceId.PADS, 0, 0);
       // Sent every 11 ms, arriving a constant 5 ms later.
       router.handlePacket(w.finish(i * 11), i * 11 + 5);
     }
@@ -175,7 +173,7 @@ describe('Router link statistics', () => {
     const w = new PacketWriter();
     for (let i = 0; i < 30; i++) {
       w.begin();
-      w.pushEvent(EventType.NOTE_ON, 0, 60, 100, 0, DeviceId.KEYS, 0, 0);
+      w.pushEvent(EventType.NOTE_ON, 0, 60, 100, 0, DeviceId.PADS, 0, 0);
       const wobble = i % 2 === 0 ? 0 : 9;
       router.handlePacket(w.finish(i * 11), i * 11 + 5 + wobble);
     }

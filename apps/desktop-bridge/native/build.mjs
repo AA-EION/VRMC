@@ -15,7 +15,7 @@
  */
 import { execFile as execFileCb } from 'node:child_process';
 import { promisify } from 'node:util';
-import { mkdir, rm } from 'node:fs/promises';
+import { copyFile, mkdir, rm } from 'node:fs/promises';
 import { existsSync } from 'node:fs';
 import { dirname, join, sep } from 'node:path';
 import { fileURLToPath } from 'node:url';
@@ -73,20 +73,58 @@ async function buildMacOS() {
     return false;
   }
 
-  const out = join(outDir, 'vrmc-tray');
-  // -O rather than -Onone: this is a released binary, and the difference in
-  // launch time is the difference between the icon being there when the user
-  // looks and appearing a moment later.
-  const result = await run('swiftc', [
-    '-O',
-    '-target',
-    `${process.arch === 'arm64' ? 'arm64' : 'x86_64'}-apple-macosx${MACOS_DEPLOYMENT_TARGET}`,
-    join(here, 'macos/main.swift'),
-    '-o',
-    out,
-  ]);
-  if (result === null) return false;
-  console.log(`  -> ${out}`);
+  const tray = await buildSwift('vrmc-tray', ['macos/main.swift']);
+  // The dashboard is the window; the tray is the icon. Neither is required for
+  // MIDI, and one failing must not take the other with it.
+  const dashboard = await buildSwift('vrmc-dashboard', ['macos/dashboard/main.swift']);
+  return tray && dashboard;
+}
+
+/**
+ * Compile one Swift executable, universal.
+ *
+ * Two invocations and a `lipo`, because swiftc takes a single `-target`. It is
+ * worth the second compile: a helper missing the architecture it is asked to
+ * run on does not fail loudly — the tray icon simply never appears, or the
+ * dashboard window never opens, with nothing said anywhere.
+ *
+ * A slice that will not build is not fatal on its own. A machine can be missing
+ * the other architecture's SDK stubs, and a build that runs natively is far
+ * better than no build at all; what gets shipped is whatever slices exist, and
+ * the release workflow asserts that both are present.
+ */
+async function buildSwift(name, sources) {
+  const slices = [];
+  for (const arch of ['arm64', 'x86_64']) {
+    const sliceOut = join(outDir, `${name}-${arch}`);
+    // -O rather than -Onone: these are released binaries, and the difference in
+    // launch time is the difference between the window being there when the
+    // user looks and appearing a moment later.
+    const built = await run('swiftc', [
+      '-O',
+      '-target',
+      `${arch}-apple-macosx${MACOS_DEPLOYMENT_TARGET}`,
+      ...sources.map((source) => join(here, source)),
+      '-o',
+      sliceOut,
+    ]);
+    if (built !== null) slices.push(sliceOut);
+    else console.warn(`  ! ${name}: no ${arch} slice`);
+  }
+  if (slices.length === 0) return false;
+
+  const out = join(outDir, name);
+  if (slices.length === 1) {
+    // One architecture is a working binary on that architecture. Copying it
+    // rather than lipo'ing keeps the single-slice case from depending on lipo
+    // at all.
+    await rm(out, { force: true });
+    await copyFile(slices[0], out);
+  } else if ((await run('lipo', ['-create', ...slices, '-output', out])) === null) {
+    return false;
+  }
+  for (const slice of slices) await rm(slice, { force: true });
+  console.log(`  -> ${out}${slices.length === 2 ? ' (universal)' : ` (${slices.length} slice)`}`);
   return true;
 }
 

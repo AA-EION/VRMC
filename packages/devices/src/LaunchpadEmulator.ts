@@ -8,6 +8,7 @@ import {
   commandOf,
   isDeviceInquiry,
   parseLedMessage,
+  readScrollText,
 } from './sysex.js';
 import { controlLookup, isGridIndex } from './layout.js';
 import {
@@ -31,11 +32,72 @@ export interface EmulatorObserver {
   onMidiOut(bytes: Uint8Array): void;
   /** The device switched between Live and Programmer mode. */
   onModeChange?(mode: number): void;
+  /**
+   * The host sent text for the device to display.
+   *
+   * Real hardware scrolls this across the grid. There is nothing to scroll it
+   * across here — the grid is showing the DAW's own colours — so it is passed
+   * up to be shown as a label instead, which is more legible than a Launchpad
+   * has ever managed.
+   */
+  onText?(text: string): void;
 }
 
-const LED_SLOTS = 110;
+/**
+ * How many LED slots a device with no high-numbered controls gets.
+ *
+ * A Launchpad addresses its controls as `row * 10 + col`, so 99 is the top
+ * right and 110 covers the lot with room to spare. This used to be the only
+ * size, which was fine until a device arrived whose ids ran past it: writes
+ * beyond the end of a typed array are silently dropped, so the pads at ids
+ * 110..115 could not be lit, and `releaseAll` — which runs when a device is
+ * removed or the host changes mode — never saw them held, and left their
+ * notes ringing in the DAW with nothing left to stop them.
+ */
+const MIN_LED_SLOTS = 110;
 /** Per LED: r, g, b, blink type, alternate palette index for flashing. */
 const LED_STRIDE = 5;
+
+/** Slots needed to address every control of a spec by its id. */
+function ledSlotsFor(controls: DeviceSpec['controls']): number {
+  let highest = MIN_LED_SLOTS - 1;
+  for (const control of controls) {
+    if (control.index > highest) highest = control.index;
+  }
+  return highest + 1;
+}
+
+/**
+ * MIDI data byte -> control id, for one kind of message.
+ *
+ * The host addresses an LED by the number the *hardware* sends — a Note On for
+ * note 96 lights the pad that sends note 96 — while everything on this side of
+ * the wire is keyed by control id: the LED store, `hasControl`, and the
+ * headset's zone lookup at the far end of `onLed`.
+ *
+ * On a Launchpad those are the same number and this is the identity map, which
+ * is why nothing needed it until a device arrived where they differ. On a
+ * Launchkey a pad's id is 100 and its note is 96, so without this every LED the
+ * DAW sent landed on an id that either did not exist or belonged to something
+ * else.
+ *
+ * One map per kind, because a Launchkey's note 41 is a key and its CC 41 is a
+ * fader — the same byte, two controls. The status nibble says which is meant,
+ * so splitting on it makes the answer unambiguous rather than first-wins.
+ */
+function reverseLookup(
+  controls: DeviceSpec['controls'],
+  kind: ControlKind,
+): Int16Array {
+  const out = new Int16Array(128).fill(-1);
+  for (const control of controls) {
+    if (control.kind !== kind) continue;
+    const byte = control.data1 ?? control.index;
+    if (byte < 0 || byte > 127) continue;
+    if (out[byte] === -1) out[byte] = control.index;
+  }
+  return out;
+}
 
 /**
  * A Launchpad, as far as the host can tell.
@@ -54,7 +116,7 @@ export class LaunchpadEmulator {
   readonly spec: DeviceSpec;
 
   /** r,g,b,blink,alt per LED index, addressed by the device's own XY number. */
-  private readonly leds = new Uint8Array(LED_SLOTS * LED_STRIDE);
+  private readonly leds: Uint8Array;
   /** XY index -> position in spec.controls. */
   private readonly lookup: Int16Array;
   private readonly observer: EmulatorObserver;
@@ -62,7 +124,14 @@ export class LaunchpadEmulator {
   private mode: number = LaunchpadMode.LIVE;
 
   /** Pads currently held, so a reset can release them. */
-  private readonly pressed = new Uint8Array(LED_SLOTS);
+  private readonly pressed: Uint8Array;
+
+  /** Addressable slots, sized to this spec's highest control id. */
+  private readonly slots: number;
+
+  /** Note number -> control id, and CC number -> control id. See above. */
+  private readonly noteIds: Int16Array;
+  private readonly ccIds: Int16Array;
 
   /** Scratch for outgoing 3-byte messages; reused to avoid per-note garbage. */
   private readonly out3 = new Uint8Array(3);
@@ -71,6 +140,11 @@ export class LaunchpadEmulator {
     this.spec = spec;
     this.observer = observer;
     this.lookup = controlLookup(spec.controls);
+    this.slots = ledSlotsFor(spec.controls);
+    this.noteIds = reverseLookup(spec.controls, ControlKind.NOTE);
+    this.ccIds = reverseLookup(spec.controls, ControlKind.CC);
+    this.leds = new Uint8Array(this.slots * LED_STRIDE);
+    this.pressed = new Uint8Array(this.slots);
   }
 
   get currentMode(): number {
@@ -120,7 +194,8 @@ export class LaunchpadEmulator {
 
     // Note Off, on any channel, extinguishes the LED.
     if (status === 0x80) {
-      this.setPalette(d1, 0, LightingType.STATIC);
+      const led = this.noteIds[d1] ?? -1;
+      if (led >= 0) this.setPalette(led, 0, LightingType.STATIC);
       return;
     }
 
@@ -141,7 +216,11 @@ export class LaunchpadEmulator {
           : channel === 2
             ? LightingType.PULSING
             : LightingType.STATIC;
-      this.setPalette(d1, d2, lighting);
+      // Translated out of the hardware's numbering before it goes any
+      // further: `d1` is what the device would send, and the LED store, the
+      // roster and the headset all speak control ids.
+      const led = (status === 0x90 ? this.noteIds[d1] : this.ccIds[d1]) ?? -1;
+      if (led >= 0) this.setPalette(led, d2, lighting);
     }
   }
 
@@ -161,6 +240,13 @@ export class LaunchpadEmulator {
         break;
       }
       case Command.LED: {
+        /*
+         * The SysEx path addresses by the device's own LED numbering, which is
+         * the control id — not the note or CC it sends. That is the same
+         * number on every device that implements this message (all of them are
+         * Launchpads, whose ids are their XY indices), so it needs no
+         * translation, unlike the channel-voice path above.
+         */
         parseLedMessage(data, this.spec, (led, type, palette, r, g, b, alt) => {
           if (type === LightingType.RGB) {
             this.writeLed(led, r, g, b, 0, 0);
@@ -177,6 +263,11 @@ export class LaunchpadEmulator {
             );
           }
         });
+        break;
+      }
+      case Command.TEXT: {
+        const text = readScrollText(data, this.spec);
+        if (text !== null) this.observer.onText?.(text);
         break;
       }
       case Command.SELECT_LAYOUT:
@@ -208,7 +299,7 @@ export class LaunchpadEmulator {
     blink: number,
     alt: number,
   ): void {
-    if (ledIndex < 0 || ledIndex >= LED_SLOTS) return;
+    if (ledIndex < 0 || ledIndex >= this.slots) return;
     const base = ledIndex * LED_STRIDE;
     const leds = this.leds;
     if (
@@ -243,7 +334,7 @@ export class LaunchpadEmulator {
   }
 
   clearAllLeds(): void {
-    for (let i = 0; i < LED_SLOTS; i++) {
+    for (let i = 0; i < this.slots; i++) {
       const base = i * LED_STRIDE;
       if (
         this.leds[base] === 0 &&
@@ -274,7 +365,9 @@ export class LaunchpadEmulator {
     const v = velocity < 1 ? 1 : velocity > 127 ? 127 : velocity;
     this.emit(
       control.kind === ControlKind.CC ? 0xb0 : 0x90,
-      ledIndex,
+      // The byte the hardware sends, which is the id only when the device has
+      // one namespace for everything — see `Control.data1`.
+      control.data1 ?? ledIndex,
       control.kind === ControlKind.CC ? 127 : v,
     );
   }
@@ -286,7 +379,11 @@ export class LaunchpadEmulator {
     this.pressed[ledIndex] = 0;
     // The hardware sends Note On with velocity 0 for pad releases, not Note
     // Off. Some host scripts match on that exact shape.
-    this.emit(control.kind === ControlKind.CC ? 0xb0 : 0x90, ledIndex, 0);
+    this.emit(
+      control.kind === ControlKind.CC ? 0xb0 : 0x90,
+      control.data1 ?? ledIndex,
+      0,
+    );
   }
 
   /** Polyphonic aftertouch from sustained finger pressure, 0..127. */
@@ -299,13 +396,14 @@ export class LaunchpadEmulator {
 
   /** Release everything held. Called when the device is removed or reset. */
   releaseAll(): void {
-    for (let i = 0; i < LED_SLOTS; i++) {
+    for (let i = 0; i < this.slots; i++) {
       if (this.pressed[i] === 1) this.release(i);
     }
   }
 
   /** Nearest palette index to an LED's current colour, for host queries. */
   paletteOf(ledIndex: number): number {
+    if (ledIndex < 0 || ledIndex >= this.slots) return 0;
     const base = ledIndex * LED_STRIDE;
     return nearestPaletteIndex(this.leds[base]!, this.leds[base + 1]!, this.leds[base + 2]!);
   }

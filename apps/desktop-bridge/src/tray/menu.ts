@@ -15,16 +15,35 @@ export interface TrayState {
   devices: number;
   /** True when at least one device has working MIDI ports. */
   midiReady: boolean;
+  /**
+   * Where the CoreMIDI driver is installed, if anywhere.
+   *
+   * Not merely cosmetic: it decides whether the row offers to install or to
+   * remove, and those are opposite actions behind one place in the menu.
+   */
+  driver: DriverState;
   /** Where the dashboard lives, for the label. */
   dashboardUrl: string;
   autostart: AutostartState;
 }
+
+/**
+ * What the menu knows about the CoreMIDI driver.
+ *
+ * `unavailable` is the build that ships without one — Windows and Linux, and
+ * any macOS build made without running the driver's own build script. It is not
+ * an error, and the row is simply absent rather than offering something that
+ * cannot happen.
+ */
+export type DriverState = 'unavailable' | 'absent' | 'user' | 'system';
 
 /** Ids the bridge acts on. Kept here so the handler and the menu agree. */
 export const TrayAction = {
   COPY_CODE: 'copy-code',
   DASHBOARD: 'dashboard',
   AUTOSTART: 'autostart',
+  INSTALL_DRIVER: 'install-driver',
+  UNINSTALL_DRIVER: 'uninstall-driver',
   QUIT: 'quit',
 } as const;
 
@@ -60,6 +79,44 @@ export function buildMenu(state: TrayState): TrayItem[] {
 
   items.push({ id: 'sep-actions', label: '', separator: true });
   items.push({ id: TrayAction.DASHBOARD, label: 'Open dashboard…' });
+
+  /*
+   * One row, two actions, and never both at once.
+   *
+   * Offering "Install" and "Uninstall" side by side would put a destructive
+   * action one slip away from the one people want, for no gain — the state is
+   * known, so the menu can simply say what the next step is.
+   *
+   * The explanatory line under "Install" is there because the benefit is not
+   * guessable from the words: what the driver buys is the ports appearing as
+   * one device the way real hardware does, and without saying so it reads as
+   * an optional extra nobody would choose.
+   */
+  if (state.driver === 'absent') {
+    items.push({ id: TrayAction.INSTALL_DRIVER, label: 'Install the MIDI driver' });
+    items.push({
+      id: 'driver-why',
+      label: '   makes the ports appear as one device',
+      enabled: false,
+    });
+  } else if (state.driver === 'user' || state.driver === 'system') {
+    /*
+     * Named states, not `!== 'unavailable'`.
+     *
+     * That was the first version and it was the wrong way round: any state the
+     * menu did not recognise — an unset field, a value from a newer build —
+     * fell through to offering *removal*. An unknown state must not put a
+     * destructive action in front of somebody, and the safe direction here is
+     * to say nothing.
+     */
+    items.push({
+      id: TrayAction.UNINSTALL_DRIVER,
+      label:
+        state.driver === 'system'
+          ? 'Remove the MIDI driver (all users)…'
+          : 'Remove the MIDI driver',
+    });
+  }
 
   if (state.autostart !== 'unsupported') {
     items.push({

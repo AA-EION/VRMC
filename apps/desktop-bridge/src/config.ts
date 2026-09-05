@@ -13,6 +13,14 @@ export interface BridgeConfig {
   listPorts: boolean;
   /** Verify the native addons load, print the result, and exit. */
   check: boolean;
+  /**
+   * Install or remove the CoreMIDI driver, then exit.
+   *
+   * `user` installs into ~/Library/Audio/MIDI Drivers and asks for nothing;
+   * `system` installs into /Library and costs one administrator password. See
+   * src/midi/driverInstall.ts for why that cannot be Touch ID.
+   */
+  driverAction: 'none' | 'install-user' | 'install-system' | 'uninstall';
   /** Seconds between stats lines. 0 disables them. */
   statsInterval: number;
   tlsCert?: string;
@@ -64,6 +72,13 @@ export interface BridgeConfig {
    * draws it, so the lights the DAW sends have somewhere to land.
    */
   startupDevice: string;
+  /**
+   * How long the MIDI ports survive the last client leaving, in milliseconds.
+   *
+   * Not zero: a headset's Wi-Fi drops for a second at a time, and a DAW that
+   * sees a control surface vanish unbinds its script rather than waiting.
+   */
+  portGraceMs: number;
 }
 
 export const DEFAULT_CONFIG: BridgeConfig = {
@@ -77,6 +92,7 @@ export const DEFAULT_CONFIG: BridgeConfig = {
   noMidi: false,
   listPorts: false,
   check: false,
+  driverAction: 'none',
   statsInterval: 10,
   loopbackPattern: WINDOWS_LOOPBACK_PATTERN,
   portNameTemplate: '{device} {port}',
@@ -84,7 +100,16 @@ export const DEFAULT_CONFIG: BridgeConfig = {
   pairingService: 'https://vrmc.eionstudios.com',
   enableRtc: true,
   enableTray: true,
-  startupDevice: DeviceModel.LAUNCHPAD_X,
+  /*
+   * Nothing, until a headset asks.
+   *
+   * This was LAUNCHPAD_X, opened at startup — which meant a Mac with the
+   * bridge merely running listed a Launchpad in every DAW on it, with nothing
+   * on the other end. Set it to a model to get that behaviour back; the device
+   * then appears when a headset connects rather than when the bridge starts.
+   */
+  startupDevice: 'none',
+  portGraceMs: 10_000,
 };
 
 export const USAGE = `
@@ -108,13 +133,28 @@ Usage: vrmc-bridge [options]
   --loopback <regex>   Windows: pattern for the fallback port
   --port-template <s>  Naming for emulated device ports
                        (default: "{device} {port}", e.g. "Launchpad X LPX DAW")
-  --device <model>     Emulated hardware to open at startup: ${HARDWARE_MODELS.join(
+  --device <model>     Emulated hardware to open for a session: ${HARDWARE_MODELS.join(
     ', ',
   )},
-                       or "none" (default: ${DEFAULT_CONFIG.startupDevice})
+                       or "none" (default: ${DEFAULT_CONFIG.startupDevice}).
+                       Ports open when a headset connects, not at startup.
+  --port-grace <secs>  Keep the ports open this long after the last client
+                       leaves, so a brief drop does not make the DAW unbind
+                       (default: ${DEFAULT_CONFIG.portGraceMs / 1000})
   --stats <seconds>    Stats interval, 0 to disable (default: 10)
   --list-ports         List MIDI outputs and exit
   --check              Verify the native libraries load, then exit
+  --install-driver     Install the CoreMIDI driver for this user and exit, so
+                       an emulated Launchpad appears as one device with its
+                       ports rather than as separate devices. No password.
+  --install-driver-system
+                       The same, for every user on this Mac. Asks once for an
+                       administrator password (macOS gives third-party apps no
+                       way to offer Touch ID here).
+  --uninstall-driver   Remove the driver and the device it registered, then
+                       exit. Clears both locations, so a copy in /Library
+                       cannot put the device back; asks for a password only
+                       if there is one there.
   --help               Show this message
 
 A headset running the hosted client connects over a WebRTC data channel: read
@@ -162,6 +202,17 @@ export function parseArgs(argv: readonly string[]): BridgeConfig | 'help' {
       case '--host':
         config.host = requireValue(arg, argv[++i]);
         break;
+      case '--port-grace': {
+        const seconds = Number(requireValue(arg, argv[++i]));
+        // Zero is allowed and means "close as soon as the last client goes" —
+        // a legitimate choice for a fixed installation where nothing ever
+        // reconnects, and the one case where a DAW unbinding does not matter.
+        if (!Number.isFinite(seconds) || seconds < 0) {
+          throw new Error(`${arg} needs a number of seconds, not "${argv[i]}"`);
+        }
+        config.portGraceMs = Math.round(seconds * 1000);
+        break;
+      }
       case '--no-udp':
         config.enableUdp = false;
         break;
@@ -176,6 +227,15 @@ export function parseArgs(argv: readonly string[]): BridgeConfig | 'help' {
         break;
       case '--check':
         config.check = true;
+        break;
+      case '--install-driver':
+        config.driverAction = 'install-user';
+        break;
+      case '--install-driver-system':
+        config.driverAction = 'install-system';
+        break;
+      case '--uninstall-driver':
+        config.driverAction = 'uninstall';
         break;
       case '--tls-cert':
         config.tlsCert = requireValue(arg, argv[++i]);

@@ -1,6 +1,11 @@
 import { describe, it, expect } from 'vitest';
 import { MPC_4X4, PadGridLayout } from '../src/pads.js';
-import { localToWorld, surfaceNormal, surfaceTransform } from '../src/placement.js';
+import {
+  localToWorld,
+  localToWorldInto,
+  surfaceNormal,
+  surfaceTransform,
+} from '../src/placement.js';
 
 const grid = new PadGridLayout(MPC_4X4);
 
@@ -65,5 +70,116 @@ describe('surfaceTransform', () => {
     for (let axis = 0; axis < 3; axis++) {
       expect(above[axis] - onSurface[axis]).toBeCloseTo(n[axis] * 0.05, 10);
     }
+  });
+
+  it('turns a yawed panel to face where it was aimed', () => {
+    // A quarter turn to the left puts an untilted panel's normal along +X.
+    const t = surfaceTransform(grid, { centre: [0, 1, -0.5], tiltDeg: 0, yawDeg: 90 });
+    const n = surfaceNormal(t);
+    expect(n[0]).toBeCloseTo(1, 10);
+    expect(n[1]).toBeCloseTo(0, 10);
+    expect(n[2]).toBeCloseTo(0, 10);
+  });
+
+  it('tilts back toward whoever the panel is facing, not toward -Z', () => {
+    /*
+     * The reason the composition is yaw-then-tilt rather than the other way
+     * round. Turned a quarter to the left and tilted halfway, the panel should
+     * lean back toward its own reader — normal up and along +X — rather than
+     * leaning toward the room's -Z, which is where it started facing.
+     */
+    const t = surfaceTransform(grid, { centre: [0, 1, -0.5], tiltDeg: 45, yawDeg: 90 });
+    const n = surfaceNormal(t);
+    expect(n[0]).toBeCloseTo(Math.SQRT1_2, 6);
+    expect(n[1]).toBeCloseTo(Math.SQRT1_2, 6);
+    expect(n[2]).toBeCloseTo(0, 6);
+  });
+
+  it('round-trips the centre back through localToWorld at any yaw', () => {
+    /*
+     * localToWorld once shortcut the maths by recovering an angle from
+     * atan2(qx, qw), which is only meaningful for a tilt-only rotation. A yawed
+     * panel's quaternion has a Y component, and that recovery returns a number
+     * that means nothing — so a device somebody had turned to face them would
+     * draw in one place and answer fingers in another.
+     */
+    for (const yawDeg of [-180, -90, -33, 0, 17, 90, 180]) {
+      for (const tiltDeg of [0, 45, 74, 90]) {
+        const centre: [number, number, number] = [0.2, 0.85, -0.45];
+        const t = surfaceTransform(grid, { centre, tiltDeg, yawDeg });
+        const back = localToWorld(t, grid.width / 2, grid.height / 2, 0);
+        expect(back[0]).toBeCloseTo(centre[0], 10);
+        expect(back[1]).toBeCloseTo(centre[1], 10);
+        expect(back[2]).toBeCloseTo(centre[2], 10);
+      }
+    }
+  });
+
+  it('keeps the normal a unit vector, and off the surface, at every pose', () => {
+    for (const yawDeg of [-135, -45, 0, 45, 135]) {
+      for (const tiltDeg of [0, 30, 60, 90]) {
+        const t = surfaceTransform(grid, { centre: [0, 1, -1], tiltDeg, yawDeg });
+        const [x, y, z, w] = t.quaternion;
+        expect(Math.hypot(x, y, z, w)).toBeCloseTo(1, 12);
+
+        const n = surfaceNormal(t);
+        expect(Math.hypot(...n)).toBeCloseTo(1, 10);
+        // …and moving along the local +Z moves along that normal, which is the
+        // property the poke detector's depth calculation rests on.
+        const onSurface = localToWorld(t, 0.02, 0.02, 0);
+        const above = localToWorld(t, 0.02, 0.02, 0.05);
+        for (let axis = 0; axis < 3; axis++) {
+          expect(above[axis]! - onSurface[axis]!).toBeCloseTo(n[axis]! * 0.05, 10);
+        }
+      }
+    }
+  });
+
+  it('treats an absent yaw as no yaw', () => {
+    const withOut = surfaceTransform(grid, { centre: [0.1, 0.9, -0.5], tiltDeg: 42 });
+    const withZero = surfaceTransform(grid, { centre: [0.1, 0.9, -0.5], tiltDeg: 42, yawDeg: 0 });
+    expect(withOut.origin).toEqual(withZero.origin);
+    for (let i = 0; i < 4; i++) {
+      expect(withOut.quaternion[i]).toBeCloseTo(withZero.quaternion[i]!, 12);
+    }
+  });
+
+  it('agrees with the allocating form it exists to replace', () => {
+    // Two implementations of one transform is exactly the drift this package
+    // warns about everywhere else, so they are checked against each other.
+    const scratch = new Float32Array(3);
+    for (const yawDeg of [-90, 0, 37, 180]) {
+      for (const tiltDeg of [0, 45, 90]) {
+        const t = surfaceTransform(grid, { centre: [0.2, 0.9, -0.4], tiltDeg, yawDeg });
+        for (const [x, y, z] of [
+          [0, 0, 0],
+          [0.1, 0.05, 0.01],
+          [-0.03, 0.2, -0.02],
+        ]) {
+          localToWorldInto(t, x!, y!, z!, scratch);
+          const expected = localToWorld(t, x!, y!, z!);
+          for (let axis = 0; axis < 3; axis++) {
+            /*
+             * Six places, not twelve. The scratch is a Float32Array, so the
+             * result is rounded to single precision on the way in — about a
+             * micrometre over a room this size, which is three orders below
+             * hand tracking's own noise floor and the same precision the wire
+             * format carries. The extra bits would be describing noise.
+             */
+            expect(scratch[axis]).toBeCloseTo(expected[axis]!, 6);
+          }
+        }
+      }
+    }
+  });
+
+  it('writes at an offset without touching what is beside it', () => {
+    const buffer = new Float32Array(9).fill(-1);
+    const t = surfaceTransform(grid, { centre: [0, 1, -0.5], tiltDeg: 0 });
+    localToWorldInto(t, 0.1, 0.2, 0, buffer, 3);
+    expect(buffer[0]).toBe(-1);
+    expect(buffer[2]).toBe(-1);
+    expect(buffer[6]).toBe(-1);
+    expect(buffer[3]).not.toBe(-1);
   });
 });

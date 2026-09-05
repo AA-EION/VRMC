@@ -7,11 +7,11 @@ import {
   openVirtualPort as openVirtualOutput,
   rtMidiLoadError,
 } from './coreMidiBackend.js';
+import type { EndpointIdentity } from './coreMidiIdentity.js';
 import {
   NullSink,
   NullSource,
   SimpleVirtualPort,
-  type MidiSink,
   type VirtualPort,
 } from './MidiSink.js';
 import { openTeVirtualMidiPort, WINDOWS_LOOPBACK_PATTERN } from './windowsBackend.js';
@@ -19,10 +19,40 @@ import { openTeVirtualMidiPort, WINDOWS_LOOPBACK_PATTERN } from './windowsBacken
 export interface PortOptions {
   /** Name the DAW will display. */
   name: string;
+  /**
+   * Endpoint names, when the hardware names the two halves differently.
+   *
+   * A Launchpad calls its port the same thing whichever way MIDI flows. A
+   * Launchkey does not: its endpoints are `LKMK3 DAW Out` and `LKMK3 DAW In`,
+   * named from the device's point of view — so what Ableton lists as an
+   * *input*, and tells the user to select, is the one called "Out".
+   *
+   * Both default to `name`, which is the common case and every Launchpad.
+   */
+  sourceName?: string;
+  destinationName?: string;
+  /**
+   * The hardware identity to publish on the endpoint, on macOS.
+   *
+   * Null for the plain surfaces, which are not pretending to be anything. See
+   * coreMidiIdentity.ts for what CoreMIDI does and does not let an application
+   * claim here.
+   */
+  identity?: EndpointIdentity | null;
   /** Skip MIDI entirely and discard messages. For testing the network path. */
   noMidi: boolean;
   /** Windows: pattern for the loopback port to fall back to. */
   loopbackPattern: RegExp;
+  /**
+   * Which emulated model this port belongs to, and which of its ports it is.
+   *
+   * Only the CoreMIDI driver route needs these, and it needs both: the driver
+   * publishes one specific device, so a port can only go through it if the
+   * model matches, and the entity to use is the port's index within that
+   * model's spec. Optional because the plain surfaces have neither.
+   */
+  model?: string;
+  portIndex?: number;
 }
 
 export interface PortResult {
@@ -86,7 +116,17 @@ export async function openBidirectionalPort(options: PortOptions): Promise<PortR
     return { port: nullPort(options.name), ok: false, notes };
   }
 
-  const sink = await openVirtualOutput(options.name);
+  /*
+   * The destination is what the *host* writes to, so it takes the destination
+   * name; the source is what the host reads. Which is the point at which the
+   * two are easy to swap, and swapping them puts "Out" on the port a DAW sends
+   * to — the exact thing Novation's own setup instructions tell people not to
+   * pick.
+   */
+  const destinationName = options.destinationName ?? options.name;
+  const sourceName = options.sourceName ?? options.name;
+
+  const sink = await openVirtualOutput(destinationName, options.identity);
   if (sink === null) {
     // The addon failing to load and the host having no MIDI system produce the
     // same missing port, and pointing at the wrong one costs a long detour:
@@ -97,7 +137,7 @@ export async function openBidirectionalPort(options: PortOptions): Promise<PortR
       loadError !== ''
         ? `The MIDI library did not load: ${loadError}`
         : process.platform === 'darwin'
-          ? `Could not create a CoreMIDI port named "${options.name}". Is one already open?`
+          ? `Could not create a CoreMIDI port named "${destinationName}". Is one already open?`
           : 'Could not create an ALSA port. This host may have no MIDI sequencer (/dev/snd/seq).',
     );
     return { port: nullPort(options.name), ok: false, notes };
@@ -105,12 +145,23 @@ export async function openBidirectionalPort(options: PortOptions): Promise<PortR
 
   // The input half is best-effort: without it the device plays but stays dark,
   // which is worth reporting and not worth failing over.
-  const source = await openVirtualInput(options.name);
+  const source = await openVirtualInput(sourceName, options.identity);
   if (source === null) {
-    notes.push(`Created "${options.name}" as output only; LED feedback unavailable.`);
+    notes.push(`Created "${destinationName}" as output only; LED feedback unavailable.`);
   } else {
     const api = process.platform === 'darwin' ? 'CoreMIDI' : 'ALSA';
-    notes.push(`Created ${api} port "${options.name}" (in and out).`);
+    notes.push(
+      sourceName === destinationName
+        ? `Created ${api} port "${options.name}" (in and out).`
+        : `Created ${api} ports "${sourceName}" and "${destinationName}".`,
+    );
+  }
+
+  // Metadata, so its absence is a note rather than a failure — but a silent
+  // absence would be undiagnosable, since nothing about the port looks wrong.
+  const identityError = (sink as { identityError?: string }).identityError ?? '';
+  if (identityError !== '') {
+    notes.push(`Could not publish the hardware identity: ${identityError}`);
   }
 
   return { port: new SimpleVirtualPort(options.name, sink, source), ok: true, notes };
@@ -118,14 +169,6 @@ export async function openBidirectionalPort(options: PortOptions): Promise<PortR
 
 function nullPort(name: string): VirtualPort {
   return new SimpleVirtualPort(name, new NullSink(name), new NullSource(name));
-}
-
-/** Backwards-compatible single-sink helper, for the built-in surfaces. */
-export async function openBestPort(
-  options: PortOptions,
-): Promise<{ sink: MidiSink; notes: string[] }> {
-  const result = await openBidirectionalPort(options);
-  return { sink: result.port.sink, notes: result.notes };
 }
 
 export { listPorts, WINDOWS_LOOPBACK_PATTERN };
