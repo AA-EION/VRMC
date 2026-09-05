@@ -412,6 +412,9 @@ async function main(): Promise<void> {
         tlsKey,
         onLog: log,
         onClientChange: () => clientsChanged(),
+        // So the hosted client's own page may open a WebSocket, and no other
+        // site may. See WsServer.originAllowed.
+        siteOrigin: config.pairingService,
       })
     : null;
   // Every headset-bound packet fans out through here, so a client on the

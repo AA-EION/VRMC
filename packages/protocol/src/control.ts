@@ -37,6 +37,34 @@ export type DeviceStatus = (typeof DeviceStatus)[keyof typeof DeviceStatus];
 const encoder = new TextEncoder();
 const decoder = new TextDecoder();
 
+/**
+ * Longest a model name may be. Comfortably past the longest real one
+ * ("launchpad-pro-mk3"), and far short of the 255 the length byte allows.
+ */
+export const MAX_MODEL_NAME_BYTES = 64;
+
+/**
+ * Whether a string is shaped like a model identifier.
+ *
+ * Models are identifiers the two sides agree on — `launchpad-x`, `vrmc` — not
+ * free text, and nothing checked that. `DEVICE_ADD` carried up to 255 arbitrary
+ * bytes straight into the roster, from there into the dashboard's devices table
+ * (which builds markup by concatenation) and into the name of a MIDI port
+ * published system-wide. A model of `<img src=x onerror=…>` ran script on the
+ * dashboard, which is same-origin with /api/status and therefore with the
+ * pairing code and the machine's addresses.
+ *
+ * So this is the boundary check: letters, digits, and the few separators real
+ * model names use. Rejecting rather than sanitising, because a name that is not
+ * one of the agreed identifiers is not something to guess the intent of — the
+ * caller counts it as a malformed packet, which is what it is.
+ */
+export function isValidModelName(model: string): boolean {
+  if (model.length === 0) return false;
+  if (encoder.encode(model).length > MAX_MODEL_NAME_BYTES) return false;
+  return /^[A-Za-z0-9][A-Za-z0-9 _.-]*$/.test(model);
+}
+
 // --- DEVICE_ADD ---
 
 /** Body: deviceId, model length, model name. */
@@ -55,7 +83,11 @@ export function readDeviceAdd(body: Uint8Array): DeviceAdd | null {
   if (body.length < 2) return null;
   const len = body[1]!;
   if (body.length < 2 + len) return null;
-  return { deviceId: body[0]!, model: decoder.decode(body.subarray(2, 2 + len)) };
+  const model = decoder.decode(body.subarray(2, 2 + len));
+  // Checked here rather than at the caller so every reader inherits it: this
+  // is the one place a model name crosses from the wire into the bridge.
+  if (!isValidModelName(model)) return null;
+  return { deviceId: body[0]!, model };
 }
 
 // --- DEVICE_REMOVE ---

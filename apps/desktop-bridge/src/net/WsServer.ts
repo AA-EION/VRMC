@@ -28,6 +28,13 @@ export interface WsOptions {
    * thing through `onPeerChange`; only the sum of the two means anything.
    */
   onClientChange?: (clients: number) => void;
+  /**
+   * Where the hosted client is served from, e.g. https://vrmc.eionstudios.com.
+   *
+   * Used only to decide which browser origins may open a WebSocket. Optional so
+   * a bridge configured without a pairing service still serves its dashboard.
+   */
+  siteOrigin?: string;
 }
 
 /**
@@ -88,6 +95,30 @@ export class WsServer implements PacketSink {
     this.wss = wss;
 
     wss.on('connection', (socket, req) => {
+      /*
+       * Refuse a WebSocket opened by a page that is not ours.
+       *
+       * The same-origin policy does not apply to WebSockets: any site in the
+       * user's browser can open one to 127.0.0.1 and, until this, would have
+       * been talking to the bridge — sending MIDI, spawning devices, reading
+       * the roster. The loopback test on the HTTP side never covered this,
+       * because an upgrade is not one of the requests it guards.
+       *
+       * Address is the wrong thing to test here — the connection genuinely is
+       * from the local machine — so the test is on `Origin`, which a browser
+       * sets and a page cannot forge. Absent means a non-browser client, which
+       * is the headset's own transport and every test in this repo.
+       */
+      const origin = req.headers.origin;
+      if (typeof origin === 'string' && !this.originAllowed(origin)) {
+        onLog(
+          `refused a WebSocket from origin ${origin}: only this computer and ` +
+            `${this.options.siteOrigin ?? 'the configured site'} may connect`,
+        );
+        socket.close(1008, 'origin not allowed');
+        return;
+      }
+
       this.clients++;
       this.sockets.add(socket);
       this.options.onClientChange?.(this.clients);
@@ -155,7 +186,21 @@ export class WsServer implements PacketSink {
    */
   private async handleHttp(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const url = new URL(req.url ?? '/', 'http://localhost');
-    const local = isLoopback(req.socket.remoteAddress ?? '');
+    /*
+     * Loopback by address, *and* addressed by a loopback name.
+     *
+     * The address alone is not enough. A site can point a hostname it controls
+     * at 127.0.0.1 — DNS rebinding — and the user's browser then makes what it
+     * considers a same-origin request to that name, which arrives here from
+     * 127.0.0.1 and passes any test based on the peer's address. The site reads
+     * the reply, and the reply is /api/status: the pairing code, the machine's
+     * LAN addresses and its hostname.
+     *
+     * What a rebound request cannot do is carry a loopback `Host`, because the
+     * browser sends the name the page asked for. So both are required.
+     */
+    const local =
+      isLoopback(req.socket.remoteAddress ?? '') && isLoopbackHost(req.headers.host);
 
     // Answered for anyone, including over TLS, so a headset can confirm the
     // bridge is reachable and accept a self-signed certificate before the
@@ -228,6 +273,30 @@ export class WsServer implements PacketSink {
     socket.send(w.finish(clientTime), { binary: true });
   }
 
+  /**
+   * Whether a browser origin may open a WebSocket to this bridge.
+   *
+   * Loopback for the dashboard and for development, and the hosted client's
+   * own origin because that is where the headset's page comes from. Anything
+   * else is some other website, and no other website has business here.
+   */
+  private originAllowed(origin: string): boolean {
+    let parsed: URL;
+    try {
+      parsed = new URL(origin);
+    } catch {
+      return false; // "null" and other opaque origins: a sandboxed frame.
+    }
+    if (parsed.hostname === 'localhost' || isLoopback(parsed.hostname)) return true;
+    const site = this.options.siteOrigin ?? '';
+    if (site === '') return false;
+    try {
+      return new URL(site).origin === parsed.origin;
+    } catch {
+      return false;
+    }
+  }
+
   async close(): Promise<void> {
     this.wss?.clients.forEach((c) => c.terminate());
     this.sockets.clear();
@@ -245,6 +314,27 @@ export class WsServer implements PacketSink {
  * the mapped form has to be recognised too, or the dashboard would refuse the
  * very browser it exists for.
  */
+/**
+ * Whether the `Host` header names this machine rather than some other name
+ * pointed at it. See the note in `handleHttp` about DNS rebinding.
+ *
+ * The port is stripped first — `Host` carries it and the name is what matters.
+ * An IPv6 literal arrives in brackets, which are not part of the address.
+ */
+export function isLoopbackHost(host: string | undefined): boolean {
+  if (host === undefined || host === '') return false;
+  let name = host;
+  if (name.startsWith('[')) {
+    const close = name.indexOf(']');
+    if (close < 0) return false;
+    name = name.slice(1, close);
+  } else {
+    const colon = name.indexOf(':');
+    if (colon >= 0) name = name.slice(0, colon);
+  }
+  return name === 'localhost' || isLoopback(name);
+}
+
 function isLoopback(address: string): boolean {
   if (address === '::1' || address === '127.0.0.1') return true;
   if (address.startsWith('::ffff:')) return isLoopback(address.slice(7));

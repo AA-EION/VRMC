@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-only
 
 import { MAX_LAYOUT_BODY_BYTES, MAX_LAYOUT_NAME_BYTES } from "./constants.js";
+import { isValidModelName } from "./control.js";
 import type { PacketWriter } from "./codec.js";
 import {
   PLACEMENT_BYTES,
@@ -112,6 +113,10 @@ export function readLayoutSave(body: Uint8Array): Layout | null {
     o += PLACEMENT_BYTES;
     const model = readName(body, o);
     if (model === null) return null;
+    // A saved layout is persisted to disk and replayed on every connection, so
+    // an entry's model outlives the packet that carried it. It goes through the
+    // same check `DEVICE_ADD` does rather than a laxer one for being stored.
+    if (!isValidModelName(model.name)) return null;
     o = model.next;
     entries.push({ placement, model: model.name });
   }

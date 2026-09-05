@@ -196,9 +196,22 @@ export class DeviceManager {
      * else's script over a device that cannot answer it.
      */
     const hardware = spec !== null && isHardwareModel(model);
+    /*
+     * One plain port, and what it is called depends on whether we know the
+     * model at all.
+     *
+     * `plainPortName` is --port-name, and it belongs to the VRMC surface — the
+     * one spec'd model that is not hardware. Applying it to *every* non-hardware
+     * model was wrong and was a regression: a model with no spec then opened a
+     * second port called "VRMC", colliding with the real one on the name a DAW
+     * uses to tell them apart. A model we do not recognise names its own port,
+     * as it always did.
+     */
     const portNames = hardware
       ? spec.portNames.map((p: string) => this.portName(spec, p))
-      : [this.options.plainPortName ?? spec?.portNames[0] ?? model];
+      : spec !== null
+        ? [this.options.plainPortName ?? spec.portNames[0] ?? model]
+        : [model];
 
     /*
      * What each endpoint should tell a host about itself.

@@ -227,6 +227,28 @@ const $ = (id) => document.getElementById(id);
 const STATUS = { 0: 'opening', 1: 'ready', 2: 'failed' };
 
 /*
+ * Escape text before it is interpolated into markup.
+ *
+ * Not a precaution — a fix. A device's model name arrives from the headset,
+ * over the wire, and nothing validated it: DEVICE_ADD carries up to 255
+ * arbitrary bytes and they were written straight into the devices table with
+ * innerHTML. A model of "<img src=x onerror=...>" ran script on this page,
+ * which is same-origin with /api/status — the page holding the pairing code
+ * and the machine's LAN addresses.
+ *
+ * The model is bounded and checked at the Router now as well. This is the
+ * second of the two, because the first can only reject what it knows to look
+ * for, and escaping is what makes the rendering correct rather than lucky.
+ */
+const esc = (value) =>
+  String(value)
+    .replaceAll('&', '&amp;')
+    .replaceAll('<', '&lt;')
+    .replaceAll('>', '&gt;')
+    .replaceAll('"', '&quot;')
+    .replaceAll("'", '&#39;');
+
+/*
  * The site as a user would say it aloud: "vrmc.eionstudios.com".
  *
  * URL rather than a regex, and not only because it is clearer. This whole
@@ -286,7 +308,7 @@ async function refresh() {
 
   const scheme = s.secure ? 'wss' : 'ws';
   $('addresses').innerHTML = s.addresses
-    .map((a) => '<div class="addr"><code>' + scheme + '://' + a + ':' + s.wsPort + '</code></div>')
+    .map((a) => '<div class="addr"><code>' + esc(scheme) + '://' + esc(a) + ':' + esc(s.wsPort) + '</code></div>')
     .join('') || '<p class="hint">No LAN address found.</p>';
   $('tlsNote').textContent = s.rtcError
     ? 'Pairing is not listening: ' + s.rtcError
@@ -297,16 +319,18 @@ async function refresh() {
 
   $('devices').innerHTML = s.devices.length
     ? s.devices.map((d) =>
-        '<tr><td>' + d.deviceId + '</td><td>' + d.model +
+        '<tr><td>' + esc(d.deviceId) + '</td><td>' + esc(d.model) +
         '</td><td class="' + (d.status === 1 ? 'ok' : d.status === 2 ? 'bad' : 'muted') + '">' +
-        (d.detail || STATUS[d.status]) + '</td></tr>').join('')
+        esc(d.detail || STATUS[d.status]) + '</td></tr>').join('')
     : '<tr><td colspan="3" class="muted">None. Devices are created from the headset.</td></tr>';
 }
 
 function show(name, result) {
   const line = document.createElement('div');
+  // A self-test detail carries a device's own name back — a failure names the
+  // port it could not open — so it is no safer than the roster is.
   line.innerHTML = '<span class="' + (result.ok ? 'ok' : 'bad') + '">' +
-    (result.ok ? '✓' : '✗') + '</span><span>' + name + ' — ' + result.detail + '</span>';
+    (result.ok ? '✓' : '✗') + '</span><span>' + esc(name) + ' — ' + esc(result.detail) + '</span>';
   $('results').prepend(line);
 }
 
